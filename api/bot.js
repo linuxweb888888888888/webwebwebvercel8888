@@ -1,7 +1,7 @@
 const express = require('express');
 const ccxt = require('ccxt');
 const mongoose = require('mongoose');
-const bcrypt = require('bcryptjs');
+const bcrypt = require('bcryptjs'); // <--- CHANGED TO bcryptjs
 const jwt = require('jsonwebtoken');
 const path = require('path');
 
