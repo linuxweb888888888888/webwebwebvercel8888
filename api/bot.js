@@ -6,17 +6,30 @@ const jwt = require('jsonwebtoken');
 const path = require('path');
 
 const PORT = process.env.PORT || 3000;
+// SECURE ENV VARIABLES FOR VERCEL
 const JWT_SECRET = process.env.JWT_SECRET || 'super_secret_jwt_key_change_this_in_production';
+const MONGO_URI = process.env.MONGO_URI;
 
 // ==========================================
-// 1. MONGODB DATABASE SETUP
+// 1. MONGODB DATABASE SETUP (Serverless Safe)
 // ==========================================
-const MONGO_URI = 'mongodb+srv://web88888888888888_db_user:ZETrZHXzaxoekjkm@clusterweb8888.l0rv6hv.mongodb.net/botdb?appName=Clusterweb8888';
+let isConnected = false;
 
-// OPTIMIZATION: Limited connection pool size to save base RAM on 512MB VPS
-mongoose.connect(MONGO_URI, { maxPoolSize: 5 })
-    .then(() => console.log('✅ Connected to MongoDB successfully!'))
-    .catch(err => console.error('❌ MongoDB Connection Error:', err));
+const connectDB = async () => {
+    if (isConnected) return;
+    if (!MONGO_URI) {
+        console.error('❌ MONGO_URI is missing. Please add it in Vercel Environment Variables.');
+        return;
+    }
+    try {
+        const db = await mongoose.connect(MONGO_URI);
+        isConnected = db.connections[0].readyState === 1;
+        console.log('✅ Connected to MongoDB successfully!');
+    } catch (err) {
+        console.error('❌ MongoDB Connection Error:', err);
+    }
+};
+connectDB();
 
 const UserSchema = new mongoose.Schema({
     username: { type: String, required: true, unique: true },
@@ -48,10 +61,10 @@ const SubAccountSchema = new mongoose.Schema({
 
 const SettingsSchema = new mongoose.Schema({
     userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, unique: true },
-    globalTargetPnl: { type: Number, default: 0 },       // Total $ Target to close ALL
-    globalTrailingPnl: { type: Number, default: 0 },     // Trailing drop $ from peak
-    smartOffsetNetProfit: { type: Number, default: 0 },  // Minimum $ to close Biggest Winner + Biggest Loser
-    smartOffsetStopLoss: { type: Number, default: 0 },   // Maximum $ Loss to close Biggest Winner + Biggest Loser
+    globalTargetPnl: { type: Number, default: 0 },       
+    globalTrailingPnl: { type: Number, default: 0 },     
+    smartOffsetNetProfit: { type: Number, default: 0 },  
+    smartOffsetStopLoss: { type: Number, default: 0 },   
     subAccounts: [SubAccountSchema]
 });
 const Settings = mongoose.model('Settings', SettingsSchema);
@@ -80,7 +93,7 @@ const OffsetRecord = mongoose.model('OffsetRecord', OffsetRecordSchema);
 // 2. MULTI-PROFILE BOT ENGINE STATE
 // ==========================================
 const activeBots = new Map();
-const globalPnlPeaks = new Map(); // Tracks the highest $ peak for global trailing
+const globalPnlPeaks = new Map(); 
 
 function logForProfile(profileId, msg) {
     console.log(`[Profile: ${profileId}] ${msg}`);
@@ -124,7 +137,6 @@ function startBot(userId, subAccount) {
     let isProcessing = false;
     let lastError = '';
 
-    // OPTIMIZATION: Changed to 5000ms. Eases 0.1 CPU bottleneck by reducing loop frequency
     const intervalId = setInterval(async () => {
         if (isProcessing) return; 
         isProcessing = true;
@@ -144,16 +156,12 @@ function startBot(userId, subAccount) {
         }
 
         try {
-            // 1. BATCH FETCH DATA (Fixes rate limits & missing cycles)
-            if (!exchange.markets) await exchange.loadMarkets().catch(()=>{});
-
             const symbolsToFetch = activeCoins.map(c => c.symbol);
             const [allTickers, allPositions] = await Promise.all([
-                exchange.fetchTickers().catch(e => { throw new Error('Tickers: ' + e.message); }),
+                exchange.fetchTickers(symbolsToFetch).catch(e => { throw new Error('Tickers: ' + e.message); }),
                 exchange.fetchPositions(symbolsToFetch).catch(e => { throw new Error('Positions: ' + e.message); })
             ]);
 
-            // 2. PROCESS EACH COIN SEQUENTIALLY
             for (let coin of activeCoins) {
                 try {
                     if (!state.coinStates[coin.symbol]) {
@@ -205,7 +213,7 @@ function startBot(userId, subAccount) {
                         if (Date.now() - cState.zeroRoiStartTime > 120000) {
                             logForProfile(profileId, `[${coin.symbol}] 💤 Idle too long! Closing position.`);
                             const orderSide = activeSide === 'long' ? 'sell' : 'buy';
-                            await exchange.createOrder(coin.symbol, 'market', orderSide, cState.contracts, undefined, { offset: 'close', reduceOnly: true, lever_rate: currentSettings.leverage });
+                            await exchange.createOrder(coin.symbol, 'market', orderSide, cState.contracts, undefined, { offset: 'close', reduceOnly: true, lever_rate: currentSettings.leverage }).catch(()=>{});
                             
                             IdleRecord.create({ userId, profileName: currentSettings.name, symbol: coin.symbol, time: new Date().toLocaleTimeString() }).catch(()=>{});
                             
@@ -235,7 +243,7 @@ function startBot(userId, subAccount) {
                         logForProfile(profileId, `[${coin.symbol}] ${reason} hit! (${cState.currentRoi.toFixed(2)}%). Closing ${cState.contracts} contracts.`);
                         
                         const orderSide = activeSide === 'long' ? 'sell' : 'buy';
-                        await exchange.createOrder(coin.symbol, 'market', orderSide, cState.contracts, undefined, { offset: 'close', reduceOnly: true, lever_rate: currentSettings.leverage });
+                        await exchange.createOrder(coin.symbol, 'market', orderSide, cState.contracts, undefined, { offset: 'close', reduceOnly: true, lever_rate: currentSettings.leverage }).catch(()=>{});
                         await new Promise(res => setTimeout(res, 500)); 
 
                         currentSettings.realizedPnl = (currentSettings.realizedPnl || 0) + unrealizedPnl;
@@ -259,7 +267,7 @@ function startBot(userId, subAccount) {
                         } else {
                             logForProfile(profileId, `[${coin.symbol}] ⚡ Executing DCA: Buying ${reqQty} contracts at ~${cState.currentPrice}`);
                             const orderSide = activeSide === 'long' ? 'buy' : 'sell';
-                            await exchange.createOrder(coin.symbol, 'market', orderSide, reqQty, undefined, { offset: 'open', lever_rate: currentSettings.leverage });
+                            await exchange.createOrder(coin.symbol, 'market', orderSide, reqQty, undefined, { offset: 'open', lever_rate: currentSettings.leverage }).catch(()=>{});
                             
                             cState.lastDcaTime = Date.now(); 
                         }
@@ -279,7 +287,7 @@ function startBot(userId, subAccount) {
         } finally {
             isProcessing = false;
         }
-    }, 5000); // 5 seconds optimal for 0.1 vCPU
+    }, 3000);
 
     activeBots.set(profileId, { userId: String(userId), settings: subAccount, state, exchange, intervalId });
     logForProfile(profileId, `🚀 Engine Started for: ${subAccount.name}`);
@@ -294,18 +302,16 @@ function stopBot(profileId) {
 }
 
 // =========================================================================
-// 5. GLOBAL PROFIT LOGIC: "SMART OFFSET" & "PORTFOLIO CLOSE"
+// 5. GLOBAL PROFIT LOGIC
 // =========================================================================
-// OPTIMIZATION: Increased to 6000ms offset interval so it doesn't collide with 5000ms loop
 setInterval(async () => {
     try {
-        // OPTIMIZATION: .lean() drastically reduces RAM consumption by bypassing Mongoose object wrapper
-        const usersSettings = await Settings.find({}).lean();
+        await connectDB(); // Ensure DB is connected in Serverless Loop
+        const usersSettings = await Settings.find({});
         
         for (let userSetting of usersSettings) {
             const dbUserId = String(userSetting.userId);
             
-            // User Goals
             const globalTargetPnl = parseFloat(userSetting.globalTargetPnl) || 0;
             const globalTrailingPnl = parseFloat(userSetting.globalTrailingPnl) || 0;
             const smartOffsetNetProfit = parseFloat(userSetting.smartOffsetNetProfit) || 0;
@@ -315,7 +321,6 @@ setInterval(async () => {
             let activeCandidates = [];
             let firstProfileId = null; 
 
-            // Gather absolute live data across all user profiles
             for (let [profileId, botData] of activeBots.entries()) {
                 if (botData.userId !== dbUserId) continue;
                 if (!firstProfileId) firstProfileId = profileId;
@@ -337,12 +342,7 @@ setInterval(async () => {
 
             if (!firstProfileId || activeCandidates.length === 0) continue;
 
-            // -----------------------------------------------------------------
-            // LOGIC A: SMART WINNER/LOSER OFFSET (Ensures Profit > Loss)
-            // Pairs exactly: Rank N & Rank N/2, Rank N-1 & Rank N/2-1, etc.
-            // -----------------------------------------------------------------
             if ((smartOffsetNetProfit > 0 || smartOffsetStopLoss < 0) && activeCandidates.length >= 2) {
-                // Sort array highest PNL to lowest PNL
                 activeCandidates.sort((a, b) => b.unrealizedPnl - a.unrealizedPnl); 
                 
                 let offsetExecuted = false;
@@ -356,7 +356,6 @@ setInterval(async () => {
                     const biggestWinner = activeCandidates[winnerIndex];
                     const biggestLoser = activeCandidates[loserIndex];
 
-                    // Evaluating as long as the top coin is > 0
                     if (biggestWinner.unrealizedPnl > 0) {
                         const netResult = biggestWinner.unrealizedPnl + biggestLoser.unrealizedPnl;
                         
@@ -374,7 +373,6 @@ setInterval(async () => {
                         if (triggerOffset) {
                             logForProfile(firstProfileId, `⚖️ SMART OFFSET [${reason}]: Paired Rank ${loserIndex + 1} & ${winnerIndex + 1} - Closing Winner [${biggestWinner.symbol} (+${biggestWinner.unrealizedPnl.toFixed(4)})] & Loser [${biggestLoser.symbol} (${biggestLoser.unrealizedPnl.toFixed(4)})]. NET PROFIT: ${netResult >= 0 ? '+' : ''}$${netResult.toFixed(4)}`);
                             
-                            // Log Offset to Database for UI History
                             OffsetRecord.create({
                                 userId: dbUserId,
                                 winnerSymbol: biggestWinner.symbol,
@@ -384,14 +382,12 @@ setInterval(async () => {
                                 netProfit: netResult
                             }).catch(()=>{});
 
-                            // Close Winner
                             const wOrderSide = biggestWinner.side === 'long' ? 'sell' : 'buy';
                             await biggestWinner.exchange.createOrder(biggestWinner.symbol, 'market', wOrderSide, biggestWinner.contracts, undefined, { offset: 'close', reduceOnly: true, lever_rate: biggestWinner.leverage }).catch(()=>{});
                             biggestWinner.subAccount.realizedPnl = (biggestWinner.subAccount.realizedPnl || 0) + biggestWinner.unrealizedPnl;
                             await Settings.updateOne({ "subAccounts._id": biggestWinner.subAccount._id }, { $set: { "subAccounts.$.realizedPnl": biggestWinner.subAccount.realizedPnl } }).catch(()=>{});
                             activeBots.get(biggestWinner.profileId).state.coinStates[biggestWinner.symbol].contracts = 0;
 
-                            // Close Loser
                             const lOrderSide = biggestLoser.side === 'long' ? 'sell' : 'buy';
                             await biggestLoser.exchange.createOrder(biggestLoser.symbol, 'market', lOrderSide, biggestLoser.contracts, undefined, { offset: 'close', reduceOnly: true, lever_rate: biggestLoser.leverage }).catch(()=>{});
                             biggestLoser.subAccount.realizedPnl = (biggestLoser.subAccount.realizedPnl || 0) + biggestLoser.unrealizedPnl;
@@ -403,12 +399,9 @@ setInterval(async () => {
                     }
                 }
                 
-                if (offsetExecuted) continue; // Skip Portfolio close this cycle to avoid conflicts
+                if (offsetExecuted) continue; 
             }
 
-            // -----------------------------------------------------------------
-            // LOGIC B: GLOBAL PORTFOLIO TAKE PROFIT
-            // -----------------------------------------------------------------
             if (globalTargetPnl > 0) {
                 let executeGlobalClose = false;
 
@@ -422,7 +415,6 @@ setInterval(async () => {
                 
                 if (globalPnlPeaks.has(dbUserId)) {
                     const peak = globalPnlPeaks.get(dbUserId);
-                    // If we drop by the trailing amount from the peak, execute!
                     if ((peak - globalUnrealized) >= globalTrailingPnl) {
                         executeGlobalClose = true;
                     }
@@ -432,7 +424,6 @@ setInterval(async () => {
                     logForProfile(firstProfileId, `🌍 GLOBAL PORTFOLIO CLOSE TRIGGERED! Securing Total Portfolio Net Profit: $${globalUnrealized.toFixed(4)}`);
                     globalPnlPeaks.delete(dbUserId); 
                     
-                    // Close ALL active coins simultaneously
                     for (let pos of activeCandidates) {
                         try {
                             const orderSide = pos.side === 'long' ? 'sell' : 'buy';
@@ -456,18 +447,20 @@ setInterval(async () => {
     } catch (err) {
         console.error("Global Profit Monitor Error:", err);
     }
-}, 6000); // 6 seconds offset from main 5s bot
+}, 4000); 
 
-
+// Startup Initialization
 setTimeout(async () => {
-    // OPTIMIZATION: .lean() limits Mongoose overhead on boot
-    const activeSettings = await Settings.find({}).lean();
-    activeSettings.forEach(s => {
-        if (s.subAccounts) {
-            s.subAccounts.forEach(sub => { if (sub.coins && sub.coins.some(c => c.botActive)) startBot(s.userId.toString(), sub); });
-        }
-    });
-}, 5000);
+    try {
+        await connectDB();
+        const activeSettings = await Settings.find({});
+        activeSettings.forEach(s => {
+            if (s.subAccounts) {
+                s.subAccounts.forEach(sub => { if (sub.coins && sub.coins.some(c => c.botActive)) startBot(s.userId.toString(), sub); });
+            }
+        });
+    } catch(e) {}
+}, 3000);
 
 // ==========================================
 // 6. EXPRESS API & AUTHENTICATION
@@ -475,7 +468,8 @@ setTimeout(async () => {
 const app = express();
 app.use(express.json());
 
-const authMiddleware = (req, res, next) => {
+const authMiddleware = async (req, res, next) => {
+    await connectDB();
     const token = req.headers.authorization?.split(' ')[1];
     if (!token) return res.status(401).json({ error: 'Unauthorized' });
 
@@ -486,10 +480,8 @@ const authMiddleware = (req, res, next) => {
     });
 };
 
-// VERCEL WAKE UP ROUTE
-app.get('/api/ping', (req, res) => res.json({ status: 'Bot is awake!' }));
-
 app.post('/api/register', async (req, res) => {
+    await connectDB();
     try {
         const { username, password } = req.body;
         const hashedPassword = await bcrypt.hash(password, 10);
@@ -502,22 +494,23 @@ app.post('/api/register', async (req, res) => {
 });
 
 app.post('/api/login', async (req, res) => {
+    await connectDB();
     const { username, password } = req.body;
-    const user = await User.findOne({ username }).lean();
+    const user = await User.findOne({ username });
     if (!user || !(await bcrypt.compare(password, user.password))) return res.status(401).json({ error: 'Invalid credentials' });
     const token = jwt.sign({ userId: user._id }, JWT_SECRET, { expiresIn: '7d' });
     res.json({ token });
 });
 
 app.get('/api/settings', authMiddleware, async (req, res) => {
-    const settings = await Settings.findOne({ userId: req.userId }).lean();
+    const settings = await Settings.findOne({ userId: req.userId });
     res.json(settings);
 });
 
 app.post('/api/settings', authMiddleware, async (req, res) => {
     const { subAccounts, globalTargetPnl, globalTrailingPnl, smartOffsetNetProfit, smartOffsetStopLoss } = req.body;
     
-    const existingSettings = await Settings.findOne({ userId: req.userId }).lean();
+    const existingSettings = await Settings.findOne({ userId: req.userId });
     if (existingSettings && existingSettings.subAccounts) {
         subAccounts.forEach(sub => {
             sub.realizedPnl = 0; 
@@ -535,7 +528,7 @@ app.post('/api/settings', authMiddleware, async (req, res) => {
     });
 
     let parsedStopLoss = parseFloat(smartOffsetStopLoss) || 0;
-    if (parsedStopLoss > 0) parsedStopLoss = -parsedStopLoss; // Automatically force negative
+    if (parsedStopLoss > 0) parsedStopLoss = -parsedStopLoss; 
 
     const updated = await Settings.findOneAndUpdate(
         { userId: req.userId }, 
@@ -547,7 +540,7 @@ app.post('/api/settings', authMiddleware, async (req, res) => {
             smartOffsetStopLoss: parsedStopLoss
         }, 
         { returnDocument: 'after' }
-    ).lean();
+    );
 
     const activeSubIds = [];
     if (updated.subAccounts) {
@@ -571,21 +564,19 @@ app.post('/api/settings', authMiddleware, async (req, res) => {
 });
 
 app.get('/api/status', authMiddleware, async (req, res) => {
-    const settings = await Settings.findOne({ userId: req.userId }).lean();
+    const settings = await Settings.findOne({ userId: req.userId });
     const userStatuses = {};
     for (let [profileId, botData] of activeBots.entries()) {
         if (botData.userId === req.userId.toString()) userStatuses[profileId] = botData.state;
     }
     
-    // OPTIMIZATION: Reduced limit to 50 & added .lean() to prevent large API payload processing
-    const dbIdleRecords = await IdleRecord.find({ userId: req.userId }).sort({ timestamp: -1 }).limit(50).lean();
+    const dbIdleRecords = await IdleRecord.find({ userId: req.userId }).sort({ timestamp: -1 }).limit(100);
 
     res.json({ states: userStatuses, subAccounts: settings ? settings.subAccounts : [], idleRecords: dbIdleRecords });
 });
 
 app.get('/api/offsets', authMiddleware, async (req, res) => {
-    // OPTIMIZATION: Reduced limit to 50 & added .lean()
-    const records = await OffsetRecord.find({ userId: req.userId }).sort({ timestamp: -1 }).limit(50).lean();
+    const records = await OffsetRecord.find({ userId: req.userId }).sort({ timestamp: -1 }).limit(100);
     res.json(records);
 });
 
@@ -599,7 +590,7 @@ app.get('/', (req, res) => {
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>HTX Multi-User Bot</title>
+        <title>HTX Multi-User Bot (Vercel Build)</title>
         <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&display=swap" rel="stylesheet">
         <style>
             body { font-family: 'Roboto', sans-serif; background: #f4f6f8; color: #333; margin: 0; padding: 20px; }
@@ -834,8 +825,7 @@ app.get('/', (req, res) => {
                     document.getElementById('auth-view').style.display = 'none';
                     document.getElementById('dashboard-view').style.display = 'block';
                     fetchSettings();
-                    // OPTIMIZATION: Increased UI polling from 2s to 5s. Massive CPU/RAM saver for the Express server.
-                    statusInterval = setInterval(loadStatus, 5000);
+                    statusInterval = setInterval(loadStatus, 2000);
                 } else {
                     document.getElementById('auth-view').style.display = 'block';
                     document.getElementById('dashboard-view').style.display = 'none';
@@ -1276,17 +1266,8 @@ app.get('/', (req, res) => {
     `);
 });
 
-// ==================================================
-// VERCEL COMPATIBILITY: Export instead of listen
-// ==================================================
-if (process.env.NODE_ENV !== 'production' && !process.env.VERCEL) {
-    app.listen(PORT, () => {
-        console.log(`\n=================================================`);
-        console.log(`🚀 Multi-Coin HTX Smart-Profit Bot is running!`);
-        console.log(`🌐 Open your browser and go to: http://localhost:${PORT}`);
-        console.log(`=================================================\n`);
-    });
+// VERCEL EXPORT: Replaces app.listen()
+if (process.env.NODE_ENV !== 'production') {
+    app.listen(PORT, () => console.log(`🚀 Running locally on http://localhost:${PORT}`));
 }
-
-// Export the Express API for Vercel Serverless
 module.exports = app;
