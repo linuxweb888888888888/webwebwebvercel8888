@@ -1,5 +1,3 @@
-//web8888
-
 const express = require('express');
 const ccxt = require('ccxt');
 const mongoose = require('mongoose');
@@ -63,7 +61,9 @@ const SettingsSchema = new mongoose.Schema({
     globalTargetPnl: { type: Number, default: 0 },       
     globalTrailingPnl: { type: Number, default: 0 },     
     smartOffsetNetProfit: { type: Number, default: 0 },  
-    smartOffsetStopLoss: { type: Number, default: 0 },   
+    smartOffsetStopLoss: { type: Number, default: 0 },
+    smartOffsetNetProfit2: { type: Number, default: 0 }, 
+    smartOffsetStopLoss2: { type: Number, default: 0 },   
     subAccounts: [SubAccountSchema]
 });
 const Settings = mongoose.model('Settings', SettingsSchema);
@@ -278,6 +278,8 @@ setInterval(async () => {
             const globalTrailingPnl = parseFloat(userSetting.globalTrailingPnl) || 0;
             const smartOffsetNetProfit = parseFloat(userSetting.smartOffsetNetProfit) || 0;
             const smartOffsetStopLoss = parseFloat(userSetting.smartOffsetStopLoss) || 0;
+            const smartOffsetNetProfit2 = parseFloat(userSetting.smartOffsetNetProfit2) || 0;
+            const smartOffsetStopLoss2 = parseFloat(userSetting.smartOffsetStopLoss2) || 0;
             
             let globalUnrealized = 0;
             let activeCandidates = [];
@@ -304,11 +306,12 @@ setInterval(async () => {
 
             if (!firstProfileId || activeCandidates.length === 0) continue;
 
-            // SMART OFFSET - ALWAYS EVALUATE IF >= 2 COINS (For Best SL/TP Performance)
+            let offsetExecuted = false;
+
+            // SMART OFFSET V1 (HALF SPLIT)
             if ((smartOffsetNetProfit > 0 || smartOffsetStopLoss < 0) && activeCandidates.length >= 2) {
                 activeCandidates.sort((a, b) => b.unrealizedPnl - a.unrealizedPnl); 
                 
-                let offsetExecuted = false;
                 const totalCoins = activeCandidates.length;
                 const totalPairs = Math.floor(totalCoins / 2);
 
@@ -359,9 +362,68 @@ setInterval(async () => {
                         offsetExecuted = true;
                     }
                 }
-                
-                if (offsetExecuted) continue; 
             }
+
+            // SMART OFFSET V2 (ENDS / OUTSIDE-IN)
+            if (!offsetExecuted && (smartOffsetNetProfit2 > 0 || smartOffsetStopLoss2 < 0) && activeCandidates.length >= 2) {
+                // List is already sorted descending by unrealizedPnl
+                
+                let offsetExecuted2 = false;
+                const totalCoins = activeCandidates.length;
+                const totalPairs = Math.floor(totalCoins / 2);
+
+                for (let i = 0; i < totalPairs; i++) {
+                    const winnerIndex = i; // Rank 1, 2, 3...
+                    const loserIndex = totalCoins - 1 - i; // Rank N, N-1, N-2...
+
+                    const biggestWinner = activeCandidates[winnerIndex];
+                    const biggestLoser = activeCandidates[loserIndex];
+
+                    const netResult = biggestWinner.unrealizedPnl + biggestLoser.unrealizedPnl;
+                    
+                    let triggerOffset = false;
+                    let reason = '';
+
+                    if (smartOffsetNetProfit2 > 0 && netResult >= smartOffsetNetProfit2) {
+                        triggerOffset = true;
+                        reason = 'TAKE PROFIT (V2)';
+                    } else if (smartOffsetStopLoss2 < 0 && netResult <= smartOffsetStopLoss2) {
+                        triggerOffset = true;
+                        reason = 'STOP LOSS (V2)';
+                    }
+                    
+                    if (triggerOffset) {
+                        logForProfile(firstProfileId, `⚖️ SMART OFFSET V2 [${reason}]: Paired Rank ${loserIndex + 1} & ${winnerIndex + 1} - Closing Winner [${biggestWinner.symbol} (${biggestWinner.unrealizedPnl.toFixed(4)})] & Loser [${biggestLoser.symbol} (${biggestLoser.unrealizedPnl.toFixed(4)})]. NET PROFIT: ${netResult >= 0 ? '+' : ''}$${netResult.toFixed(4)}`);
+                        
+                        OffsetRecord.create({
+                            userId: dbUserId,
+                            winnerSymbol: biggestWinner.symbol,
+                            winnerPnl: biggestWinner.unrealizedPnl,
+                            loserSymbol: biggestLoser.symbol,
+                            loserPnl: biggestLoser.unrealizedPnl,
+                            netProfit: netResult
+                        }).catch(()=>{});
+
+                        const wOrderSide = biggestWinner.side === 'long' ? 'sell' : 'buy';
+                        await biggestWinner.exchange.createOrder(biggestWinner.symbol, 'market', wOrderSide, biggestWinner.contracts, undefined, { offset: 'close', reduceOnly: true, lever_rate: biggestWinner.leverage }).catch(()=>{});
+                        biggestWinner.subAccount.realizedPnl = (biggestWinner.subAccount.realizedPnl || 0) + biggestWinner.unrealizedPnl;
+                        await Settings.updateOne({ "subAccounts._id": biggestWinner.subAccount._id }, { $set: { "subAccounts.$.realizedPnl": biggestWinner.subAccount.realizedPnl } }).catch(()=>{});
+                        activeBots.get(biggestWinner.profileId).state.coinStates[biggestWinner.symbol].contracts = 0;
+
+                        const lOrderSide = biggestLoser.side === 'long' ? 'sell' : 'buy';
+                        await biggestLoser.exchange.createOrder(biggestLoser.symbol, 'market', lOrderSide, biggestLoser.contracts, undefined, { offset: 'close', reduceOnly: true, lever_rate: biggestLoser.leverage }).catch(()=>{});
+                        biggestLoser.subAccount.realizedPnl = (biggestLoser.subAccount.realizedPnl || 0) + biggestLoser.unrealizedPnl;
+                        await Settings.updateOne({ "subAccounts._id": biggestLoser.subAccount._id }, { $set: { "subAccounts.$.realizedPnl": biggestLoser.subAccount.realizedPnl } }).catch(()=>{});
+                        activeBots.get(biggestLoser.profileId).state.coinStates[biggestLoser.symbol].contracts = 0;
+                        
+                        offsetExecuted2 = true;
+                    }
+                }
+                
+                if (offsetExecuted2) continue; 
+            }
+
+            if (offsetExecuted) continue;
 
             if (globalTargetPnl > 0) {
                 let executeGlobalClose = false;
@@ -452,7 +514,7 @@ app.post('/api/register', async (req, res) => {
         const { username, password } = req.body;
         const hashedPassword = await bcrypt.hash(password, 10);
         const user = await User.create({ username, password: hashedPassword });
-        await Settings.create({ userId: user._id, subAccounts: [], globalTargetPnl: 0, globalTrailingPnl: 0, smartOffsetNetProfit: 0, smartOffsetStopLoss: 0 });
+        await Settings.create({ userId: user._id, subAccounts: [], globalTargetPnl: 0, globalTrailingPnl: 0, smartOffsetNetProfit: 0, smartOffsetStopLoss: 0, smartOffsetNetProfit2: 0, smartOffsetStopLoss2: 0 });
         res.json({ success: true, message: 'Registration successful!' });
     } catch (err) {
         res.status(400).json({ error: 'Username already exists or invalid data.' });
@@ -474,7 +536,7 @@ app.get('/api/settings', authMiddleware, async (req, res) => {
 });
 
 app.post('/api/settings', authMiddleware, async (req, res) => {
-    const { subAccounts, globalTargetPnl, globalTrailingPnl, smartOffsetNetProfit, smartOffsetStopLoss } = req.body;
+    const { subAccounts, globalTargetPnl, globalTrailingPnl, smartOffsetNetProfit, smartOffsetStopLoss, smartOffsetNetProfit2, smartOffsetStopLoss2 } = req.body;
     
     const existingSettings = await Settings.findOne({ userId: req.userId });
     if (existingSettings && existingSettings.subAccounts) {
@@ -496,6 +558,9 @@ app.post('/api/settings', authMiddleware, async (req, res) => {
     let parsedStopLoss = parseFloat(smartOffsetStopLoss) || 0;
     if (parsedStopLoss > 0) parsedStopLoss = -parsedStopLoss; 
 
+    let parsedStopLoss2 = parseFloat(smartOffsetStopLoss2) || 0;
+    if (parsedStopLoss2 > 0) parsedStopLoss2 = -parsedStopLoss2; 
+
     const updated = await Settings.findOneAndUpdate(
         { userId: req.userId }, 
         { 
@@ -503,7 +568,9 @@ app.post('/api/settings', authMiddleware, async (req, res) => {
             globalTargetPnl: parseFloat(globalTargetPnl) || 0, 
             globalTrailingPnl: parseFloat(globalTrailingPnl) || 0,
             smartOffsetNetProfit: parseFloat(smartOffsetNetProfit) || 0,
-            smartOffsetStopLoss: parsedStopLoss
+            smartOffsetStopLoss: parsedStopLoss,
+            smartOffsetNetProfit2: parseFloat(smartOffsetNetProfit2) || 0,
+            smartOffsetStopLoss2: parsedStopLoss2
         }, 
         { returnDocument: 'after' }
     );
@@ -610,7 +677,8 @@ app.get('/', (req, res) => {
                 <h1>HTX Trading Bot</h1>
                 <div style="display:flex; gap:12px;">
                     <button class="btn-blue" style="margin:0; width:auto; padding: 8px 16px;" onclick="switchTab('main')">Dashboard</button>
-                    <button class="btn-logout" style="margin:0; width:auto;" onclick="switchTab('offsets')">Smart Offsets</button>
+                    <button class="btn-logout" style="margin:0; width:auto;" onclick="switchTab('offsets')">Smart Offsets (Half)</button>
+                    <button class="btn-logout" style="margin:0; width:auto; border-color: #1a73e8; color: #1a73e8;" onclick="switchTab('offsets2')">Smart Offsets V2 (Ends)</button>
                     <button class="btn-logout" style="margin:0; width:auto;" onclick="logout()">Logout</button>
                 </div>
             </div>
@@ -626,6 +694,37 @@ app.get('/', (req, res) => {
                 <div class="panel">
                     <h2 style="color: #1e8e3e;">Executed Smart Offsets History</h2>
                     <div id="offsetTableContainer" style="margin-top: 20px;">Loading historical offset data...</div>
+                </div>
+            </div>
+
+            <!-- SMART OFFSETS V2 (ENDS) TAB -->
+            <div id="offset2-tab" style="display:none;">
+                <div class="panel">
+                    <h2>Smart Offsets V2 Settings (Ends Pairing: 1 & N)</h2>
+                    <div style="background: #e8f0fe; padding: 12px; border-radius: 6px; margin-bottom: 16px; border: 1px solid #dadce0;">
+                        <div style="margin-top: 12px;">
+                            <label style="margin-top:0;">Manual Offset Net Profit Target V2 ($)</label>
+                            <p style="font-size:0.75em; color:#5f6368; margin-top:2px; line-height:1.4;">Pairs Rank 1 (Winner) & Rank N (Loser), Rank 2 & Rank N-1. Closes BOTH if Net PNL >= this amount.</p>
+                            <input type="number" step="0.1" id="smartOffsetNetProfit2" placeholder="e.g. 1.00 (0 = Disabled)">
+                        </div>
+                        <div style="margin-top: 12px;">
+                            <label style="margin-top:0;">Manual Offset Stop Loss V2 ($)</label>
+                            <p style="font-size:0.75em; color:#5f6368; margin-top:2px; line-height:1.4;">Always evaluates! If the paired coins' Net PNL drops to or below this negative amount, it closes BOTH.</p>
+                            <input type="number" step="0.1" id="smartOffsetStopLoss2" placeholder="e.g. -2.00 (0 = Disabled)">
+                        </div>
+                        <button class="btn-blue" style="margin-top:16px;" onclick="saveGlobalSettings()">Save Global Offset V2 Settings</button>
+                    </div>
+                </div>
+
+                <div class="panel">
+                    <h2 style="color: #1a73e8;">Live Paired Trades V2 (Ends Pairing)</h2>
+                    <p style="font-size:0.85em; color:#5f6368; margin-top:-8px; margin-bottom:16px;">Real-time pairings from ends exactly like this: Rank 1 & 10, 2 & 9, 3 & 8, 4 & 7, etc. Evaluates Net PNL to ensure Stop Loss or Target triggers.</p>
+                    <div id="liveOffsetsContainer2">Waiting for live data...</div>
+                </div>
+                
+                <div class="panel">
+                    <h2 style="color: #1e8e3e;">Executed Smart Offsets History</h2>
+                    <div id="offsetTableContainer2" style="margin-top: 20px;">Loading historical offset data...</div>
                 </div>
             </div>
 
@@ -658,12 +757,12 @@ app.get('/', (req, res) => {
                                 </div>
                             </div>
                             <div style="margin-top: 12px;">
-                                <label style="margin-top:0;">Manual Offset Net Profit Target ($)</label>
-                                <p style="font-size:0.75em; color:#5f6368; margin-top:2px; line-height:1.4;">Pairs Rank 1 (Winner) & Rank N (Loser). Closes BOTH if Net PNL >= this amount.</p>
+                                <label style="margin-top:0;">Manual Offset Net Profit Target V1 ($)</label>
+                                <p style="font-size:0.75em; color:#5f6368; margin-top:2px; line-height:1.4;">Pairs Rank N & Rank N/2. Closes BOTH if Net PNL >= this amount.</p>
                                 <input type="number" step="0.1" id="smartOffsetNetProfit" placeholder="e.g. 1.00 (0 = Disabled)">
                             </div>
                             <div style="margin-top: 12px;">
-                                <label style="margin-top:0;">Manual Offset Stop Loss ($)</label>
+                                <label style="margin-top:0;">Manual Offset Stop Loss V1 ($)</label>
                                 <p style="font-size:0.75em; color:#5f6368; margin-top:2px; line-height:1.4;">Always evaluates! If the paired coins' Net PNL drops to or below this negative amount, it closes BOTH.</p>
                                 <input type="number" step="0.1" id="smartOffsetStopLoss" placeholder="e.g. -2.00 (0 = Disabled)">
                             </div>
@@ -771,6 +870,8 @@ app.get('/', (req, res) => {
             let myGlobalTrailingPnl = 0;
             let mySmartOffsetNetProfit = 0;
             let mySmartOffsetStopLoss = 0;
+            let mySmartOffsetNetProfit2 = 0;
+            let mySmartOffsetStopLoss2 = 0;
             let currentProfileIndex = -1;
             let myCoins = [];
             
@@ -792,11 +893,15 @@ app.get('/', (req, res) => {
             function switchTab(tab) {
                 document.getElementById('main-tab').style.display = 'none';
                 document.getElementById('offset-tab').style.display = 'none';
+                document.getElementById('offset2-tab').style.display = 'none';
 
                 if (tab === 'main') {
                     document.getElementById('main-tab').style.display = 'block';
                 } else if (tab === 'offsets') {
                     document.getElementById('offset-tab').style.display = 'block';
+                    loadOffsets();
+                } else if (tab === 'offsets2') {
+                    document.getElementById('offset2-tab').style.display = 'block';
                     loadOffsets();
                 }
             }
@@ -836,11 +941,15 @@ app.get('/', (req, res) => {
                 myGlobalTrailingPnl = config.globalTrailingPnl || 0;
                 mySmartOffsetNetProfit = config.smartOffsetNetProfit || 0;
                 mySmartOffsetStopLoss = config.smartOffsetStopLoss || 0;
+                mySmartOffsetNetProfit2 = config.smartOffsetNetProfit2 || 0;
+                mySmartOffsetStopLoss2 = config.smartOffsetStopLoss2 || 0;
                 
                 document.getElementById('globalTargetPnl').value = myGlobalTargetPnl;
                 document.getElementById('globalTrailingPnl').value = myGlobalTrailingPnl;
                 document.getElementById('smartOffsetNetProfit').value = mySmartOffsetNetProfit;
                 document.getElementById('smartOffsetStopLoss').value = mySmartOffsetStopLoss;
+                document.getElementById('smartOffsetNetProfit2').value = mySmartOffsetNetProfit2;
+                document.getElementById('smartOffsetStopLoss2').value = mySmartOffsetStopLoss2;
 
                 mySubAccounts = config.subAccounts || [];
                 renderSubAccounts();
@@ -859,8 +968,10 @@ app.get('/', (req, res) => {
                 myGlobalTrailingPnl = parseFloat(document.getElementById('globalTrailingPnl').value) || 0;
                 mySmartOffsetNetProfit = parseFloat(document.getElementById('smartOffsetNetProfit').value) || 0;
                 mySmartOffsetStopLoss = parseFloat(document.getElementById('smartOffsetStopLoss').value) || 0;
+                mySmartOffsetNetProfit2 = parseFloat(document.getElementById('smartOffsetNetProfit2').value) || 0;
+                mySmartOffsetStopLoss2 = parseFloat(document.getElementById('smartOffsetStopLoss2').value) || 0;
                 
-                const data = { subAccounts: mySubAccounts, globalTargetPnl: myGlobalTargetPnl, globalTrailingPnl: myGlobalTrailingPnl, smartOffsetNetProfit: mySmartOffsetNetProfit, smartOffsetStopLoss: mySmartOffsetStopLoss };
+                const data = { subAccounts: mySubAccounts, globalTargetPnl: myGlobalTargetPnl, globalTrailingPnl: myGlobalTrailingPnl, smartOffsetNetProfit: mySmartOffsetNetProfit, smartOffsetStopLoss: mySmartOffsetStopLoss, smartOffsetNetProfit2: mySmartOffsetNetProfit2, smartOffsetStopLoss2: mySmartOffsetStopLoss2 };
                 await fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token }, body: JSON.stringify(data) });
                 alert('Global Settings Saved Successfully!');
             }
@@ -880,7 +991,7 @@ app.get('/', (req, res) => {
                 
                 mySubAccounts.push({ name, apiKey: key, secret: secret, side: 'long', leverage: 10, baseQty: 1, takeProfitPct: 5.0, stopLossPct: -25.0, triggerRoiPct: -15.0, dcaTargetRoiPct: -2.0, maxContracts: 1000, realizedPnl: 0, coins: [] });
                 
-                const data = { subAccounts: mySubAccounts, globalTargetPnl: myGlobalTargetPnl, globalTrailingPnl: myGlobalTrailingPnl, smartOffsetNetProfit: mySmartOffsetNetProfit, smartOffsetStopLoss: mySmartOffsetStopLoss };
+                const data = { subAccounts: mySubAccounts, globalTargetPnl: myGlobalTargetPnl, globalTrailingPnl: myGlobalTrailingPnl, smartOffsetNetProfit: mySmartOffsetNetProfit, smartOffsetStopLoss: mySmartOffsetStopLoss, smartOffsetNetProfit2: mySmartOffsetNetProfit2, smartOffsetStopLoss2: mySmartOffsetStopLoss2 };
                 const res = await fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token }, body: JSON.stringify(data) });
                 const json = await res.json();
                 mySubAccounts = json.settings.subAccounts || [];
@@ -924,7 +1035,7 @@ app.get('/', (req, res) => {
                 const index = parseInt(select.value);
                 if(!isNaN(index) && index >= 0) {
                     mySubAccounts.splice(index, 1);
-                    const data = { subAccounts: mySubAccounts, globalTargetPnl: myGlobalTargetPnl, globalTrailingPnl: myGlobalTrailingPnl, smartOffsetNetProfit: mySmartOffsetNetProfit, smartOffsetStopLoss: mySmartOffsetStopLoss };
+                    const data = { subAccounts: mySubAccounts, globalTargetPnl: myGlobalTargetPnl, globalTrailingPnl: myGlobalTrailingPnl, smartOffsetNetProfit: mySmartOffsetNetProfit, smartOffsetStopLoss: mySmartOffsetStopLoss, smartOffsetNetProfit2: mySmartOffsetNetProfit2, smartOffsetStopLoss2: mySmartOffsetStopLoss2 };
                     const res = await fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token }, body: JSON.stringify(data) });
                     const json = await res.json();
                     mySubAccounts = json.settings.subAccounts || [];
@@ -1006,7 +1117,7 @@ app.get('/', (req, res) => {
                 profile.maxContracts = parseInt(document.getElementById('maxContracts').value);
                 profile.coins = myCoins;
 
-                const data = { subAccounts: mySubAccounts, globalTargetPnl: myGlobalTargetPnl, globalTrailingPnl: myGlobalTrailingPnl, smartOffsetNetProfit: mySmartOffsetNetProfit, smartOffsetStopLoss: mySmartOffsetStopLoss };
+                const data = { subAccounts: mySubAccounts, globalTargetPnl: myGlobalTargetPnl, globalTrailingPnl: myGlobalTrailingPnl, smartOffsetNetProfit: mySmartOffsetNetProfit, smartOffsetStopLoss: mySmartOffsetStopLoss, smartOffsetNetProfit2: mySmartOffsetNetProfit2, smartOffsetStopLoss2: mySmartOffsetStopLoss2 };
                 const res = await fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token }, body: JSON.stringify(data) });
                 const json = await res.json();
                 mySubAccounts = json.settings.subAccounts || [];
@@ -1026,7 +1137,9 @@ app.get('/', (req, res) => {
                 const records = await res.json();
                 
                 if (records.length === 0) {
-                    document.getElementById('offsetTableContainer').innerHTML = '<p style="color:#5f6368;">No smart offsets executed yet.</p>';
+                    const noData = '<p style="color:#5f6368;">No smart offsets executed yet.</p>';
+                    document.getElementById('offsetTableContainer').innerHTML = noData;
+                    document.getElementById('offsetTableContainer2').innerHTML = noData;
                     return;
                 }
 
@@ -1050,6 +1163,7 @@ app.get('/', (req, res) => {
                 });
                 ih += '</table>';
                 document.getElementById('offsetTableContainer').innerHTML = ih;
+                document.getElementById('offsetTableContainer2').innerHTML = ih;
             }
 
             async function loadStatus() {
@@ -1091,7 +1205,7 @@ app.get('/', (req, res) => {
                     }
                 }
                 
-                // --- RENDER LIVE SMART OFFSET TRADES ---
+                // --- RENDER LIVE SMART OFFSET TRADES (V1 - Half Split) ---
                 if (document.getElementById('offset-tab').style.display === 'block') {
                     activeCandidates.sort((a, b) => b.pnl - a.pnl);
                     const totalCoins = activeCandidates.length;
@@ -1140,6 +1254,58 @@ app.get('/', (req, res) => {
                             liveHtml += \`<p style="font-size:0.85em; color:#5f6368; margin-top:12px;">Middle coin (Rank \${midIndex + 1}, Unpaired): <strong>\${mid.symbol}</strong> (<span style="color:\${mColor}">\${mid.pnl >= 0 ? '+' : ''}$\${mid.pnl.toFixed(4)}</span>)</p>\`;
                         }
                         document.getElementById('liveOffsetsContainer').innerHTML = liveHtml;
+                    }
+                }
+
+                // --- RENDER LIVE SMART OFFSET TRADES (V2 - Ends / Outside-In) ---
+                if (document.getElementById('offset2-tab').style.display === 'block') {
+                    activeCandidates.sort((a, b) => b.pnl - a.pnl);
+                    const totalCoins = activeCandidates.length;
+                    const totalPairs = Math.floor(totalCoins / 2);
+
+                    if (totalPairs === 0) {
+                        document.getElementById('liveOffsetsContainer2').innerHTML = '<p style="color:#5f6368;">Not enough active trades to form pairs.</p>';
+                    } else {
+                        let liveHtml = '<table style="width:100%; text-align:left; border-collapse:collapse; background:#fff; border-radius:6px; overflow:hidden;">';
+                        liveHtml += '<tr style="background:#e8f0fe;"><th style="padding:12px; border-bottom:2px solid #dadce0;">Rank Pair</th><th style="padding:12px; border-bottom:2px solid #dadce0;">Winner Coin</th><th style="padding:12px; border-bottom:2px solid #dadce0;">Winner PNL</th><th style="padding:12px; border-bottom:2px solid #dadce0;">Loser Coin</th><th style="padding:12px; border-bottom:2px solid #dadce0;">Loser PNL</th><th style="padding:12px; border-bottom:2px solid #dadce0;">Live Net Profit</th></tr>';
+
+                        for (let i = 0; i < totalPairs; i++) {
+                            const winnerIndex = i;
+                            const loserIndex = totalCoins - 1 - i;
+
+                            const w = activeCandidates[winnerIndex];
+                            const l = activeCandidates[loserIndex];
+                            const net = w.pnl + l.pnl;
+
+                            const currentTarget = globalSet.smartOffsetNetProfit2 || 0;
+                            const currentSl = globalSet.smartOffsetStopLoss2 || 0;
+
+                            const wColor = w.pnl >= 0 ? '#1e8e3e' : '#d93025';
+                            const lColor = l.pnl >= 0 ? '#1e8e3e' : '#d93025';
+                            const nColor = net >= 0 ? '#1e8e3e' : '#d93025';
+                            
+                            const isTargetHit = (currentTarget > 0 && net >= currentTarget);
+                            const isStopHit = (currentSl < 0 && net <= currentSl);
+                            const statusIcon = (isTargetHit || isStopHit) ? '🔥 Executing...' : '⏳ Evaluating';
+
+                            liveHtml += \`<tr>
+                                <td style="padding:12px; border-bottom:1px solid #eee; font-weight:500; color:#5f6368;">\${winnerIndex + 1} & \${loserIndex + 1} <br><span style="font-size:0.75em; color:#1a73e8">\${statusIcon}</span></td>
+                                <td style="padding:12px; border-bottom:1px solid #eee; font-weight:500;">\${w.symbol}</td>
+                                <td style="padding:12px; border-bottom:1px solid #eee; color:\${wColor}; font-weight:700;">\${w.pnl >= 0 ? '+' : ''}$\${w.pnl.toFixed(4)}</td>
+                                <td style="padding:12px; border-bottom:1px solid #eee; font-weight:500;">\${l.symbol}</td>
+                                <td style="padding:12px; border-bottom:1px solid #eee; color:\${lColor}; font-weight:700;">\${l.pnl >= 0 ? '+' : ''}$\${l.pnl.toFixed(4)}</td>
+                                <td style="padding:12px; border-bottom:1px solid #eee; color:\${nColor}; font-weight:700; background: #f8f9fa;">\${net >= 0 ? '+' : ''}$\${net.toFixed(4)}</td>
+                            </tr>\`;
+                        }
+                        liveHtml += '</table>';
+                        
+                        if (totalCoins % 2 !== 0) {
+                            const midIndex = totalPairs;
+                            const mid = activeCandidates[midIndex];
+                            const mColor = mid.pnl >= 0 ? '#1e8e3e' : '#d93025';
+                            liveHtml += \`<p style="font-size:0.85em; color:#5f6368; margin-top:12px;">Middle coin (Rank \${midIndex + 1}, Unpaired): <strong>\${mid.symbol}</strong> (<span style="color:\${mColor}">\${mid.pnl >= 0 ? '+' : ''}$\${mid.pnl.toFixed(4)}</span>)</p>\`;
+                        }
+                        document.getElementById('liveOffsetsContainer2').innerHTML = liveHtml;
                     }
                 }
                 // ---------------------------------------
