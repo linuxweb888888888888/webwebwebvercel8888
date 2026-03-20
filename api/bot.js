@@ -1,7 +1,7 @@
 const express = require('express');
 const ccxt = require('ccxt');
 const mongoose = require('mongoose');
-const bcrypt = require('bcryptjs'); // Using bcryptjs for Vercel compatibility
+const bcrypt = require('bcryptjs'); 
 const jwt = require('jsonwebtoken');
 const path = require('path');
 
@@ -353,46 +353,44 @@ setInterval(async () => {
                     const biggestWinner = activeCandidates[winnerIndex];
                     const biggestLoser = activeCandidates[loserIndex];
 
-                    if (biggestWinner.unrealizedPnl > 0) {
-                        const netResult = biggestWinner.unrealizedPnl + biggestLoser.unrealizedPnl;
+                    const netResult = biggestWinner.unrealizedPnl + biggestLoser.unrealizedPnl;
+                    
+                    let triggerOffset = false;
+                    let reason = '';
+
+                    if (smartOffsetNetProfit > 0 && netResult >= smartOffsetNetProfit) {
+                        triggerOffset = true;
+                        reason = 'TAKE PROFIT';
+                    } else if (smartOffsetStopLoss < 0 && netResult <= smartOffsetStopLoss) {
+                        triggerOffset = true;
+                        reason = 'STOP LOSS';
+                    }
+                    
+                    if (triggerOffset) {
+                        logForProfile(firstProfileId, `⚖️ SMART OFFSET [${reason}]: Paired Rank ${loserIndex + 1} & ${winnerIndex + 1} - Closing Winner [${biggestWinner.symbol} (${biggestWinner.unrealizedPnl.toFixed(4)})] & Loser [${biggestLoser.symbol} (${biggestLoser.unrealizedPnl.toFixed(4)})]. NET PROFIT: ${netResult >= 0 ? '+' : ''}$${netResult.toFixed(4)}`);
                         
-                        let triggerOffset = false;
-                        let reason = '';
+                        OffsetRecord.create({
+                            userId: dbUserId,
+                            winnerSymbol: biggestWinner.symbol,
+                            winnerPnl: biggestWinner.unrealizedPnl,
+                            loserSymbol: biggestLoser.symbol,
+                            loserPnl: biggestLoser.unrealizedPnl,
+                            netProfit: netResult
+                        }).catch(()=>{});
 
-                        if (smartOffsetNetProfit > 0 && netResult >= smartOffsetNetProfit) {
-                            triggerOffset = true;
-                            reason = 'TAKE PROFIT';
-                        } else if (smartOffsetStopLoss < 0 && netResult <= smartOffsetStopLoss) {
-                            triggerOffset = true;
-                            reason = 'STOP LOSS';
-                        }
+                        const wOrderSide = biggestWinner.side === 'long' ? 'sell' : 'buy';
+                        await biggestWinner.exchange.createOrder(biggestWinner.symbol, 'market', wOrderSide, biggestWinner.contracts, undefined, { offset: 'close', reduceOnly: true, lever_rate: biggestWinner.leverage }).catch(()=>{});
+                        biggestWinner.subAccount.realizedPnl = (biggestWinner.subAccount.realizedPnl || 0) + biggestWinner.unrealizedPnl;
+                        await Settings.updateOne({ "subAccounts._id": biggestWinner.subAccount._id }, { $set: { "subAccounts.$.realizedPnl": biggestWinner.subAccount.realizedPnl } }).catch(()=>{});
+                        activeBots.get(biggestWinner.profileId).state.coinStates[biggestWinner.symbol].contracts = 0;
+
+                        const lOrderSide = biggestLoser.side === 'long' ? 'sell' : 'buy';
+                        await biggestLoser.exchange.createOrder(biggestLoser.symbol, 'market', lOrderSide, biggestLoser.contracts, undefined, { offset: 'close', reduceOnly: true, lever_rate: biggestLoser.leverage }).catch(()=>{});
+                        biggestLoser.subAccount.realizedPnl = (biggestLoser.subAccount.realizedPnl || 0) + biggestLoser.unrealizedPnl;
+                        await Settings.updateOne({ "subAccounts._id": biggestLoser.subAccount._id }, { $set: { "subAccounts.$.realizedPnl": biggestLoser.subAccount.realizedPnl } }).catch(()=>{});
+                        activeBots.get(biggestLoser.profileId).state.coinStates[biggestLoser.symbol].contracts = 0;
                         
-                        if (triggerOffset) {
-                            logForProfile(firstProfileId, `⚖️ SMART OFFSET [${reason}]: Paired Rank ${loserIndex + 1} & ${winnerIndex + 1} - Closing Winner [${biggestWinner.symbol} (+${biggestWinner.unrealizedPnl.toFixed(4)})] & Loser [${biggestLoser.symbol} (${biggestLoser.unrealizedPnl.toFixed(4)})]. NET PROFIT: ${netResult >= 0 ? '+' : ''}$${netResult.toFixed(4)}`);
-                            
-                            OffsetRecord.create({
-                                userId: dbUserId,
-                                winnerSymbol: biggestWinner.symbol,
-                                winnerPnl: biggestWinner.unrealizedPnl,
-                                loserSymbol: biggestLoser.symbol,
-                                loserPnl: biggestLoser.unrealizedPnl,
-                                netProfit: netResult
-                            }).catch(()=>{});
-
-                            const wOrderSide = biggestWinner.side === 'long' ? 'sell' : 'buy';
-                            await biggestWinner.exchange.createOrder(biggestWinner.symbol, 'market', wOrderSide, biggestWinner.contracts, undefined, { offset: 'close', reduceOnly: true, lever_rate: biggestWinner.leverage }).catch(()=>{});
-                            biggestWinner.subAccount.realizedPnl = (biggestWinner.subAccount.realizedPnl || 0) + biggestWinner.unrealizedPnl;
-                            await Settings.updateOne({ "subAccounts._id": biggestWinner.subAccount._id }, { $set: { "subAccounts.$.realizedPnl": biggestWinner.subAccount.realizedPnl } }).catch(()=>{});
-                            activeBots.get(biggestWinner.profileId).state.coinStates[biggestWinner.symbol].contracts = 0;
-
-                            const lOrderSide = biggestLoser.side === 'long' ? 'sell' : 'buy';
-                            await biggestLoser.exchange.createOrder(biggestLoser.symbol, 'market', lOrderSide, biggestLoser.contracts, undefined, { offset: 'close', reduceOnly: true, lever_rate: biggestLoser.leverage }).catch(()=>{});
-                            biggestLoser.subAccount.realizedPnl = (biggestLoser.subAccount.realizedPnl || 0) + biggestLoser.unrealizedPnl;
-                            await Settings.updateOne({ "subAccounts._id": biggestLoser.subAccount._id }, { $set: { "subAccounts.$.realizedPnl": biggestLoser.subAccount.realizedPnl } }).catch(()=>{});
-                            activeBots.get(biggestLoser.profileId).state.coinStates[biggestLoser.symbol].contracts = 0;
-                            
-                            offsetExecuted = true;
-                        }
+                        offsetExecuted = true;
                     }
                 }
                 
@@ -587,7 +585,7 @@ app.get('/', (req, res) => {
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>HTX Multi-User Bot (Vercel Build)</title>
+        <title>HTX Multi-User Bot</title>
         <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&display=swap" rel="stylesheet">
         <style>
             body { font-family: 'Roboto', sans-serif; background: #f4f6f8; color: #333; margin: 0; padding: 20px; }
@@ -1086,9 +1084,9 @@ app.get('/', (req, res) => {
                     ih += \`<tr>
                         <td style="padding:12px; border-bottom:1px solid #eee; color:#5f6368;">\${dateObj.toLocaleDateString()} \${dateObj.toLocaleTimeString()}</td>
                         <td style="padding:12px; border-bottom:1px solid #eee; color:#1a73e8; font-weight:500;">\${r.winnerSymbol}</td>
-                        <td style="padding:12px; border-bottom:1px solid #eee; color:\${wColor}; font-weight:500;">+$\${r.winnerPnl.toFixed(4)}</td>
+                        <td style="padding:12px; border-bottom:1px solid #eee; color:\${wColor}; font-weight:500;">\${r.winnerPnl >= 0 ? '+' : ''}$\${r.winnerPnl.toFixed(4)}</td>
                         <td style="padding:12px; border-bottom:1px solid #eee; color:#1a73e8; font-weight:500;">\${r.loserSymbol}</td>
-                        <td style="padding:12px; border-bottom:1px solid #eee; color:\${lColor}; font-weight:500;">\${r.loserPnl < 0 ? '-' : '+'}$\${Math.abs(r.loserPnl).toFixed(4)}</td>
+                        <td style="padding:12px; border-bottom:1px solid #eee; color:\${lColor}; font-weight:500;">\${r.loserPnl >= 0 ? '+' : ''}$\${r.loserPnl.toFixed(4)}</td>
                         <td style="padding:12px; border-bottom:1px solid #eee; color:\${nColor}; font-weight:700;">\${r.netProfit >= 0 ? '+' : ''}$\${r.netProfit.toFixed(4)}</td>
                     </tr>\`;
                 });
@@ -1171,10 +1169,9 @@ app.get('/', (req, res) => {
                             const lColor = l.pnl >= 0 ? '#1e8e3e' : '#d93025';
                             const nColor = net >= 0 ? '#1e8e3e' : '#d93025';
                             
-                            const isValidPair = (w.pnl > 0);
                             const isTargetHit = (mySmartOffsetNetProfit > 0 && net >= mySmartOffsetNetProfit);
                             const isStopHit = (mySmartOffsetStopLoss < 0 && net <= mySmartOffsetStopLoss);
-                            const statusIcon = (isValidPair && (isTargetHit || isStopHit)) ? '🔥 Executing...' : (isValidPair ? '⏳ Evaluating' : '⏸ No loss/win yet');
+                            const statusIcon = (isTargetHit || isStopHit) ? '🔥 Executing...' : '⏳ Evaluating';
 
                             liveHtml += \`<tr>
                                 <td style="padding:12px; border-bottom:1px solid #eee; font-weight:500; color:#5f6368;">\${loserIndex + 1} & \${winnerIndex + 1} <br><span style="font-size:0.75em; color:#1a73e8">\${statusIcon}</span></td>
