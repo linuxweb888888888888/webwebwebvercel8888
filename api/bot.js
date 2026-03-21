@@ -1,5 +1,3 @@
-//web8888
-
 const express = require('express');
 const ccxt = require('ccxt');
 const mongoose = require('mongoose');
@@ -66,7 +64,7 @@ const SettingsSchema = new mongoose.Schema({
     smartOffsetStopLoss: { type: Number, default: 0 },
     smartOffsetNetProfit2: { type: Number, default: 0 }, 
     smartOffsetStopLoss2: { type: Number, default: 0 },   
-    smartOffsetMaxLossPerMinute: { type: Number, default: 0 }, // New Setting
+    smartOffsetMaxLossPerMinute: { type: Number, default: 0 }, 
     subAccounts: [SubAccountSchema]
 });
 const Settings = mongoose.model('Settings', SettingsSchema);
@@ -87,8 +85,8 @@ const OffsetRecord = mongoose.model('OffsetRecord', OffsetRecordSchema);
 // ==========================================
 const activeBots = new Map();
 const globalPnlPeaks = new Map(); 
-const lastStopLossExecutions = new Map(); // Tracks last Stop Loss timestamp to enforce 1 per min rule
-const rollingStopLosses = new Map(); // Tracks accumulation of Stop Loss dollar amounts over 60 seconds
+const lastStopLossExecutions = new Map(); 
+const rollingStopLosses = new Map(); 
 
 function logForProfile(profileId, msg) {
     console.log(`[Profile: ${profileId}] ${msg}`);
@@ -332,80 +330,101 @@ setInterval(async () => {
 
             let offsetExecuted = false;
 
-            // SMART OFFSET V1 (HALF SPLIT)
+            // ====================================================
+            // SMART OFFSET V1 (GROUPED ACCUMULATION: Top Vs Bottom)
+            // ====================================================
             if ((smartOffsetNetProfit > 0 || smartOffsetStopLoss < 0) && activeCandidates.length >= 2) {
                 activeCandidates.sort((a, b) => b.unrealizedPnl - a.unrealizedPnl); 
                 
                 const totalCoins = activeCandidates.length;
                 const totalPairs = Math.floor(totalCoins / 2);
 
+                let v1Bucket = [];
+                let v1BucketNet = 0;
+
                 for (let i = 0; i < totalPairs; i++) {
-                    // THE FIX: Pair the Strongest Winner with the Weakest Loser
                     const winnerIndex = i; 
-                    const loserIndex = totalCoins - totalPairs + i;
+                    const loserIndex = totalCoins - totalPairs + i; 
 
                     const biggestWinner = activeCandidates[winnerIndex];
                     const biggestLoser = activeCandidates[loserIndex];
 
                     const netResult = biggestWinner.unrealizedPnl + biggestLoser.unrealizedPnl;
                     
+                    // Accumulate pairs into the bucket!
+                    v1Bucket.push(biggestWinner);
+                    v1Bucket.push(biggestLoser);
+                    v1BucketNet += netResult;
+
                     let triggerOffset = false;
                     let reason = '';
 
-                    if (smartOffsetNetProfit > 0 && netResult >= dynamicTargetV1) {
+                    if (smartOffsetNetProfit > 0 && v1BucketNet >= dynamicTargetV1) {
                         triggerOffset = true;
-                        reason = `TAKE PROFIT (Dyn: $${dynamicTargetV1.toFixed(4)})`;
-                    } else if (smartOffsetStopLoss < 0 && netResult <= dynamicStopLossV1) {
-                        // Rate Limiter Logic
+                        reason = `TAKE PROFIT (Group of ${v1Bucket.length/2} Pairs, Dyn: $${dynamicTargetV1.toFixed(4)})`;
+                    } else if (smartOffsetStopLoss < 0 && v1BucketNet <= dynamicStopLossV1) {
                         if (smartOffsetMaxLossPerMinute > 0) {
-                            if (currentMinuteLoss + Math.abs(netResult) <= smartOffsetMaxLossPerMinute) {
+                            if (currentMinuteLoss + Math.abs(v1BucketNet) <= smartOffsetMaxLossPerMinute) {
                                 triggerOffset = true;
-                                reason = `STOP LOSS (Dyn: $${dynamicStopLossV1.toFixed(4)})`;
+                                reason = `STOP LOSS (Group of ${v1Bucket.length/2} Pairs, Dyn: $${dynamicStopLossV1.toFixed(4)})`;
                             }
                         } else {
-                            // Classic 1 per minute enforcement if setting is 0
                             if (Date.now() - (lastStopLossExecutions.get(dbUserId) || 0) >= 60000) {
                                 triggerOffset = true;
-                                reason = `STOP LOSS (Dyn: $${dynamicStopLossV1.toFixed(4)})`;
+                                reason = `STOP LOSS (Group of ${v1Bucket.length/2} Pairs, Dyn: $${dynamicStopLossV1.toFixed(4)})`;
                                 lastStopLossExecutions.set(dbUserId, Date.now());
                             }
                         }
                     }
                     
                     if (triggerOffset) {
-                        logForProfile(firstProfileId, `⚖️ SMART OFFSET [${reason}]: Paired Rank ${loserIndex + 1} & ${winnerIndex + 1} - Closing Winner [${biggestWinner.symbol} (${biggestWinner.unrealizedPnl.toFixed(4)})] & Loser [${biggestLoser.symbol} (${biggestLoser.unrealizedPnl.toFixed(4)})]. NET PROFIT: ${netResult >= 0 ? '+' : ''}$${netResult.toFixed(4)}`);
+                        logForProfile(firstProfileId, `⚖️ SMART OFFSET V1 (GROUPED) [${reason}]: Closing ${v1Bucket.length} coins total. NET PROFIT: ${v1BucketNet >= 0 ? '+' : ''}$${v1BucketNet.toFixed(4)}`);
                         
+                        let totalWinnerPnl = 0;
+                        let totalLoserPnl = 0;
+
+                        // Close ALL coins in the group bucket
+                        for (let k = 0; k < v1Bucket.length; k++) {
+                            const pos = v1Bucket[k];
+                            
+                            // Math for the DB record
+                            if (k % 2 === 0) totalWinnerPnl += pos.unrealizedPnl;
+                            else totalLoserPnl += pos.unrealizedPnl;
+
+                            try {
+                                const orderSide = pos.side === 'long' ? 'sell' : 'buy';
+                                await pos.exchange.createOrder(pos.symbol, 'market', orderSide, pos.contracts, undefined, { offset: 'close', reduceOnly: true, lever_rate: pos.leverage }).catch(()=>{});
+                                pos.subAccount.realizedPnl = (pos.subAccount.realizedPnl || 0) + pos.unrealizedPnl;
+                                await Settings.updateOne({ "subAccounts._id": pos.subAccount._id }, { $set: { "subAccounts.$.realizedPnl": pos.subAccount.realizedPnl } }).catch(()=>{});
+                                activeBots.get(pos.profileId).state.coinStates[pos.symbol].contracts = 0;
+                            } catch (e) {
+                                logForProfile(pos.profileId, `❌ Failed Group Close on ${pos.symbol}: ${e.message}`);
+                            }
+                        }
+
                         OffsetRecord.create({
                             userId: dbUserId,
-                            winnerSymbol: biggestWinner.symbol,
-                            winnerPnl: biggestWinner.unrealizedPnl,
-                            loserSymbol: biggestLoser.symbol,
-                            loserPnl: biggestLoser.unrealizedPnl,
-                            netProfit: netResult
+                            winnerSymbol: `Group of ${v1Bucket.length/2} Winners`,
+                            winnerPnl: totalWinnerPnl,
+                            loserSymbol: `Group of ${v1Bucket.length/2} Losers`,
+                            loserPnl: totalLoserPnl,
+                            netProfit: v1BucketNet
                         }).catch(()=>{});
 
-                        const wOrderSide = biggestWinner.side === 'long' ? 'sell' : 'buy';
-                        await biggestWinner.exchange.createOrder(biggestWinner.symbol, 'market', wOrderSide, biggestWinner.contracts, undefined, { offset: 'close', reduceOnly: true, lever_rate: biggestWinner.leverage }).catch(()=>{});
-                        biggestWinner.subAccount.realizedPnl = (biggestWinner.subAccount.realizedPnl || 0) + biggestWinner.unrealizedPnl;
-                        await Settings.updateOne({ "subAccounts._id": biggestWinner.subAccount._id }, { $set: { "subAccounts.$.realizedPnl": biggestWinner.subAccount.realizedPnl } }).catch(()=>{});
-                        activeBots.get(biggestWinner.profileId).state.coinStates[biggestWinner.symbol].contracts = 0;
-
-                        const lOrderSide = biggestLoser.side === 'long' ? 'sell' : 'buy';
-                        await biggestLoser.exchange.createOrder(biggestLoser.symbol, 'market', lOrderSide, biggestLoser.contracts, undefined, { offset: 'close', reduceOnly: true, lever_rate: biggestLoser.leverage }).catch(()=>{});
-                        biggestLoser.subAccount.realizedPnl = (biggestLoser.subAccount.realizedPnl || 0) + biggestLoser.unrealizedPnl;
-                        await Settings.updateOne({ "subAccounts._id": biggestLoser.subAccount._id }, { $set: { "subAccounts.$.realizedPnl": biggestLoser.subAccount.realizedPnl } }).catch(()=>{});
-                        activeBots.get(biggestLoser.profileId).state.coinStates[biggestLoser.symbol].contracts = 0;
-                        
                         offsetExecuted = true;
-                        if (netResult < 0 && smartOffsetMaxLossPerMinute > 0) {
-                            currentMinuteLoss += Math.abs(netResult);
-                            rollingLossArr.push({ time: Date.now(), amount: Math.abs(netResult) });
+                        if (v1BucketNet < 0 && smartOffsetMaxLossPerMinute > 0) {
+                            currentMinuteLoss += Math.abs(v1BucketNet);
+                            rollingLossArr.push({ time: Date.now(), amount: Math.abs(v1BucketNet) });
                         }
+                        
+                        break; // Stop evaluating after we hit and execute a group target!
                     }
                 }
             }
 
-            // SMART OFFSET V2 (ENDS / OUTSIDE-IN)
+            // ====================================================
+            // SMART OFFSET V2 (STRICT 1-to-1 ENDS / OUTSIDE-IN)
+            // ====================================================
             if (!offsetExecuted && (smartOffsetNetProfit2 > 0 || smartOffsetStopLoss2 < 0) && activeCandidates.length >= 2) {
                 let offsetExecuted2 = false;
                 const totalCoins = activeCandidates.length;
@@ -427,14 +446,12 @@ setInterval(async () => {
                         triggerOffset = true;
                         reason = `TAKE PROFIT V2 (Dyn: $${dynamicTargetV2.toFixed(4)})`;
                     } else if (smartOffsetStopLoss2 < 0 && netResult <= dynamicStopLossV2) {
-                        // Rate Limiter Logic
                         if (smartOffsetMaxLossPerMinute > 0) {
                             if (currentMinuteLoss + Math.abs(netResult) <= smartOffsetMaxLossPerMinute) {
                                 triggerOffset = true;
                                 reason = `STOP LOSS V2 (Dyn: $${dynamicStopLossV2.toFixed(4)})`;
                             }
                         } else {
-                            // Classic 1 per minute enforcement if setting is 0
                             if (Date.now() - (lastStopLossExecutions.get(dbUserId) || 0) >= 60000) {
                                 triggerOffset = true;
                                 reason = `STOP LOSS V2 (Dyn: $${dynamicStopLossV2.toFixed(4)})`;
@@ -444,7 +461,7 @@ setInterval(async () => {
                     }
                     
                     if (triggerOffset) {
-                        logForProfile(firstProfileId, `⚖️ SMART OFFSET V2 [${reason}]: Paired Rank ${loserIndex + 1} & ${winnerIndex + 1} - Closing Winner [${biggestWinner.symbol} (${biggestWinner.unrealizedPnl.toFixed(4)})] & Loser [${biggestLoser.symbol} (${biggestLoser.unrealizedPnl.toFixed(4)})]. NET PROFIT: ${netResult >= 0 ? '+' : ''}$${netResult.toFixed(4)}`);
+                        logForProfile(firstProfileId, `⚖️ SMART OFFSET V2 [${reason}]: Paired Rank ${winnerIndex + 1} & ${loserIndex + 1} - Closing Winner [${biggestWinner.symbol} (${biggestWinner.unrealizedPnl.toFixed(4)})] & Loser [${biggestLoser.symbol} (${biggestLoser.unrealizedPnl.toFixed(4)})]. NET PROFIT: ${netResult >= 0 ? '+' : ''}$${netResult.toFixed(4)}`);
                         
                         OffsetRecord.create({
                             userId: dbUserId,
@@ -742,8 +759,8 @@ app.get('/', (req, res) => {
                 <h1>HTX Trading Bot</h1>
                 <div style="display:flex; gap:12px;">
                     <button class="btn-blue" style="margin:0; width:auto; padding: 8px 16px;" onclick="switchTab('main')">Dashboard</button>
-                    <button class="btn-logout" style="margin:0; width:auto;" onclick="switchTab('offsets')">Smart Offsets (Half)</button>
-                    <button class="btn-logout" style="margin:0; width:auto; border-color: #1a73e8; color: #1a73e8;" onclick="switchTab('offsets2')">Smart Offsets V2 (Ends)</button>
+                    <button class="btn-logout" style="margin:0; width:auto;" onclick="switchTab('offsets')">Smart Offsets V1 (Group Accumulation)</button>
+                    <button class="btn-logout" style="margin:0; width:auto; border-color: #1a73e8; color: #1a73e8;" onclick="switchTab('offsets2')">Smart Offsets V2 (Ends Sniper)</button>
                     <button class="btn-logout" style="margin:0; width:auto;" onclick="logout()">Logout</button>
                 </div>
             </div>
@@ -751,8 +768,8 @@ app.get('/', (req, res) => {
             <!-- SMART OFFSETS HISTORY & LIVE TAB -->
             <div id="offset-tab" style="display:none;">
                 <div class="panel">
-                    <h2 style="color: #1a73e8;">Live Paired Trades (Evaluating for Smart Offset)</h2>
-                    <p style="font-size:0.85em; color:#5f6368; margin-top:-8px; margin-bottom:16px;">Real-time pairings from outside-in (Rank N & Rank N/2). Always evaluates net PNL (even if both are negative) to ensure Stop Loss triggers optimally.</p>
+                    <h2 style="color: #1a73e8;">Live Accumulation Grouping (Top Vs Bottom)</h2>
+                    <p style="font-size:0.85em; color:#5f6368; margin-top:-8px; margin-bottom:16px;">This engine adds Pair 1 + Pair 2 + Pair 3 together into a Bucket. As soon as the "Group Accumulation" column hits your Target (or hits Stop Loss), it closes ALL coins in the group at once. Perfect for combining multiple small winners to clear out losers.</p>
                     <div id="liveOffsetsContainer">Waiting for live data...</div>
                 </div>
                 
@@ -769,7 +786,7 @@ app.get('/', (req, res) => {
                     <div style="background: #e8f0fe; padding: 12px; border-radius: 6px; margin-bottom: 16px; border: 1px solid #dadce0;">
                         <div style="margin-top: 12px;">
                             <label style="margin-top:0;">Manual Offset Net Profit Target V2 ($)</label>
-                            <p style="font-size:0.75em; color:#5f6368; margin-top:2px; line-height:1.4;">Pairs Rank 1 (Winner) & Rank N (Loser), Rank 2 & Rank N-1. Closes BOTH if Net PNL >= this amount.</p>
+                            <p style="font-size:0.75em; color:#5f6368; margin-top:2px; line-height:1.4;">Strict 1-to-1 pairings. Pairs Rank 1 (Winner) & Rank N (Loser). Closes ONLY these 2 coins if Net PNL >= this amount.</p>
                             <input type="number" step="0.1" id="smartOffsetNetProfit2" placeholder="e.g. 1.00 (0 = Disabled)">
                         </div>
                         <div style="margin-top: 12px;">
@@ -782,8 +799,8 @@ app.get('/', (req, res) => {
                 </div>
 
                 <div class="panel">
-                    <h2 style="color: #1a73e8;">Live Paired Trades V2 (Ends Pairing)</h2>
-                    <p style="font-size:0.85em; color:#5f6368; margin-top:-8px; margin-bottom:16px;">Real-time pairings from ends exactly like this: Rank 1 & 10, 2 & 9, 3 & 8, 4 & 7, etc. Evaluates Net PNL to ensure Stop Loss or Target triggers.</p>
+                    <h2 style="color: #1a73e8;">Live Paired Trades V2 (1-to-1 Sniper)</h2>
+                    <p style="font-size:0.85em; color:#5f6368; margin-top:-8px; margin-bottom:16px;">Real-time strict 1-to-1 pairings exactly like this: Rank 1 & 10, 2 & 9, 3 & 8. No accumulation grouping here.</p>
                     <div id="liveOffsetsContainer2">Waiting for live data...</div>
                 </div>
                 
@@ -823,12 +840,12 @@ app.get('/', (req, res) => {
                             </div>
                             <div style="margin-top: 12px;">
                                 <label style="margin-top:0;">Manual Offset Net Profit Target V1 ($)</label>
-                                <p style="font-size:0.75em; color:#5f6368; margin-top:2px; line-height:1.4;">Pairs Rank N & Rank N/2. Closes BOTH if Net PNL >= this amount.</p>
+                                <p style="font-size:0.75em; color:#5f6368; margin-top:2px; line-height:1.4;">Groups Pair 1 + Pair 2 + Pair 3 etc. Closes the entire bucket of coins if the cumulative Group Net PNL >= this amount.</p>
                                 <input type="number" step="0.1" id="smartOffsetNetProfit" placeholder="e.g. 1.00 (0 = Disabled)">
                             </div>
                             <div style="margin-top: 12px;">
                                 <label style="margin-top:0;">Manual Offset Stop Loss V1 ($)</label>
-                                <p style="font-size:0.75em; color:#5f6368; margin-top:2px; line-height:1.4;">Always evaluates! If the paired coins' Net PNL drops to or below this negative amount, it closes BOTH.</p>
+                                <p style="font-size:0.75em; color:#5f6368; margin-top:2px; line-height:1.4;">Always evaluates! If the cumulative Group Net PNL drops to or below this negative amount, it closes the group.</p>
                                 <input type="number" step="0.1" id="smartOffsetStopLoss" placeholder="e.g. -2.00 (0 = Disabled)">
                             </div>
                             <div style="margin-top: 12px; border-top: 1px solid #cce0ff; padding-top: 12px;">
@@ -1292,7 +1309,7 @@ app.get('/', (req, res) => {
                     ? \`<div style="margin-top: 6px; padding-top: 6px; border-top: 1px dashed #b3d4ff;">⏳ <strong>60s Loss Tracker:</strong> $\${currentMinuteLoss.toFixed(2)} / $\${maxLossPerMin.toFixed(2)} Limit</div>\`
                     : \`<div style="margin-top: 6px; padding-top: 6px; border-top: 1px dashed #b3d4ff;">⏳ <strong>60s Loss Tracker:</strong> Limited to 1 SL execution per minute</div>\`;
                 
-                // --- RENDER LIVE SMART OFFSET TRADES (V1 - Half Split) ---
+                // --- RENDER LIVE SMART OFFSET TRADES (V1 - GROUP ACCUMULATION) ---
                 if (document.getElementById('offset-tab').style.display === 'block') {
                     activeCandidates.sort((a, b) => b.pnl - a.pnl);
                     const totalCoins = activeCandidates.length;
@@ -1316,52 +1333,63 @@ app.get('/', (req, res) => {
                         </div>\`;
 
                         let liveHtml = '<table style="width:100%; text-align:left; border-collapse:collapse; background:#fff; border-radius:6px; overflow:hidden;">';
-                        liveHtml += '<tr style="background:#e8f0fe;"><th style="padding:12px; border-bottom:2px solid #dadce0;">Rank Pair</th><th style="padding:12px; border-bottom:2px solid #dadce0;">Winner Coin</th><th style="padding:12px; border-bottom:2px solid #dadce0;">Winner PNL</th><th style="padding:12px; border-bottom:2px solid #dadce0;">Loser Coin</th><th style="padding:12px; border-bottom:2px solid #dadce0;">Loser PNL</th><th style="padding:12px; border-bottom:2px solid #dadce0;">Live Net Profit</th></tr>';
+                        liveHtml += '<tr style="background:#e8f0fe;"><th style="padding:12px; border-bottom:2px solid #dadce0;">Rank Pair</th><th style="padding:12px; border-bottom:2px solid #dadce0;">Winner Coin</th><th style="padding:12px; border-bottom:2px solid #dadce0;">Winner PNL</th><th style="padding:12px; border-bottom:2px solid #dadce0;">Loser Coin</th><th style="padding:12px; border-bottom:2px solid #dadce0;">Loser PNL</th><th style="padding:12px; border-bottom:2px solid #dadce0;">Pair Net</th><th style="padding:12px; border-bottom:2px solid #dadce0; color:#1a73e8;">Group Accumulation</th></tr>';
+
+                        let cumulativeNet = 0;
+                        let groupTriggered = false;
 
                         for (let i = 0; i < totalPairs; i++) {
-                            const winnerIndex = totalPairs - 1 - i;
-                            const loserIndex = totalCoins - 1 - i;
+                            const winnerIndex = i;
+                            const loserIndex = totalCoins - totalPairs + i;
 
                             const w = activeCandidates[winnerIndex];
                             const l = activeCandidates[loserIndex];
                             const net = w.pnl + l.pnl;
+                            
+                            // Only add to bucket if we haven't already hit a target on an earlier pair
+                            if (!groupTriggered) {
+                                cumulativeNet += net;
+                            }
 
                             const wColor = w.pnl >= 0 ? '#1e8e3e' : '#d93025';
                             const lColor = l.pnl >= 0 ? '#1e8e3e' : '#d93025';
                             const nColor = net >= 0 ? '#1e8e3e' : '#d93025';
+                            const cColor = cumulativeNet >= 0 ? '#1e8e3e' : '#d93025';
                             
-                            const isTargetHit = (currentTarget > 0 && net >= dynamicTargetV1);
-                            const isStopHit = (currentSl < 0 && net <= dynamicSlV1);
+                            const isTargetHit = (!groupTriggered && currentTarget > 0 && cumulativeNet >= dynamicTargetV1);
+                            const isStopHit = (!groupTriggered && currentSl < 0 && cumulativeNet <= dynamicSlV1);
                             
-                            let statusIcon = '⏳ Evaluating';
-                            if (isTargetHit) statusIcon = '🔥 Executing (TP)...';
-                            else if (isStopHit) {
-                                if (maxLossPerMin > 0 && (currentMinuteLoss + Math.abs(net)) > maxLossPerMin) statusIcon = '🛑 BLOCKED (Limit Reached)';
-                                else statusIcon = '🔥 Executing (SL)...';
+                            let statusIcon = groupTriggered ? '⏸️ (Group Executed Above)' : '⏳ Accumulating...';
+                            
+                            if (isTargetHit) {
+                                statusIcon = '🔥 EXECUTING GROUP (TP)!';
+                                groupTriggered = true;
+                            } else if (isStopHit) {
+                                if (maxLossPerMin > 0 && (currentMinuteLoss + Math.abs(cumulativeNet)) > maxLossPerMin) {
+                                    statusIcon = '🛑 BLOCKED (Limit Reached)';
+                                } else {
+                                    statusIcon = '🔥 EXECUTING GROUP (SL)!';
+                                    groupTriggered = true;
+                                }
                             }
 
                             liveHtml += \`<tr>
-                                <td style="padding:12px; border-bottom:1px solid #eee; font-weight:500; color:#5f6368;">\${loserIndex + 1} & \${winnerIndex + 1} <br><span style="font-size:0.75em; color:#1a73e8">\${statusIcon}</span></td>
+                                <td style="padding:12px; border-bottom:1px solid #eee; font-weight:500; color:#5f6368;">\${winnerIndex + 1} & \${loserIndex + 1} <br><span style="font-size:0.75em; color:#1a73e8">\${statusIcon}</span></td>
                                 <td style="padding:12px; border-bottom:1px solid #eee; font-weight:500;">\${w.symbol}</td>
                                 <td style="padding:12px; border-bottom:1px solid #eee; color:\${wColor}; font-weight:700;">\${w.pnl >= 0 ? '+' : ''}$\${w.pnl.toFixed(4)}</td>
                                 <td style="padding:12px; border-bottom:1px solid #eee; font-weight:500;">\${l.symbol}</td>
                                 <td style="padding:12px; border-bottom:1px solid #eee; color:\${lColor}; font-weight:700;">\${l.pnl >= 0 ? '+' : ''}$\${l.pnl.toFixed(4)}</td>
                                 <td style="padding:12px; border-bottom:1px solid #eee; color:\${nColor}; font-weight:700; background: #f8f9fa;">\${net >= 0 ? '+' : ''}$\${net.toFixed(4)}</td>
+                                <td style="padding:12px; border-bottom:1px solid #eee; color:\${cColor}; font-weight:700; background: #e8f0fe;">\${cumulativeNet >= 0 ? '+' : ''}$\${cumulativeNet.toFixed(4)}</td>
                             </tr>\`;
                         }
                         liveHtml += '</table>';
                         
-                        if (totalCoins % 2 !== 0) {
-                            const midIndex = totalPairs;
-                            const mid = activeCandidates[midIndex];
-                            const mColor = mid.pnl >= 0 ? '#1e8e3e' : '#d93025';
-                            liveHtml += \`<p style="font-size:0.85em; color:#5f6368; margin-top:12px;">Middle coin (Rank \${midIndex + 1}, Unpaired): <strong>\${mid.symbol}</strong> (<span style="color:\${mColor}">\${mid.pnl >= 0 ? '+' : ''}$\${mid.pnl.toFixed(4)}</span>)</p>\`;
-                        }
                         document.getElementById('liveOffsetsContainer').innerHTML = dynamicInfoHtml + liveHtml;
                     }
                 }
 
-                // --- RENDER LIVE SMART OFFSET TRADES (V2 - Ends / Outside-In) ---
+                // --- RENDER LIVE SMART OFFSET TRADES (V2 - STRICT 1 TO 1 ENDS) ---
                 if (document.getElementById('offset2-tab').style.display === 'block') {
                     activeCandidates.sort((a, b) => b.pnl - a.pnl);
                     const totalCoins = activeCandidates.length;
