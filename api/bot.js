@@ -285,11 +285,14 @@ setInterval(async () => {
             let globalUnrealized = 0;
             let activeCandidates = [];
             let firstProfileId = null; 
+            let totalAllCoinsUser = 0;
 
             for (let [profileId, botData] of activeBots.entries()) {
                 if (botData.userId !== dbUserId) continue;
                 if (!firstProfileId) firstProfileId = profileId;
                 
+                totalAllCoinsUser += botData.settings.coins.filter(c => c.botActive).length;
+
                 for (let symbol in botData.state.coinStates) {
                     const cState = botData.state.coinStates[symbol];
                     if (cState.status === 'Running' && cState.contracts > 0) {
@@ -306,6 +309,13 @@ setInterval(async () => {
             }
 
             if (!firstProfileId || activeCandidates.length === 0) continue;
+
+            const totalCoinsTrading = activeCandidates.length;
+            let dynamicDivisor = totalAllCoinsUser / (totalCoinsTrading || 1);
+            if (dynamicDivisor <= 0 || isNaN(dynamicDivisor)) dynamicDivisor = 1;
+
+            const dynamicTargetV1 = smartOffsetNetProfit > 0 ? (smartOffsetNetProfit / dynamicDivisor) : 0;
+            const dynamicTargetV2 = smartOffsetNetProfit2 > 0 ? (smartOffsetNetProfit2 / dynamicDivisor) : 0;
 
             let offsetExecuted = false;
 
@@ -328,9 +338,9 @@ setInterval(async () => {
                     let triggerOffset = false;
                     let reason = '';
 
-                    if (smartOffsetNetProfit > 0 && netResult >= smartOffsetNetProfit) {
+                    if (smartOffsetNetProfit > 0 && netResult >= dynamicTargetV1) {
                         triggerOffset = true;
-                        reason = 'TAKE PROFIT';
+                        reason = `TAKE PROFIT (Dyn: $${dynamicTargetV1.toFixed(4)})`;
                     } else if (smartOffsetStopLoss < 0 && netResult <= smartOffsetStopLoss) {
                         // Rate Limiter: Maximum 1 Stop Loss per minute across V1 and V2
                         if (Date.now() - (lastStopLossExecutions.get(dbUserId) || 0) >= 60000) {
@@ -389,9 +399,9 @@ setInterval(async () => {
                     let triggerOffset = false;
                     let reason = '';
 
-                    if (smartOffsetNetProfit2 > 0 && netResult >= smartOffsetNetProfit2) {
+                    if (smartOffsetNetProfit2 > 0 && netResult >= dynamicTargetV2) {
                         triggerOffset = true;
-                        reason = 'TAKE PROFIT (V2)';
+                        reason = `TAKE PROFIT V2 (Dyn: $${dynamicTargetV2.toFixed(4)})`;
                     } else if (smartOffsetStopLoss2 < 0 && netResult <= smartOffsetStopLoss2) {
                         // Rate Limiter: Maximum 1 Stop Loss per minute across V1 and V2
                         if (Date.now() - (lastStopLossExecutions.get(dbUserId) || 0) >= 60000) {
@@ -1213,6 +1223,13 @@ app.get('/', (req, res) => {
                         }
                     }
                 }
+
+                let totalAllCoinsUser = 0;
+                subAccountsUpdated.forEach(sub => {
+                    if (sub.coins) totalAllCoinsUser += sub.coins.filter(c => c.botActive).length;
+                });
+                let dynamicDivisor = totalAllCoinsUser / (totalTrading || 1);
+                if (dynamicDivisor <= 0 || isNaN(dynamicDivisor)) dynamicDivisor = 1;
                 
                 // --- RENDER LIVE SMART OFFSET TRADES (V1 - Half Split) ---
                 if (document.getElementById('offset-tab').style.display === 'block') {
@@ -1220,9 +1237,19 @@ app.get('/', (req, res) => {
                     const totalCoins = activeCandidates.length;
                     const totalPairs = Math.floor(totalCoins / 2);
 
+                    const currentTarget = globalSet.smartOffsetNetProfit || 0;
+                    let dynamicTargetV1 = currentTarget > 0 ? (currentTarget / dynamicDivisor) : 0;
+
                     if (totalPairs === 0) {
                         document.getElementById('liveOffsetsContainer').innerHTML = '<p style="color:#5f6368;">Not enough active trades to form pairs.</p>';
                     } else {
+                        let dynamicInfoHtml = \`<div style="margin-bottom: 12px; padding: 10px; background: #e8f0fe; border: 1px solid #cce0ff; border-radius: 4px; color: #1a73e8; font-weight: 500;">
+                            Dynamic Take Profit Target: $\${dynamicTargetV1.toFixed(4)} 
+                            <span style="font-size: 0.85em; color: #5f6368; font-weight: normal;">
+                                (Formula: Target $\${currentTarget.toFixed(2)} / (Total Active Coins \${totalAllCoinsUser} / Trading Coins \${totalTrading}))
+                            </span>
+                        </div>\`;
+
                         let liveHtml = '<table style="width:100%; text-align:left; border-collapse:collapse; background:#fff; border-radius:6px; overflow:hidden;">';
                         liveHtml += '<tr style="background:#e8f0fe;"><th style="padding:12px; border-bottom:2px solid #dadce0;">Rank Pair</th><th style="padding:12px; border-bottom:2px solid #dadce0;">Winner Coin</th><th style="padding:12px; border-bottom:2px solid #dadce0;">Winner PNL</th><th style="padding:12px; border-bottom:2px solid #dadce0;">Loser Coin</th><th style="padding:12px; border-bottom:2px solid #dadce0;">Loser PNL</th><th style="padding:12px; border-bottom:2px solid #dadce0;">Live Net Profit</th></tr>';
 
@@ -1234,14 +1261,13 @@ app.get('/', (req, res) => {
                             const l = activeCandidates[loserIndex];
                             const net = w.pnl + l.pnl;
 
-                            const currentTarget = globalSet.smartOffsetNetProfit || 0;
                             const currentSl = globalSet.smartOffsetStopLoss || 0;
 
                             const wColor = w.pnl >= 0 ? '#1e8e3e' : '#d93025';
                             const lColor = l.pnl >= 0 ? '#1e8e3e' : '#d93025';
                             const nColor = net >= 0 ? '#1e8e3e' : '#d93025';
                             
-                            const isTargetHit = (currentTarget > 0 && net >= currentTarget);
+                            const isTargetHit = (currentTarget > 0 && net >= dynamicTargetV1);
                             const isStopHit = (currentSl < 0 && net <= currentSl);
                             const statusIcon = (isTargetHit || isStopHit) ? '🔥 Executing...' : '⏳ Evaluating';
 
@@ -1262,7 +1288,7 @@ app.get('/', (req, res) => {
                             const mColor = mid.pnl >= 0 ? '#1e8e3e' : '#d93025';
                             liveHtml += \`<p style="font-size:0.85em; color:#5f6368; margin-top:12px;">Middle coin (Rank \${midIndex + 1}, Unpaired): <strong>\${mid.symbol}</strong> (<span style="color:\${mColor}">\${mid.pnl >= 0 ? '+' : ''}$\${mid.pnl.toFixed(4)}</span>)</p>\`;
                         }
-                        document.getElementById('liveOffsetsContainer').innerHTML = liveHtml;
+                        document.getElementById('liveOffsetsContainer').innerHTML = dynamicInfoHtml + liveHtml;
                     }
                 }
 
@@ -1272,9 +1298,19 @@ app.get('/', (req, res) => {
                     const totalCoins = activeCandidates.length;
                     const totalPairs = Math.floor(totalCoins / 2);
 
+                    const currentTarget2 = globalSet.smartOffsetNetProfit2 || 0;
+                    let dynamicTargetV2 = currentTarget2 > 0 ? (currentTarget2 / dynamicDivisor) : 0;
+
                     if (totalPairs === 0) {
                         document.getElementById('liveOffsetsContainer2').innerHTML = '<p style="color:#5f6368;">Not enough active trades to form pairs.</p>';
                     } else {
+                        let dynamicInfoHtml2 = \`<div style="margin-bottom: 12px; padding: 10px; background: #e8f0fe; border: 1px solid #cce0ff; border-radius: 4px; color: #1a73e8; font-weight: 500;">
+                            Dynamic Take Profit Target V2: $\${dynamicTargetV2.toFixed(4)} 
+                            <span style="font-size: 0.85em; color: #5f6368; font-weight: normal;">
+                                (Formula: Target $\${currentTarget2.toFixed(2)} / (Total Active Coins \${totalAllCoinsUser} / Trading Coins \${totalTrading}))
+                            </span>
+                        </div>\`;
+
                         let liveHtml = '<table style="width:100%; text-align:left; border-collapse:collapse; background:#fff; border-radius:6px; overflow:hidden;">';
                         liveHtml += '<tr style="background:#e8f0fe;"><th style="padding:12px; border-bottom:2px solid #dadce0;">Rank Pair</th><th style="padding:12px; border-bottom:2px solid #dadce0;">Winner Coin</th><th style="padding:12px; border-bottom:2px solid #dadce0;">Winner PNL</th><th style="padding:12px; border-bottom:2px solid #dadce0;">Loser Coin</th><th style="padding:12px; border-bottom:2px solid #dadce0;">Loser PNL</th><th style="padding:12px; border-bottom:2px solid #dadce0;">Live Net Profit</th></tr>';
 
@@ -1286,14 +1322,13 @@ app.get('/', (req, res) => {
                             const l = activeCandidates[loserIndex];
                             const net = w.pnl + l.pnl;
 
-                            const currentTarget = globalSet.smartOffsetNetProfit2 || 0;
                             const currentSl = globalSet.smartOffsetStopLoss2 || 0;
 
                             const wColor = w.pnl >= 0 ? '#1e8e3e' : '#d93025';
                             const lColor = l.pnl >= 0 ? '#1e8e3e' : '#d93025';
                             const nColor = net >= 0 ? '#1e8e3e' : '#d93025';
                             
-                            const isTargetHit = (currentTarget > 0 && net >= currentTarget);
+                            const isTargetHit = (currentTarget2 > 0 && net >= dynamicTargetV2);
                             const isStopHit = (currentSl < 0 && net <= currentSl);
                             const statusIcon = (isTargetHit || isStopHit) ? '🔥 Executing...' : '⏳ Evaluating';
 
@@ -1314,7 +1349,7 @@ app.get('/', (req, res) => {
                             const mColor = mid.pnl >= 0 ? '#1e8e3e' : '#d93025';
                             liveHtml += \`<p style="font-size:0.85em; color:#5f6368; margin-top:12px;">Middle coin (Rank \${midIndex + 1}, Unpaired): <strong>\${mid.symbol}</strong> (<span style="color:\${mColor}">\${mid.pnl >= 0 ? '+' : ''}$\${mid.pnl.toFixed(4)}</span>)</p>\`;
                         }
-                        document.getElementById('liveOffsetsContainer2').innerHTML = liveHtml;
+                        document.getElementById('liveOffsetsContainer2').innerHTML = dynamicInfoHtml2 + liveHtml;
                     }
                 }
                 // ---------------------------------------
