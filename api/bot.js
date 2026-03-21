@@ -338,8 +338,9 @@ setInterval(async () => {
                 const totalPairs = Math.floor(totalCoins / 2);
 
                 for (let i = 0; i < totalPairs; i++) {
-                    const winnerIndex = totalPairs - 1 - i;
-                    const loserIndex = totalCoins - 1 - i;
+                    // THE FIX: Pair the Strongest Winner with the Weakest Loser
+                    const winnerIndex = i; 
+                    const loserIndex = totalCoins - totalPairs + i;
 
                     const biggestWinner = activeCandidates[winnerIndex];
                     const biggestLoser = activeCandidates[loserIndex];
