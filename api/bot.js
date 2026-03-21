@@ -124,9 +124,42 @@ function startBot(userId, subAccount) {
         enableRateLimit: true 
     });
     
-    const state = { logs: [], coinStates: {} };
+    // NOTE: INJECTED PAPER TRADING STATE
+    const state = { logs: [], coinStates: {}, simulatedPositions: [] };
     let isProcessing = false;
     let lastError = '';
+
+    // ==========================================
+    // PAPER TRADING OVERRIDES (MOCKS CCXT EXECUTION)
+    // ==========================================
+    exchange.fetchPositions = async (symbols) => {
+        return state.simulatedPositions.filter(p => symbols.includes(p.symbol));
+    };
+
+    exchange.createOrder = async (symbol, type, side, amount, price, params) => {
+        const isClose = params && params.offset === 'close';
+        const posSide = params && params.offset === 'open' ? (side === 'buy' ? 'long' : 'short') : (side === 'sell' ? 'long' : 'short');
+        
+        if (isClose) {
+            state.simulatedPositions = state.simulatedPositions.filter(p => p.symbol !== symbol);
+            logForProfile(profileId, `[PAPER TRADE] Executed Virtual Close for ${symbol}`);
+        } else {
+            let pos = state.simulatedPositions.find(p => p.symbol === symbol);
+            const currentPrice = state.coinStates[symbol]?.currentPrice || 1; 
+            if (!pos) {
+                pos = { symbol, side: posSide, contracts: 0, entryPrice: currentPrice, contractSize: 1 };
+                state.simulatedPositions.push(pos);
+            }
+            const totalCost = (pos.contracts * pos.entryPrice) + (amount * currentPrice);
+            pos.contracts += amount;
+            pos.entryPrice = totalCost / pos.contracts;
+            logForProfile(profileId, `[PAPER TRADE] Virtual Order: ${side} ${amount} ${symbol} @ ~${currentPrice}`);
+        }
+        return { id: 'sim_' + Date.now(), info: {} };
+    };
+
+    exchange.setLeverage = async () => ({});
+    // ==========================================
 
     const intervalId = setInterval(async () => {
         if (isProcessing) return; 
@@ -253,7 +286,7 @@ function startBot(userId, subAccount) {
     }, 3000);
 
     activeBots.set(profileId, { userId: String(userId), settings: subAccount, state, exchange, intervalId });
-    logForProfile(profileId, `🚀 Engine Started for: ${subAccount.name}`);
+    logForProfile(profileId, `🚀 Engine Started for: ${subAccount.name} (PAPER TRADING MODE)`);
 }
 
 function stopBot(profileId) {
@@ -620,6 +653,24 @@ app.get('/api/offsets', authMiddleware, async (req, res) => {
     res.json(records);
 });
 
+// PNL RESET ENDPOINT
+app.post('/api/reset-pnl', authMiddleware, async (req, res) => {
+    const { profileId } = req.body;
+    const settings = await Settings.findOne({ userId: req.userId });
+    if (settings && settings.subAccounts) {
+        settings.subAccounts.forEach(sub => {
+            if (!profileId || sub._id.toString() === profileId) {
+                sub.realizedPnl = 0;
+                if (activeBots.has(sub._id.toString())) {
+                    activeBots.get(sub._id.toString()).settings.realizedPnl = 0;
+                }
+            }
+        });
+        await Settings.updateOne({ userId: req.userId }, { $set: { subAccounts: settings.subAccounts } });
+    }
+    res.json({ success: true });
+});
+
 // ==========================================
 // 7. FRONTEND UI
 // ==========================================
@@ -630,7 +681,7 @@ app.get('/', (req, res) => {
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>HTX Multi-User Bot (Vercel Build)</title>
+        <title>HTX Multi-User Bot (Paper Trading)</title>
         <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&display=swap" rel="stylesheet">
         <style>
             body { font-family: 'Roboto', sans-serif; background: #f4f6f8; color: #333; margin: 0; padding: 20px; }
@@ -683,7 +734,7 @@ app.get('/', (req, res) => {
         <!-- DASHBOARD VIEW -->
         <div id="dashboard-view" class="container">
             <div class="header">
-                <h1>HTX Trading Bot</h1>
+                <h1>HTX Trading Bot (Paper Trade)</h1>
                 <div style="display:flex; gap:12px;">
                     <button class="btn-blue" style="margin:0; width:auto; padding: 8px 16px;" onclick="switchTab('main')">Dashboard</button>
                     <button class="btn-logout" style="margin:0; width:auto;" onclick="switchTab('offsets')">Smart Offsets (Half)</button>
@@ -857,8 +908,16 @@ app.get('/', (req, res) => {
                         <h2>Live Profile Dashboard</h2>
                         <div class="status-box" style="background:#e8f0fe; border-color:#d2e3fc;">
                             <div class="flex-row" style="justify-content: space-between;">
-                                <div><span class="stat-label">Global Realized PNL</span><span class="val" id="globalPnl">0.00</span></div>
-                                <div><span class="stat-label">Current Profile PNL</span><span class="val" id="profilePnl">0.00</span></div>
+                                <div>
+                                    <span class="stat-label">Global Realized PNL</span>
+                                    <span class="val" id="globalPnl">0.00</span>
+                                    <button class="btn-blue" style="margin-top:8px; font-size: 0.75em; padding: 4px 8px; width: auto;" onclick="resetPnl('global')">Reset Global PNL</button>
+                                </div>
+                                <div>
+                                    <span class="stat-label">Current Profile PNL</span>
+                                    <span class="val" id="profilePnl">0.00</span>
+                                    <button class="btn-blue" style="margin-top:8px; font-size: 0.75em; padding: 4px 8px; width: auto;" onclick="resetPnl('profile')">Reset Profile PNL</button>
+                                </div>
                             </div>
                         </div>
                         
@@ -1138,6 +1197,22 @@ app.get('/', (req, res) => {
                 const coin = myCoins.find(c => c.symbol === symbol);
                 if(coin) coin.botActive = active;
                 await saveSettings(true); 
+            }
+
+            async function resetPnl(type) {
+                if (!confirm(\`Are you sure you want to reset \${type} PNL?\`)) return;
+                let profileId = null;
+                if (type === 'profile') {
+                    if (currentProfileIndex === -1) return alert("No profile loaded!");
+                    profileId = mySubAccounts[currentProfileIndex]._id;
+                }
+                await fetch('/api/reset-pnl', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
+                    body: JSON.stringify({ profileId })
+                });
+                alert(type.toUpperCase() + ' PNL Reset Successfully!');
+                loadStatus(); 
             }
 
             async function loadOffsets() {
