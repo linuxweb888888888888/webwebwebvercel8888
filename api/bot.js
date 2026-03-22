@@ -66,6 +66,8 @@ const SettingsSchema = new mongoose.Schema({
     smartOffsetNetProfit2: { type: Number, default: 0 }, 
     smartOffsetStopLoss2: { type: Number, default: 0 },   
     smartOffsetMaxLossPerMinute: { type: Number, default: 0 }, 
+    minuteCloseMinPnl: { type: Number, default: 0 },
+    minuteCloseMaxPnl: { type: Number, default: 0 },
     subAccounts: [SubAccountSchema]
 });
 const Settings = mongoose.model('Settings', SettingsSchema);
@@ -280,6 +282,60 @@ function stopBot(profileId) {
         console.log(`[Profile: ${profileId}] ⏹ Bot Stopped.`);
     }
 }
+
+// =========================================================================
+// 4.5. 1-MINUTE RANGE POSITION CLOSER
+// =========================================================================
+setInterval(async () => {
+    try {
+        await connectDB();
+        const usersSettings = await Settings.find({});
+        for (let userSetting of usersSettings) {
+            const rawMin = parseFloat(userSetting.minuteCloseMinPnl) || 0;
+            const rawMax = parseFloat(userSetting.minuteCloseMaxPnl) || 0;
+            
+            if (rawMin === 0 && rawMax === 0) continue; // Disabled if both are 0
+
+            const actualMin = Math.min(rawMin, rawMax);
+            const actualMax = Math.max(rawMin, rawMax);
+            
+            const dbUserId = String(userSetting.userId);
+            
+            for (let [profileId, botData] of activeBots.entries()) {
+                if (botData.userId !== dbUserId) continue;
+                
+                for (let symbol in botData.state.coinStates) {
+                    const cState = botData.state.coinStates[symbol];
+                    
+                    // Check if running and not locked
+                    if (cState.status === 'Running' && cState.contracts > 0 && (!cState.lockUntil || Date.now() >= cState.lockUntil)) {
+                        const pnl = parseFloat(cState.unrealizedPnl) || 0;
+                        
+                        if (pnl >= actualMin && pnl <= actualMax) {
+                            logForProfile(profileId, `[${symbol}] ⏳ 1-Min Range Closer: PNL $${pnl.toFixed(4)} is between $${actualMin} and $${actualMax}. Closing position.`);
+                            
+                            cState.lockUntil = Date.now() + 8000;
+                            const contractsToClose = cState.contracts;
+                            cState.contracts = 0;
+                            cState.unrealizedPnl = 0;
+                            cState.currentRoi = 0;
+
+                            const activeSide = botData.settings.coins.find(c => c.symbol === symbol)?.side || botData.settings.side;
+                            const orderSide = activeSide === 'long' ? 'sell' : 'buy';
+                            
+                            botData.exchange.createOrder(symbol, 'market', orderSide, contractsToClose, undefined, { offset: 'close', reduceOnly: true, lever_rate: botData.settings.leverage }).catch(()=>{});
+
+                            botData.settings.realizedPnl = (botData.settings.realizedPnl || 0) + pnl;
+                            Settings.updateOne({ "subAccounts._id": botData.settings._id }, { $set: { "subAccounts.$.realizedPnl": botData.settings.realizedPnl } }).catch(()=>{});
+                        }
+                    }
+                }
+            }
+        }
+    } catch (err) {
+        console.error("1-Min Range Closer Error:", err);
+    }
+}, 60000);
 
 // =========================================================================
 // 5. GLOBAL PROFIT LOGIC (Manual Strict Mode)
@@ -644,7 +700,7 @@ app.post('/api/register', async (req, res) => {
         const { username, password } = req.body;
         const hashedPassword = await bcrypt.hash(password, 10);
         const user = await User.create({ username, password: hashedPassword });
-        await Settings.create({ userId: user._id, subAccounts: [], globalTargetPnl: 0, globalTrailingPnl: 0, smartOffsetNetProfit: 0, smartOffsetBottomRowV1: 5, smartOffsetStopLoss: 0, smartOffsetNetProfit2: 0, smartOffsetStopLoss2: 0, smartOffsetMaxLossPerMinute: 0 });
+        await Settings.create({ userId: user._id, subAccounts: [], globalTargetPnl: 0, globalTrailingPnl: 0, smartOffsetNetProfit: 0, smartOffsetBottomRowV1: 5, smartOffsetStopLoss: 0, smartOffsetNetProfit2: 0, smartOffsetStopLoss2: 0, smartOffsetMaxLossPerMinute: 0, minuteCloseMinPnl: 0, minuteCloseMaxPnl: 0 });
         res.json({ success: true, message: 'Registration successful!' });
     } catch (err) {
         res.status(400).json({ error: 'Username already exists or invalid data.' });
@@ -666,7 +722,7 @@ app.get('/api/settings', authMiddleware, async (req, res) => {
 });
 
 app.post('/api/settings', authMiddleware, async (req, res) => {
-    const { subAccounts, globalTargetPnl, globalTrailingPnl, smartOffsetNetProfit, smartOffsetBottomRowV1, smartOffsetStopLoss, smartOffsetNetProfit2, smartOffsetStopLoss2, smartOffsetMaxLossPerMinute } = req.body;
+    const { subAccounts, globalTargetPnl, globalTrailingPnl, smartOffsetNetProfit, smartOffsetBottomRowV1, smartOffsetStopLoss, smartOffsetNetProfit2, smartOffsetStopLoss2, smartOffsetMaxLossPerMinute, minuteCloseMinPnl, minuteCloseMaxPnl } = req.body;
     
     const existingSettings = await Settings.findOne({ userId: req.userId });
     if (existingSettings && existingSettings.subAccounts) {
@@ -702,7 +758,9 @@ app.post('/api/settings', authMiddleware, async (req, res) => {
             smartOffsetStopLoss: parsedStopLoss,
             smartOffsetNetProfit2: parseFloat(smartOffsetNetProfit2) || 0,
             smartOffsetStopLoss2: parsedStopLoss2,
-            smartOffsetMaxLossPerMinute: parseFloat(smartOffsetMaxLossPerMinute) || 0
+            smartOffsetMaxLossPerMinute: parseFloat(smartOffsetMaxLossPerMinute) || 0,
+            minuteCloseMinPnl: parseFloat(minuteCloseMinPnl) || 0,
+            minuteCloseMaxPnl: parseFloat(minuteCloseMaxPnl) || 0
         }, 
         { returnDocument: 'after' }
     );
@@ -917,6 +975,14 @@ app.get('/', (req, res) => {
                                 <p style="font-size:0.75em; color:#5f6368; margin-top:2px; line-height:1.4;">If > 0, allows multiple stop losses per minute as long as the total combined loss is under this amount. If 0, limits exactly to 1 SL per minute regardless of amount. *(Must be large enough to cover the single largest SL execution)*.</p>
                                 <input type="number" step="0.1" id="smartOffsetMaxLossPerMinute" placeholder="e.g. 10.00 (0 = classic 1 per min rule)">
                             </div>
+                            <div style="margin-top: 12px; border-top: 1px solid #cce0ff; padding-top: 12px;">
+                                <label style="margin-top:0;">1-Minute Interval: Close Positions Between PNL ($)</label>
+                                <p style="font-size:0.75em; color:#5f6368; margin-top:2px; line-height:1.4;">Checks every 60 seconds. Closes any single position if its PNL is exactly between these two values.</p>
+                                <div class="flex-row">
+                                    <div style="flex:1;"><input type="number" step="0.0001" id="minuteCloseMinPnl" placeholder="Min PNL (e.g. 0.0001)"></div>
+                                    <div style="flex:1;"><input type="number" step="0.0001" id="minuteCloseMaxPnl" placeholder="Max PNL (e.g. 0.0004)"></div>
+                                </div>
+                            </div>
                             <button class="btn-blue" style="margin-top:16px;" onclick="saveGlobalSettings()">Save Global Settings</button>
                         </div>
 
@@ -1025,6 +1091,8 @@ app.get('/', (req, res) => {
             let mySmartOffsetNetProfit2 = 0;
             let mySmartOffsetStopLoss2 = 0;
             let mySmartOffsetMaxLossPerMinute = 0;
+            let myMinuteCloseMinPnl = 0;
+            let myMinuteCloseMaxPnl = 0;
             let currentProfileIndex = -1;
             let myCoins = [];
             
@@ -1098,6 +1166,8 @@ app.get('/', (req, res) => {
                 mySmartOffsetNetProfit2 = config.smartOffsetNetProfit2 || 0;
                 mySmartOffsetStopLoss2 = config.smartOffsetStopLoss2 || 0;
                 mySmartOffsetMaxLossPerMinute = config.smartOffsetMaxLossPerMinute || 0;
+                myMinuteCloseMinPnl = config.minuteCloseMinPnl || 0;
+                myMinuteCloseMaxPnl = config.minuteCloseMaxPnl || 0;
                 
                 document.getElementById('globalTargetPnl').value = myGlobalTargetPnl;
                 document.getElementById('globalTrailingPnl').value = myGlobalTrailingPnl;
@@ -1107,6 +1177,8 @@ app.get('/', (req, res) => {
                 document.getElementById('smartOffsetNetProfit2').value = mySmartOffsetNetProfit2;
                 document.getElementById('smartOffsetStopLoss2').value = mySmartOffsetStopLoss2;
                 document.getElementById('smartOffsetMaxLossPerMinute').value = mySmartOffsetMaxLossPerMinute;
+                document.getElementById('minuteCloseMinPnl').value = myMinuteCloseMinPnl;
+                document.getElementById('minuteCloseMaxPnl').value = myMinuteCloseMaxPnl;
 
                 mySubAccounts = config.subAccounts || [];
                 renderSubAccounts();
@@ -1129,8 +1201,10 @@ app.get('/', (req, res) => {
                 mySmartOffsetNetProfit2 = parseFloat(document.getElementById('smartOffsetNetProfit2').value) || 0;
                 mySmartOffsetStopLoss2 = parseFloat(document.getElementById('smartOffsetStopLoss2').value) || 0;
                 mySmartOffsetMaxLossPerMinute = parseFloat(document.getElementById('smartOffsetMaxLossPerMinute').value) || 0;
+                myMinuteCloseMinPnl = parseFloat(document.getElementById('minuteCloseMinPnl').value) || 0;
+                myMinuteCloseMaxPnl = parseFloat(document.getElementById('minuteCloseMaxPnl').value) || 0;
                 
-                const data = { subAccounts: mySubAccounts, globalTargetPnl: myGlobalTargetPnl, globalTrailingPnl: myGlobalTrailingPnl, smartOffsetNetProfit: mySmartOffsetNetProfit, smartOffsetBottomRowV1: mySmartOffsetBottomRowV1, smartOffsetStopLoss: mySmartOffsetStopLoss, smartOffsetNetProfit2: mySmartOffsetNetProfit2, smartOffsetStopLoss2: mySmartOffsetStopLoss2, smartOffsetMaxLossPerMinute: mySmartOffsetMaxLossPerMinute };
+                const data = { subAccounts: mySubAccounts, globalTargetPnl: myGlobalTargetPnl, globalTrailingPnl: myGlobalTrailingPnl, smartOffsetNetProfit: mySmartOffsetNetProfit, smartOffsetBottomRowV1: mySmartOffsetBottomRowV1, smartOffsetStopLoss: mySmartOffsetStopLoss, smartOffsetNetProfit2: mySmartOffsetNetProfit2, smartOffsetStopLoss2: mySmartOffsetStopLoss2, smartOffsetMaxLossPerMinute: mySmartOffsetMaxLossPerMinute, minuteCloseMinPnl: myMinuteCloseMinPnl, minuteCloseMaxPnl: myMinuteCloseMaxPnl };
                 await fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token }, body: JSON.stringify(data) });
                 alert('Global Settings Saved Successfully!');
             }
@@ -1150,7 +1224,7 @@ app.get('/', (req, res) => {
                 
                 mySubAccounts.push({ name, apiKey: key, secret: secret, side: 'long', leverage: 10, baseQty: 1, takeProfitPct: 5.0, stopLossPct: -25.0, triggerRoiPct: -15.0, dcaTargetRoiPct: -2.0, maxContracts: 1000, realizedPnl: 0, coins: [] });
                 
-                const data = { subAccounts: mySubAccounts, globalTargetPnl: myGlobalTargetPnl, globalTrailingPnl: myGlobalTrailingPnl, smartOffsetNetProfit: mySmartOffsetNetProfit, smartOffsetBottomRowV1: mySmartOffsetBottomRowV1, smartOffsetStopLoss: mySmartOffsetStopLoss, smartOffsetNetProfit2: mySmartOffsetNetProfit2, smartOffsetStopLoss2: mySmartOffsetStopLoss2, smartOffsetMaxLossPerMinute: mySmartOffsetMaxLossPerMinute };
+                const data = { subAccounts: mySubAccounts, globalTargetPnl: myGlobalTargetPnl, globalTrailingPnl: myGlobalTrailingPnl, smartOffsetNetProfit: mySmartOffsetNetProfit, smartOffsetBottomRowV1: mySmartOffsetBottomRowV1, smartOffsetStopLoss: mySmartOffsetStopLoss, smartOffsetNetProfit2: mySmartOffsetNetProfit2, smartOffsetStopLoss2: mySmartOffsetStopLoss2, smartOffsetMaxLossPerMinute: mySmartOffsetMaxLossPerMinute, minuteCloseMinPnl: myMinuteCloseMinPnl, minuteCloseMaxPnl: myMinuteCloseMaxPnl };
                 const res = await fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token }, body: JSON.stringify(data) });
                 const json = await res.json();
                 mySubAccounts = json.settings.subAccounts || [];
@@ -1194,7 +1268,7 @@ app.get('/', (req, res) => {
                 const index = parseInt(select.value);
                 if(!isNaN(index) && index >= 0) {
                     mySubAccounts.splice(index, 1);
-                    const data = { subAccounts: mySubAccounts, globalTargetPnl: myGlobalTargetPnl, globalTrailingPnl: myGlobalTrailingPnl, smartOffsetNetProfit: mySmartOffsetNetProfit, smartOffsetBottomRowV1: mySmartOffsetBottomRowV1, smartOffsetStopLoss: mySmartOffsetStopLoss, smartOffsetNetProfit2: mySmartOffsetNetProfit2, smartOffsetStopLoss2: mySmartOffsetStopLoss2, smartOffsetMaxLossPerMinute: mySmartOffsetMaxLossPerMinute };
+                    const data = { subAccounts: mySubAccounts, globalTargetPnl: myGlobalTargetPnl, globalTrailingPnl: myGlobalTrailingPnl, smartOffsetNetProfit: mySmartOffsetNetProfit, smartOffsetBottomRowV1: mySmartOffsetBottomRowV1, smartOffsetStopLoss: mySmartOffsetStopLoss, smartOffsetNetProfit2: mySmartOffsetNetProfit2, smartOffsetStopLoss2: mySmartOffsetStopLoss2, smartOffsetMaxLossPerMinute: mySmartOffsetMaxLossPerMinute, minuteCloseMinPnl: myMinuteCloseMinPnl, minuteCloseMaxPnl: myMinuteCloseMaxPnl };
                     const res = await fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token }, body: JSON.stringify(data) });
                     const json = await res.json();
                     mySubAccounts = json.settings.subAccounts || [];
@@ -1276,7 +1350,7 @@ app.get('/', (req, res) => {
                 profile.maxContracts = parseInt(document.getElementById('maxContracts').value);
                 profile.coins = myCoins;
 
-                const data = { subAccounts: mySubAccounts, globalTargetPnl: myGlobalTargetPnl, globalTrailingPnl: myGlobalTrailingPnl, smartOffsetNetProfit: mySmartOffsetNetProfit, smartOffsetBottomRowV1: mySmartOffsetBottomRowV1, smartOffsetStopLoss: mySmartOffsetStopLoss, smartOffsetNetProfit2: mySmartOffsetNetProfit2, smartOffsetStopLoss2: mySmartOffsetStopLoss2, smartOffsetMaxLossPerMinute: mySmartOffsetMaxLossPerMinute };
+                const data = { subAccounts: mySubAccounts, globalTargetPnl: myGlobalTargetPnl, globalTrailingPnl: myGlobalTrailingPnl, smartOffsetNetProfit: mySmartOffsetNetProfit, smartOffsetBottomRowV1: mySmartOffsetBottomRowV1, smartOffsetStopLoss: mySmartOffsetStopLoss, smartOffsetNetProfit2: mySmartOffsetNetProfit2, smartOffsetStopLoss2: mySmartOffsetStopLoss2, smartOffsetMaxLossPerMinute: mySmartOffsetMaxLossPerMinute, minuteCloseMinPnl: myMinuteCloseMinPnl, minuteCloseMaxPnl: myMinuteCloseMaxPnl };
                 const res = await fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token }, body: JSON.stringify(data) });
                 const json = await res.json();
                 mySubAccounts = json.settings.subAccounts || [];
