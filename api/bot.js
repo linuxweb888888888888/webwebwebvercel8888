@@ -341,7 +341,8 @@ const executeOneMinuteCloser = async () => {
                     rawMin = 0; rawMax = 0;
                 }
 
-                if (rawMin === rawMax) {
+                // If difference is 0.0001 or less, fallback to default 0.0004 & 0.0006
+                if (Math.abs(rawMax - rawMin) <= 0.000101) {
                     rawMax = 0.0006;
                     rawMin = 0.0004;
                 }
@@ -1497,7 +1498,7 @@ app.get('/', (req, res) => {
                     }
                 }
 
-                if (!hasDynamicBoundary || dynamicMin === dynamicMax) {
+                if (!hasDynamicBoundary || Math.abs(dynamicMax - dynamicMin) <= 0.000101) {
                     dynamicMax = 0.0006;
                     dynamicMin = 0.0004;
                     hasDynamicBoundary = true; 
