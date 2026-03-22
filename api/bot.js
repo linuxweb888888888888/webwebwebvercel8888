@@ -1,6 +1,3 @@
-//web8888
-//web8888
-
 const express = require('express');
 const ccxt = require('ccxt');
 const mongoose = require('mongoose');
@@ -205,7 +202,7 @@ function startBot(userId, subAccount) {
                         const safeBaseQty = Math.max(1, Math.floor(currentSettings.baseQty));
                         
                         logForProfile(profileId, `[${coin.symbol}] 🛒 No position. Opening base position of ${safeBaseQty} contracts (${activeSide}).`);
-                        cState.lockUntil = Date.now() + 8000; 
+                        cState.lockUntil = Date.now() + 10000; 
                         await exchange.setLeverage(currentSettings.leverage, coin.symbol, { marginMode: 'cross' }).catch(()=>{});
                         const orderSide = activeSide === 'long' ? 'buy' : 'sell';
                         await exchange.createOrder(coin.symbol, 'market', orderSide, safeBaseQty, undefined, { offset: 'open', lever_rate: currentSettings.leverage });
@@ -235,7 +232,7 @@ function startBot(userId, subAccount) {
                         logForProfile(profileId, `[${coin.symbol}] ${reason} hit! (${cState.currentRoi.toFixed(2)}%). Closing ${cState.contracts} contracts.`);
                         
                         const contractsToClose = cState.contracts;
-                        cState.lockUntil = Date.now() + 8000;
+                        cState.lockUntil = Date.now() + 10000;
                         cState.contracts = 0; cState.unrealizedPnl = 0; cState.currentRoi = 0;
 
                         const orderSide = activeSide === 'long' ? 'sell' : 'buy';
@@ -247,7 +244,7 @@ function startBot(userId, subAccount) {
                     }
 
                     // DCA TRIGGER
-                    if (cState.currentRoi <= currentSettings.triggerRoiPct && (Date.now() - cState.lastDcaTime > 10000)) {
+                    if (cState.currentRoi <= currentSettings.triggerRoiPct && (Date.now() - cState.lastDcaTime > 12000)) {
                         const reqQty = calculateDcaQty(activeSide, cState.avgEntry, cState.currentPrice, cState.contracts, currentSettings.leverage, currentSettings.dcaTargetRoiPct);
 
                         if (reqQty <= 0) {
@@ -257,7 +254,7 @@ function startBot(userId, subAccount) {
                             cState.lastDcaTime = Date.now(); 
                         } else {
                             logForProfile(profileId, `[${coin.symbol}] ⚡ Executing DCA: Buying ${reqQty} contracts at ~${cState.currentPrice}`);
-                            cState.lockUntil = Date.now() + 8000; 
+                            cState.lockUntil = Date.now() + 10000; 
                             const orderSide = activeSide === 'long' ? 'buy' : 'sell';
                             await exchange.createOrder(coin.symbol, 'market', orderSide, reqQty, undefined, { offset: 'open', lever_rate: currentSettings.leverage }).catch(()=>{});
                             cState.lastDcaTime = Date.now(); 
@@ -277,7 +274,7 @@ function startBot(userId, subAccount) {
         } finally {
             isProcessing = false;
         }
-    }, 3000);
+    }, 6000);
 
     activeBots.set(profileId, { userId: String(userId), settings: subAccount, state, exchange, intervalId });
     logForProfile(profileId, `🚀 Engine Started for: ${subAccount.name}`);
@@ -361,7 +358,7 @@ const executeOneMinuteCloser = async () => {
                 if (pos.pnl >= actualMin && pos.pnl <= actualMax) {
                     logForProfile(pos.profileId, `[${pos.symbol}] ⏳ 1-Min Range Closer: PNL $${pos.pnl.toFixed(4)} is in boundary. Closing position.`);
                     
-                    pos.cState.lockUntil = Date.now() + 8000;
+                    pos.cState.lockUntil = Date.now() + 10000;
                     const contractsToClose = pos.contracts;
                     pos.cState.contracts = 0;
                     pos.cState.unrealizedPnl = 0;
@@ -525,7 +522,7 @@ const executeGlobalProfitMonitor = async () => {
                         const pos = finalPairsToClose[k];
                         const bState = activeBots.get(pos.profileId).state.coinStates[pos.symbol];
                         
-                        if (bState) { bState.lockUntil = Date.now() + 8000; bState.contracts = 0; }
+                        if (bState) { bState.lockUntil = Date.now() + 10000; bState.contracts = 0; }
                         if (k % 2 === 0) totalWinnerPnl += pos.unrealizedPnl;
                         else totalLoserPnl += pos.unrealizedPnl;
 
@@ -589,10 +586,10 @@ const executeGlobalProfitMonitor = async () => {
                         OffsetRecord.create({ userId: dbUserId, winnerSymbol: biggestWinner.symbol, winnerPnl: biggestWinner.unrealizedPnl, loserSymbol: biggestLoser.symbol, loserPnl: biggestLoser.unrealizedPnl, netProfit: netResult }).catch(()=>{});
 
                         const bStateW = activeBots.get(biggestWinner.profileId).state.coinStates[biggestWinner.symbol];
-                        if(bStateW) { bStateW.lockUntil = Date.now() + 8000; bStateW.contracts = 0; }
+                        if(bStateW) { bStateW.lockUntil = Date.now() + 10000; bStateW.contracts = 0; }
                         
                         const bStateL = activeBots.get(biggestLoser.profileId).state.coinStates[biggestLoser.symbol];
-                        if(bStateL) { bStateL.lockUntil = Date.now() + 8000; bStateL.contracts = 0; }
+                        if(bStateL) { bStateL.lockUntil = Date.now() + 10000; bStateL.contracts = 0; }
 
                         const wOrderSide = biggestWinner.side === 'long' ? 'sell' : 'buy';
                         await biggestWinner.exchange.createOrder(biggestWinner.symbol, 'market', wOrderSide, biggestWinner.contracts, undefined, { offset: 'close', reduceOnly: true, lever_rate: biggestWinner.leverage }).catch(()=>{});
@@ -640,7 +637,7 @@ const executeGlobalProfitMonitor = async () => {
                         try {
                             const bData = activeBots.get(pos.profileId);
                             if (bData && bData.state.coinStates[pos.symbol]) {
-                                bData.state.coinStates[pos.symbol].lockUntil = Date.now() + 8000;
+                                bData.state.coinStates[pos.symbol].lockUntil = Date.now() + 10000;
                                 bData.state.coinStates[pos.symbol].contracts = 0;
                                 bData.state.coinStates[pos.symbol].unrealizedPnl = 0;
                             }
@@ -667,7 +664,7 @@ const bootstrapBots = async () => {
         console.log("🛠 Bootstrapping Background Loops for Vercel...");
         
         setInterval(executeOneMinuteCloser, 60000);
-        setInterval(executeGlobalProfitMonitor, 4000);
+        setInterval(executeGlobalProfitMonitor, 6000);
 
         try {
             await connectDB();
@@ -1145,7 +1142,7 @@ app.get('/', (req, res) => {
                     document.getElementById('auth-view').style.display = 'none';
                     document.getElementById('dashboard-view').style.display = 'block';
                     fetchSettings();
-                    statusInterval = setInterval(loadStatus, 2000);
+                    statusInterval = setInterval(loadStatus, 5000);
                 } else {
                     document.getElementById('auth-view').style.display = 'block';
                     document.getElementById('dashboard-view').style.display = 'none';
