@@ -81,8 +81,10 @@ const SettingsSchema = new mongoose.Schema({
     smartOffsetMaxLossPerMinute: { type: Number, default: 0 }, 
     smartOffsetMaxLossTimeframeSeconds: { type: Number, default: 60 },
     minuteCloseAutoDynamic: { type: Boolean, default: false },
-    minuteCloseMinPnl: { type: Number, default: 0 },
-    minuteCloseMaxPnl: { type: Number, default: 0 },
+    minuteCloseTpMinPnl: { type: Number, default: 0 }, // Separated TP Range
+    minuteCloseTpMaxPnl: { type: Number, default: 0 },
+    minuteCloseSlMinPnl: { type: Number, default: 0 }, // Separated SL Range
+    minuteCloseSlMaxPnl: { type: Number, default: 0 },
     subAccounts: [SubAccountSchema]
 });
 const Settings = mongoose.models.Settings || mongoose.model('Settings', SettingsSchema);
@@ -296,9 +298,13 @@ const executeOneMinuteCloser = async () => {
         const usersSettings = await Settings.find({});
         for (let userSetting of usersSettings) {
             const dbUserId = String(userSetting.userId);
-            // Treat user inputs as absolute magnitudes
-            let rawMin = Math.abs(parseFloat(userSetting.minuteCloseMinPnl) || 0);
-            let rawMax = Math.abs(parseFloat(userSetting.minuteCloseMaxPnl) || 0);
+            
+            // Treat user inputs: TP is positive absolute, SL is negative absolute
+            let rawTpMin = Math.abs(parseFloat(userSetting.minuteCloseTpMinPnl) || 0);
+            let rawTpMax = Math.abs(parseFloat(userSetting.minuteCloseTpMaxPnl) || 0);
+            let rawSlMin = -Math.abs(parseFloat(userSetting.minuteCloseSlMinPnl) || 0);
+            let rawSlMax = -Math.abs(parseFloat(userSetting.minuteCloseSlMaxPnl) || 0);
+            
             const autoDynamic = userSetting.minuteCloseAutoDynamic || false;
             
             let activeCandidates = [];
@@ -338,34 +344,40 @@ const executeOneMinuteCloser = async () => {
                 if (peakRowIndex >= 0 && peakRowIndex + 1 < totalPairs) {
                     let val1 = activeCandidates[peakRowIndex].pnl;
                     let val2 = activeCandidates[peakRowIndex + 1].pnl;
+                    
                     // Mirror positive peak to exact magnitude boundaries
-                    rawMin = Math.min(Math.abs(val1), Math.abs(val2));
-                    rawMax = Math.max(Math.abs(val1), Math.abs(val2));
+                    rawTpMin = Math.min(Math.abs(val1), Math.abs(val2));
+                    rawTpMax = Math.max(Math.abs(val1), Math.abs(val2));
+                    
+                    // Set SL ranges strictly negative mirrored from the positive side
+                    rawSlMin = -rawTpMax; 
+                    rawSlMax = -rawTpMin;
                 } else {
-                    rawMin = 0; rawMax = 0;
+                    rawTpMin = 0; rawTpMax = 0; rawSlMin = 0; rawSlMax = 0;
                 }
 
-                // If difference is 0.0001 or less, disable for this cycle (set to 0)
-                if (Math.abs(rawMax - rawMin) <= 0.000101) {
-                    rawMax = 0;
-                    rawMin = 0;
+                // If difference is 0.0001 or less, disable for this cycle
+                if (Math.abs(rawTpMax - rawTpMin) <= 0.000101) {
+                    rawTpMin = 0; rawTpMax = 0; rawSlMin = 0; rawSlMax = 0;
                 }
             }
 
-            if (rawMin === 0 && rawMax === 0) continue; 
+            // Create guaranteed ordered ranges safely
+            const tpMin = Math.min(rawTpMin, rawTpMax);
+            const tpMax = Math.max(rawTpMin, rawTpMax);
+            const slMin = Math.min(rawSlMin, rawSlMax); // highly negative e.g. -0.0008
+            const slMax = Math.max(rawSlMin, rawSlMax); // closer to zero e.g. -0.0004
 
-            // Create guaranteed absolute range boundaries
-            const absMin = Math.min(rawMin, rawMax);
-            const absMax = Math.max(rawMin, rawMax);
+            if (tpMax === 0 && slMin === 0) continue; 
 
             for (let pos of activeCandidates) {
-                // Mirrored conditions: Allow both positive (Take Profit) and negative (Stop Loss)
-                const isPositiveMatch = pos.pnl > 0 && pos.pnl >= absMin && pos.pnl <= absMax;
-                const isNegativeMatch = pos.pnl < 0 && pos.pnl <= -absMin && pos.pnl >= -absMax;
+                // Independent Checks
+                const isPositiveMatch = (tpMax > 0 && pos.pnl > 0 && pos.pnl >= tpMin && pos.pnl <= tpMax);
+                const isNegativeMatch = (slMin < 0 && pos.pnl < 0 && pos.pnl >= slMin && pos.pnl <= slMax);
 
                 if (isPositiveMatch || isNegativeMatch) {
-                    const sideStr = isPositiveMatch ? "Positive (Take Profit)" : "Negative (Stop Loss)";
-                    logForProfile(pos.profileId, `[${pos.symbol}] ⏳ 1-Min Mirrored Closer: PNL $${pos.pnl.toFixed(4)} matches the ${sideStr} boundary. Closing position.`);
+                    const sideStr = isPositiveMatch ? "Take Profit" : "Stop Loss";
+                    logForProfile(pos.profileId, `[${pos.symbol}] ⏳ 1-Min Range Closer: PNL $${pos.pnl.toFixed(4)} matches the ${sideStr} boundary. Closing position.`);
                     
                     pos.cState.lockUntil = Date.now() + 10000;
                     const contractsToClose = pos.contracts;
@@ -384,7 +396,7 @@ const executeOneMinuteCloser = async () => {
             }
         }
     } catch (err) {
-        console.error("1-Min Mirrored Closer Error:", err);
+        console.error("1-Min Range Closer Error:", err);
     }
 };
 
@@ -695,7 +707,7 @@ app.post('/api/register', async (req, res) => {
         const { username, password } = req.body;
         const hashedPassword = await bcrypt.hash(password, 10);
         const user = await User.create({ username, password: hashedPassword });
-        await Settings.create({ userId: user._id, subAccounts: [], globalTargetPnl: 0, globalTrailingPnl: 0, smartOffsetNetProfit: 0, smartOffsetBottomRowV1: 5, smartOffsetBottomRowV1StopLoss: 0, smartOffsetStopLoss: 0, smartOffsetNetProfit2: 0, smartOffsetStopLoss2: 0, smartOffsetMaxLossPerMinute: 0, smartOffsetMaxLossTimeframeSeconds: 60, minuteCloseAutoDynamic: false, minuteCloseMinPnl: 0, minuteCloseMaxPnl: 0 });
+        await Settings.create({ userId: user._id, subAccounts: [], globalTargetPnl: 0, globalTrailingPnl: 0, smartOffsetNetProfit: 0, smartOffsetBottomRowV1: 5, smartOffsetBottomRowV1StopLoss: 0, smartOffsetStopLoss: 0, smartOffsetNetProfit2: 0, smartOffsetStopLoss2: 0, smartOffsetMaxLossPerMinute: 0, smartOffsetMaxLossTimeframeSeconds: 60, minuteCloseAutoDynamic: false, minuteCloseTpMinPnl: 0, minuteCloseTpMaxPnl: 0, minuteCloseSlMinPnl: 0, minuteCloseSlMaxPnl: 0 });
         res.json({ success: true, message: 'Registration successful!' });
     } catch (err) {
         res.status(400).json({ error: 'Username already exists or invalid data.' });
@@ -719,7 +731,7 @@ app.get('/api/settings', authMiddleware, async (req, res) => {
 
 app.post('/api/settings', authMiddleware, async (req, res) => {
     bootstrapBots();
-    const { subAccounts, globalTargetPnl, globalTrailingPnl, smartOffsetNetProfit, smartOffsetBottomRowV1, smartOffsetBottomRowV1StopLoss, smartOffsetStopLoss, smartOffsetNetProfit2, smartOffsetStopLoss2, smartOffsetMaxLossPerMinute, smartOffsetMaxLossTimeframeSeconds, minuteCloseAutoDynamic, minuteCloseMinPnl, minuteCloseMaxPnl } = req.body;
+    const { subAccounts, globalTargetPnl, globalTrailingPnl, smartOffsetNetProfit, smartOffsetBottomRowV1, smartOffsetBottomRowV1StopLoss, smartOffsetStopLoss, smartOffsetNetProfit2, smartOffsetStopLoss2, smartOffsetMaxLossPerMinute, smartOffsetMaxLossTimeframeSeconds, minuteCloseAutoDynamic, minuteCloseTpMinPnl, minuteCloseTpMaxPnl, minuteCloseSlMinPnl, minuteCloseSlMaxPnl } = req.body;
     
     const existingSettings = await Settings.findOne({ userId: req.userId });
     if (existingSettings && existingSettings.subAccounts) {
@@ -747,9 +759,11 @@ app.post('/api/settings', authMiddleware, async (req, res) => {
     let parsedStopLoss2 = parseFloat(smartOffsetStopLoss2) || 0;
     if (parsedStopLoss2 > 0) parsedStopLoss2 = -parsedStopLoss2; 
 
-    // Minute Bounds are now absolute positive values (Mirrored Closer)
-    let parsedMinPnl = Math.abs(parseFloat(minuteCloseMinPnl) || 0);
-    let parsedMaxPnl = Math.abs(parseFloat(minuteCloseMaxPnl) || 0);
+    // Independent Range Parsing
+    let parsedTpMin = Math.abs(parseFloat(minuteCloseTpMinPnl) || 0);
+    let parsedTpMax = Math.abs(parseFloat(minuteCloseTpMaxPnl) || 0);
+    let parsedSlMin = -Math.abs(parseFloat(minuteCloseSlMinPnl) || 0);
+    let parsedSlMax = -Math.abs(parseFloat(minuteCloseSlMaxPnl) || 0);
 
     const updated = await Settings.findOneAndUpdate(
         { userId: req.userId }, 
@@ -766,8 +780,10 @@ app.post('/api/settings', authMiddleware, async (req, res) => {
             smartOffsetMaxLossPerMinute: parseFloat(smartOffsetMaxLossPerMinute) || 0,
             smartOffsetMaxLossTimeframeSeconds: parseInt(smartOffsetMaxLossTimeframeSeconds) || 60,
             minuteCloseAutoDynamic: minuteCloseAutoDynamic === true,
-            minuteCloseMinPnl: parsedMinPnl,
-            minuteCloseMaxPnl: parsedMaxPnl
+            minuteCloseTpMinPnl: parsedTpMin,
+            minuteCloseTpMaxPnl: parsedTpMax,
+            minuteCloseSlMinPnl: parsedSlMin,
+            minuteCloseSlMaxPnl: parsedSlMax
         }, 
         { returnDocument: 'after' }
     );
@@ -1001,13 +1017,22 @@ app.get('/', (req, res) => {
 
                             <div style="margin-top: 12px; border-top: 1px solid #cce0ff; padding-top: 12px;">
                                 <label style="margin-top:0; display:flex; align-items:center;">
-                                    1-Min Auto-Dynamic Mirrored Closer (TP & SL Range)
+                                    1-Min Independent Ranges (TP & SL Range)
                                     <input type="checkbox" id="minuteCloseAutoDynamic" style="width:auto; margin-left:12px; margin-right:4px;"> Auto-Dynamic
                                 </label>
-                                <p style="font-size:0.75em; color:#5f6368; margin-top:2px; line-height:1.4;">Checks every 60s. Acts as a Mirrored Closer. Auto-Dynamic finds the positive peak inflection point and creates a boundary to cut those exact winners AND mirrors it to the negative side to cut equivalent losers.</p>
-                                <div class="flex-row">
-                                    <div style="flex:1;"><input type="number" step="0.0001" id="minuteCloseMinPnl" placeholder="Min PNL Range (e.g. 0.0001)"></div>
-                                    <div style="flex:1;"><input type="number" step="0.0001" id="minuteCloseMaxPnl" placeholder="Max PNL Range (e.g. 0.0004)"></div>
+                                <p style="font-size:0.75em; color:#5f6368; margin-top:2px; line-height:1.4;">Checks every 60s. Separate inputs allow different ranges for taking profit and stopping loss. Auto-Dynamic will populate both symmetrically.</p>
+                                
+                                <div style="background:#f8f9fa; padding:12px; border:1px solid #dadce0; border-radius:6px; margin-top:8px;">
+                                    <label style="margin-top:0; color:#1e8e3e;">Take Profit Range ($)</label>
+                                    <div class="flex-row">
+                                        <div style="flex:1;"><input type="number" step="0.0001" id="minuteCloseTpMinPnl" placeholder="Min TP (e.g. 0.0001)"></div>
+                                        <div style="flex:1;"><input type="number" step="0.0001" id="minuteCloseTpMaxPnl" placeholder="Max TP (e.g. 0.0004)"></div>
+                                    </div>
+                                    <label style="margin-top:12px; color:#d93025;">Stop Loss Range ($)</label>
+                                    <div class="flex-row">
+                                        <div style="flex:1;"><input type="number" step="0.0001" id="minuteCloseSlMinPnl" placeholder="Min SL (e.g. -0.0008)"></div>
+                                        <div style="flex:1;"><input type="number" step="0.0001" id="minuteCloseSlMaxPnl" placeholder="Max SL (e.g. -0.0004)"></div>
+                                    </div>
                                 </div>
                             </div>
                             <button class="btn-blue" style="margin-top:16px;" onclick="saveGlobalSettings()">Save Global Settings</button>
@@ -1121,8 +1146,10 @@ app.get('/', (req, res) => {
             let mySmartOffsetMaxLossPerMinute = 0;
             let mySmartOffsetMaxLossTimeframeSeconds = 60;
             let myMinuteCloseAutoDynamic = false;
-            let myMinuteCloseMinPnl = 0;
-            let myMinuteCloseMaxPnl = 0;
+            let myMinuteCloseTpMinPnl = 0;
+            let myMinuteCloseTpMaxPnl = 0;
+            let myMinuteCloseSlMinPnl = 0;
+            let myMinuteCloseSlMaxPnl = 0;
             let currentProfileIndex = -1;
             let myCoins = [];
             
@@ -1198,23 +1225,27 @@ app.get('/', (req, res) => {
                 mySmartOffsetStopLoss2 = config.smartOffsetStopLoss2 || 0;
                 mySmartOffsetMaxLossPerMinute = config.smartOffsetMaxLossPerMinute || 0;
                 mySmartOffsetMaxLossTimeframeSeconds = config.smartOffsetMaxLossTimeframeSeconds !== undefined ? config.smartOffsetMaxLossTimeframeSeconds : 60;
+                
                 myMinuteCloseAutoDynamic = config.minuteCloseAutoDynamic || false;
-                myMinuteCloseMinPnl = config.minuteCloseMinPnl || 0;
-                myMinuteCloseMaxPnl = config.minuteCloseMaxPnl || 0;
+                myMinuteCloseTpMinPnl = config.minuteCloseTpMinPnl || 0;
+                myMinuteCloseTpMaxPnl = config.minuteCloseTpMaxPnl || 0;
+                myMinuteCloseSlMinPnl = config.minuteCloseSlMinPnl || 0;
+                myMinuteCloseSlMaxPnl = config.minuteCloseSlMaxPnl || 0;
                 
                 document.getElementById('globalTargetPnl').value = myGlobalTargetPnl;
                 document.getElementById('globalTrailingPnl').value = myGlobalTrailingPnl;
                 document.getElementById('smartOffsetNetProfit').value = mySmartOffsetNetProfit;
                 document.getElementById('smartOffsetBottomRowV1').value = mySmartOffsetBottomRowV1;
                 document.getElementById('smartOffsetBottomRowV1StopLoss').value = mySmartOffsetBottomRowV1StopLoss; 
-                // document.getElementById('smartOffsetStopLoss').value = mySmartOffsetStopLoss; // Disabled
                 document.getElementById('smartOffsetNetProfit2').value = mySmartOffsetNetProfit2;
-                // document.getElementById('smartOffsetStopLoss2').value = mySmartOffsetStopLoss2; // Disabled
                 document.getElementById('smartOffsetMaxLossPerMinute').value = mySmartOffsetMaxLossPerMinute;
                 document.getElementById('smartOffsetMaxLossTimeframeSeconds').value = mySmartOffsetMaxLossTimeframeSeconds;
+                
                 document.getElementById('minuteCloseAutoDynamic').checked = myMinuteCloseAutoDynamic;
-                document.getElementById('minuteCloseMinPnl').value = myMinuteCloseMinPnl;
-                document.getElementById('minuteCloseMaxPnl').value = myMinuteCloseMaxPnl;
+                document.getElementById('minuteCloseTpMinPnl').value = myMinuteCloseTpMinPnl;
+                document.getElementById('minuteCloseTpMaxPnl').value = myMinuteCloseTpMaxPnl;
+                document.getElementById('minuteCloseSlMinPnl').value = myMinuteCloseSlMinPnl;
+                document.getElementById('minuteCloseSlMaxPnl').value = myMinuteCloseSlMaxPnl;
 
                 mySubAccounts = config.subAccounts || [];
                 renderSubAccounts();
@@ -1239,13 +1270,14 @@ app.get('/', (req, res) => {
                 mySmartOffsetStopLoss2 = 0; // Disabled
                 mySmartOffsetMaxLossPerMinute = parseFloat(document.getElementById('smartOffsetMaxLossPerMinute').value) || 0;
                 mySmartOffsetMaxLossTimeframeSeconds = parseInt(document.getElementById('smartOffsetMaxLossTimeframeSeconds').value) || 60;
+                
                 myMinuteCloseAutoDynamic = document.getElementById('minuteCloseAutoDynamic').checked;
+                myMinuteCloseTpMinPnl = Math.abs(parseFloat(document.getElementById('minuteCloseTpMinPnl').value) || 0);
+                myMinuteCloseTpMaxPnl = Math.abs(parseFloat(document.getElementById('minuteCloseTpMaxPnl').value) || 0);
+                myMinuteCloseSlMinPnl = -Math.abs(parseFloat(document.getElementById('minuteCloseSlMinPnl').value) || 0);
+                myMinuteCloseSlMaxPnl = -Math.abs(parseFloat(document.getElementById('minuteCloseSlMaxPnl').value) || 0);
                 
-                // Absolute Positive Magnitudes
-                myMinuteCloseMinPnl = Math.abs(parseFloat(document.getElementById('minuteCloseMinPnl').value) || 0);
-                myMinuteCloseMaxPnl = Math.abs(parseFloat(document.getElementById('minuteCloseMaxPnl').value) || 0);
-                
-                const data = { subAccounts: mySubAccounts, globalTargetPnl: myGlobalTargetPnl, globalTrailingPnl: myGlobalTrailingPnl, smartOffsetNetProfit: mySmartOffsetNetProfit, smartOffsetBottomRowV1: mySmartOffsetBottomRowV1, smartOffsetBottomRowV1StopLoss: mySmartOffsetBottomRowV1StopLoss, smartOffsetStopLoss: mySmartOffsetStopLoss, smartOffsetNetProfit2: mySmartOffsetNetProfit2, smartOffsetStopLoss2: mySmartOffsetStopLoss2, smartOffsetMaxLossPerMinute: mySmartOffsetMaxLossPerMinute, smartOffsetMaxLossTimeframeSeconds: mySmartOffsetMaxLossTimeframeSeconds, minuteCloseAutoDynamic: myMinuteCloseAutoDynamic, minuteCloseMinPnl: myMinuteCloseMinPnl, minuteCloseMaxPnl: myMinuteCloseMaxPnl };
+                const data = { subAccounts: mySubAccounts, globalTargetPnl: myGlobalTargetPnl, globalTrailingPnl: myGlobalTrailingPnl, smartOffsetNetProfit: mySmartOffsetNetProfit, smartOffsetBottomRowV1: mySmartOffsetBottomRowV1, smartOffsetBottomRowV1StopLoss: mySmartOffsetBottomRowV1StopLoss, smartOffsetStopLoss: mySmartOffsetStopLoss, smartOffsetNetProfit2: mySmartOffsetNetProfit2, smartOffsetStopLoss2: mySmartOffsetStopLoss2, smartOffsetMaxLossPerMinute: mySmartOffsetMaxLossPerMinute, smartOffsetMaxLossTimeframeSeconds: mySmartOffsetMaxLossTimeframeSeconds, minuteCloseAutoDynamic: myMinuteCloseAutoDynamic, minuteCloseTpMinPnl: myMinuteCloseTpMinPnl, minuteCloseTpMaxPnl: myMinuteCloseTpMaxPnl, minuteCloseSlMinPnl: myMinuteCloseSlMinPnl, minuteCloseSlMaxPnl: myMinuteCloseSlMaxPnl };
                 await fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token }, body: JSON.stringify(data) });
                 alert('Global Settings Saved Successfully!');
             }
@@ -1265,7 +1297,7 @@ app.get('/', (req, res) => {
                 
                 mySubAccounts.push({ name, apiKey: key, secret: secret, side: 'long', leverage: 10, baseQty: 1, takeProfitPct: 5.0, stopLossPct: -25.0, triggerRoiPct: -15.0, dcaTargetRoiPct: -2.0, maxContracts: 1000, realizedPnl: 0, coins: [] });
                 
-                const data = { subAccounts: mySubAccounts, globalTargetPnl: myGlobalTargetPnl, globalTrailingPnl: myGlobalTrailingPnl, smartOffsetNetProfit: mySmartOffsetNetProfit, smartOffsetBottomRowV1: mySmartOffsetBottomRowV1, smartOffsetBottomRowV1StopLoss: mySmartOffsetBottomRowV1StopLoss, smartOffsetStopLoss: mySmartOffsetStopLoss, smartOffsetNetProfit2: mySmartOffsetNetProfit2, smartOffsetStopLoss2: mySmartOffsetStopLoss2, smartOffsetMaxLossPerMinute: mySmartOffsetMaxLossPerMinute, smartOffsetMaxLossTimeframeSeconds: mySmartOffsetMaxLossTimeframeSeconds, minuteCloseAutoDynamic: myMinuteCloseAutoDynamic, minuteCloseMinPnl: myMinuteCloseMinPnl, minuteCloseMaxPnl: myMinuteCloseMaxPnl };
+                const data = { subAccounts: mySubAccounts, globalTargetPnl: myGlobalTargetPnl, globalTrailingPnl: myGlobalTrailingPnl, smartOffsetNetProfit: mySmartOffsetNetProfit, smartOffsetBottomRowV1: mySmartOffsetBottomRowV1, smartOffsetBottomRowV1StopLoss: mySmartOffsetBottomRowV1StopLoss, smartOffsetStopLoss: mySmartOffsetStopLoss, smartOffsetNetProfit2: mySmartOffsetNetProfit2, smartOffsetStopLoss2: mySmartOffsetStopLoss2, smartOffsetMaxLossPerMinute: mySmartOffsetMaxLossPerMinute, smartOffsetMaxLossTimeframeSeconds: mySmartOffsetMaxLossTimeframeSeconds, minuteCloseAutoDynamic: myMinuteCloseAutoDynamic, minuteCloseTpMinPnl: myMinuteCloseTpMinPnl, minuteCloseTpMaxPnl: myMinuteCloseTpMaxPnl, minuteCloseSlMinPnl: myMinuteCloseSlMinPnl, minuteCloseSlMaxPnl: myMinuteCloseSlMaxPnl };
                 const res = await fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token }, body: JSON.stringify(data) });
                 const json = await res.json();
                 mySubAccounts = json.settings.subAccounts || [];
@@ -1309,7 +1341,7 @@ app.get('/', (req, res) => {
                 const index = parseInt(select.value);
                 if(!isNaN(index) && index >= 0) {
                     mySubAccounts.splice(index, 1);
-                    const data = { subAccounts: mySubAccounts, globalTargetPnl: myGlobalTargetPnl, globalTrailingPnl: myGlobalTrailingPnl, smartOffsetNetProfit: mySmartOffsetNetProfit, smartOffsetBottomRowV1: mySmartOffsetBottomRowV1, smartOffsetBottomRowV1StopLoss: mySmartOffsetBottomRowV1StopLoss, smartOffsetStopLoss: mySmartOffsetStopLoss, smartOffsetNetProfit2: mySmartOffsetNetProfit2, smartOffsetStopLoss2: mySmartOffsetStopLoss2, smartOffsetMaxLossPerMinute: mySmartOffsetMaxLossPerMinute, smartOffsetMaxLossTimeframeSeconds: mySmartOffsetMaxLossTimeframeSeconds, minuteCloseAutoDynamic: myMinuteCloseAutoDynamic, minuteCloseMinPnl: myMinuteCloseMinPnl, minuteCloseMaxPnl: myMinuteCloseMaxPnl };
+                    const data = { subAccounts: mySubAccounts, globalTargetPnl: myGlobalTargetPnl, globalTrailingPnl: myGlobalTrailingPnl, smartOffsetNetProfit: mySmartOffsetNetProfit, smartOffsetBottomRowV1: mySmartOffsetBottomRowV1, smartOffsetBottomRowV1StopLoss: mySmartOffsetBottomRowV1StopLoss, smartOffsetStopLoss: mySmartOffsetStopLoss, smartOffsetNetProfit2: mySmartOffsetNetProfit2, smartOffsetStopLoss2: mySmartOffsetStopLoss2, smartOffsetMaxLossPerMinute: mySmartOffsetMaxLossPerMinute, smartOffsetMaxLossTimeframeSeconds: mySmartOffsetMaxLossTimeframeSeconds, minuteCloseAutoDynamic: myMinuteCloseAutoDynamic, minuteCloseTpMinPnl: myMinuteCloseTpMinPnl, minuteCloseTpMaxPnl: myMinuteCloseTpMaxPnl, minuteCloseSlMinPnl: myMinuteCloseSlMinPnl, minuteCloseSlMaxPnl: myMinuteCloseSlMaxPnl };
                     const res = await fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token }, body: JSON.stringify(data) });
                     const json = await res.json();
                     mySubAccounts = json.settings.subAccounts || [];
@@ -1391,7 +1423,7 @@ app.get('/', (req, res) => {
                 profile.maxContracts = parseInt(document.getElementById('maxContracts').value);
                 profile.coins = myCoins;
 
-                const data = { subAccounts: mySubAccounts, globalTargetPnl: myGlobalTargetPnl, globalTrailingPnl: myGlobalTrailingPnl, smartOffsetNetProfit: mySmartOffsetNetProfit, smartOffsetBottomRowV1: mySmartOffsetBottomRowV1, smartOffsetBottomRowV1StopLoss: mySmartOffsetBottomRowV1StopLoss, smartOffsetStopLoss: mySmartOffsetStopLoss, smartOffsetNetProfit2: mySmartOffsetNetProfit2, smartOffsetStopLoss2: mySmartOffsetStopLoss2, smartOffsetMaxLossPerMinute: mySmartOffsetMaxLossPerMinute, smartOffsetMaxLossTimeframeSeconds: mySmartOffsetMaxLossTimeframeSeconds, minuteCloseAutoDynamic: myMinuteCloseAutoDynamic, minuteCloseMinPnl: myMinuteCloseMinPnl, minuteCloseMaxPnl: myMinuteCloseMaxPnl };
+                const data = { subAccounts: mySubAccounts, globalTargetPnl: myGlobalTargetPnl, globalTrailingPnl: myGlobalTrailingPnl, smartOffsetNetProfit: mySmartOffsetNetProfit, smartOffsetBottomRowV1: mySmartOffsetBottomRowV1, smartOffsetBottomRowV1StopLoss: mySmartOffsetBottomRowV1StopLoss, smartOffsetStopLoss: mySmartOffsetStopLoss, smartOffsetNetProfit2: mySmartOffsetNetProfit2, smartOffsetStopLoss2: mySmartOffsetStopLoss2, smartOffsetMaxLossPerMinute: mySmartOffsetMaxLossPerMinute, smartOffsetMaxLossTimeframeSeconds: mySmartOffsetMaxLossTimeframeSeconds, minuteCloseAutoDynamic: myMinuteCloseAutoDynamic, minuteCloseTpMinPnl: myMinuteCloseTpMinPnl, minuteCloseTpMaxPnl: myMinuteCloseTpMaxPnl, minuteCloseSlMinPnl: myMinuteCloseSlMinPnl, minuteCloseSlMaxPnl: myMinuteCloseSlMaxPnl };
                 const res = await fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token }, body: JSON.stringify(data) });
                 const json = await res.json();
                 mySubAccounts = json.settings.subAccounts || [];
@@ -1521,26 +1553,34 @@ app.get('/', (req, res) => {
                 }
 
                 const autoDynCheckbox = document.getElementById('minuteCloseAutoDynamic');
-                const minInput = document.getElementById('minuteCloseMinPnl');
-                const maxInput = document.getElementById('minuteCloseMaxPnl');
+                const tpMinInput = document.getElementById('minuteCloseTpMinPnl');
+                const tpMaxInput = document.getElementById('minuteCloseTpMaxPnl');
+                const slMinInput = document.getElementById('minuteCloseSlMinPnl');
+                const slMaxInput = document.getElementById('minuteCloseSlMaxPnl');
 
                 if (autoDynCheckbox && autoDynCheckbox.checked) {
-                    minInput.disabled = true;
-                    maxInput.disabled = true;
-                    minInput.style.backgroundColor = '#e8eaed';
-                    maxInput.style.backgroundColor = '#e8eaed';
+                    tpMinInput.disabled = true; tpMaxInput.disabled = true;
+                    slMinInput.disabled = true; slMaxInput.disabled = true;
+                    
+                    tpMinInput.style.backgroundColor = '#e8eaed'; tpMaxInput.style.backgroundColor = '#e8eaed';
+                    slMinInput.style.backgroundColor = '#e8eaed'; slMaxInput.style.backgroundColor = '#e8eaed';
+                    
                     if (hasDynamicBoundary) {
-                        minInput.value = Math.min(dynamicMin, dynamicMax).toFixed(4);
-                        maxInput.value = Math.max(dynamicMin, dynamicMax).toFixed(4);
+                        tpMinInput.value = Math.min(dynamicMin, dynamicMax).toFixed(4);
+                        tpMaxInput.value = Math.max(dynamicMin, dynamicMax).toFixed(4);
+                        // SL ranges negative equivalent mapping
+                        slMaxInput.value = (-Math.min(dynamicMin, dynamicMax)).toFixed(4);
+                        slMinInput.value = (-Math.max(dynamicMin, dynamicMax)).toFixed(4);
                     } else {
-                        minInput.value = '';
-                        maxInput.value = '';
+                        tpMinInput.value = ''; tpMaxInput.value = '';
+                        slMinInput.value = ''; slMaxInput.value = '';
                     }
                 } else if (autoDynCheckbox) {
-                    minInput.disabled = false;
-                    maxInput.disabled = false;
-                    minInput.style.backgroundColor = '#fafafa';
-                    maxInput.style.backgroundColor = '#fafafa';
+                    tpMinInput.disabled = false; tpMaxInput.disabled = false;
+                    slMinInput.disabled = false; slMaxInput.disabled = false;
+                    
+                    tpMinInput.style.backgroundColor = '#fafafa'; tpMaxInput.style.backgroundColor = '#fafafa';
+                    slMinInput.style.backgroundColor = '#fafafa'; slMaxInput.style.backgroundColor = '#fafafa';
                 }
 
                 // --- RENDER LIVE SMART OFFSET TRADES (V1 - GROUP ACCUMULATION) ---
