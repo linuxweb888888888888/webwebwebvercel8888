@@ -640,37 +640,43 @@ app.get('/', (req, res) => {
 
             <!-- ========================== AI PILOT LIVE VIEW TAB ========================== -->
             <div id="aipilot-tab" style="display:none;">
-                <div class="panel ai-glow" style="border: 1px solid #1a73e8;">
+                <div class="panel ai-glow" style="border: 1px solid #1a73e8; padding: 0; overflow: hidden;">
                     
-                    <!-- NEW TOP HEADER WITH INJECTED PEAK BADGE (BULLETPROOF PLACEMENT) -->
-                    <div class="flex-row" style="justify-content: space-between; flex-wrap: wrap; margin-bottom: 20px; border-bottom: 1px solid #eee; padding-bottom: 12px;">
-                        <h2 style="color: #1a73e8; border: none; margin: 0; display: flex; align-items: center; flex-wrap: wrap; gap: 15px;">
+                    <!-- 🔥 HUGE NEW BLUE HEADER BAR TO GUARANTEE VISIBILITY 🔥 -->
+                    <div style="background: #1a73e8; padding: 20px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 15px;">
+                        <h2 style="color: #ffffff; border: none; margin: 0; display: flex; align-items: center; gap: 10px;">
                             🤖 AI Pilot Telemetry & Live Radar
-                            <!-- THE PEAK BADGE INSIDE THE HEADER -->
-                            <span id="aiTopPeakBadge" style="padding: 4px 12px; background: #e8f0fe; border-radius: 20px; color: #1a73e8; font-weight: bold; font-size: 0.75em; border: 1px solid #1a73e8; display: inline-block;">
-                                🏆 Peak: +$0.0000 | 💧 Tension: 0%
-                            </span>
                         </h2>
-                        <div id="aiMasterStatus" style="font-weight: bold; padding: 8px 16px; border-radius: 4px;">Loading...</div>
+                        <div style="display: flex; gap: 15px; align-items: center;">
+                            <!-- THE PEAK BADGE -->
+                            <div id="aiTopPeakBadge" style="background: #ffffff; color: #1a73e8; padding: 8px 16px; border-radius: 30px; font-weight: bold; font-size: 1.1em; box-shadow: 0 4px 6px rgba(0,0,0,0.1);">
+                                🏆 Peak: +$0.0000 | 💧 Tension: 0%
+                            </div>
+                            <div id="aiMasterStatus" style="font-weight: bold; padding: 8px 16px; border-radius: 4px; background: rgba(255,255,255,0.2); color: white;">
+                                Loading...
+                            </div>
+                        </div>
                     </div>
                     
-                    <p style="color: #5f6368; font-size: 0.9em;">Visualizing the AI's internal thought process, tracking the Positive Positions Peak, and dynamic trimming logic.</p>
+                    <div style="padding: 24px;">
+                        <p style="color: #5f6368; font-size: 0.9em; margin-top: 0;">Visualizing the AI's internal thought process, tracking the Positive Positions Peak, and dynamic trimming logic.</p>
 
-                    <h3 style="color: #202124;">🏆 Positive Peak Radar (Dynamic Group Take-Profit & Absorption)</h3>
-                    <div id="aiWinnersGroupRadar" style="background: #f8f9fa; padding: 16px; border-radius: 6px; border: 1px dashed #ccc; margin-bottom: 24px;">
-                        Waiting for data...
+                        <h3 style="color: #202124; margin-top: 10px;">🏆 Positive Peak Radar (Dynamic Group Take-Profit & Absorption)</h3>
+                        <div id="aiWinnersGroupRadar" style="background: #f8f9fa; padding: 16px; border-radius: 6px; border: 1px dashed #ccc; margin-bottom: 24px;">
+                            Waiting for data...
+                        </div>
+
+                        <h3 style="color: #202124;">⚖️ AI 1-to-1 Trimmer Radar (Micro Absorption)</h3>
+                        <div id="aiTrimmerRadar" style="background: #f8f9fa; padding: 16px; border-radius: 6px; border: 1px dashed #ccc; margin-bottom: 24px;">
+                            Waiting for data...
+                        </div>
+
+                        <h3 style="color: #202124;">📡 Micro-Scalp & Momentum Radar</h3>
+                        <div id="aiCoinRadarContainer"></div>
+
+                        <h3 style="color: #202124;">⚡ Live AI Action Feed</h3>
+                        <div class="log-box" id="aiSpecificLogs" style="height: 200px; border-color: #1a73e8; color: #64b5f6;">Waiting for AI events...</div>
                     </div>
-
-                    <h3 style="color: #202124;">⚖️ AI 1-to-1 Trimmer Radar (Micro Absorption)</h3>
-                    <div id="aiTrimmerRadar" style="background: #f8f9fa; padding: 16px; border-radius: 6px; border: 1px dashed #ccc; margin-bottom: 24px;">
-                        Waiting for data...
-                    </div>
-
-                    <h3 style="color: #202124;">📡 Micro-Scalp & Momentum Radar</h3>
-                    <div id="aiCoinRadarContainer"></div>
-
-                    <h3 style="color: #202124;">⚡ Live AI Action Feed</h3>
-                    <div class="log-box" id="aiSpecificLogs" style="height: 200px; border-color: #1a73e8; color: #64b5f6;">Waiting for AI events...</div>
                 </div>
             </div>
 
@@ -913,9 +919,13 @@ app.get('/', (req, res) => {
 
                     const aiStatusEl = document.getElementById('aiMasterStatus');
                     if (globalSet.autonomousAiPilot !== false) {
-                        aiStatusEl.innerText = "STATUS: ENGAGED & HUNTING 🟢"; aiStatusEl.style.backgroundColor = "#e6f4ea"; aiStatusEl.style.color = "#1e8e3e";
+                        aiStatusEl.innerText = "STATUS: ENGAGED & HUNTING 🟢"; 
+                        aiStatusEl.style.color = "#4CAF50"; 
+                        aiStatusEl.style.backgroundColor = "transparent";
                     } else {
-                        aiStatusEl.innerText = "STATUS: OFFLINE (Manual Mode) 🔴"; aiStatusEl.style.backgroundColor = "#fce8e6"; aiStatusEl.style.color = "#d93025";
+                        aiStatusEl.innerText = "STATUS: OFFLINE (Manual) 🔴"; 
+                        aiStatusEl.style.color = "#ff5252"; 
+                        aiStatusEl.style.backgroundColor = "transparent";
                     }
 
                     const aiLogs = (stateData.logs || []).filter(l => l.includes('🤖') || l.includes('AI') || l.includes('Trimmer') || l.includes('CLUSTER') || l.includes('Take-Profit'));
@@ -971,7 +981,7 @@ app.get('/', (req, res) => {
                         groupTrailStatus = '<span style="color:#5f6368;">Waiting for positions to reach profit to engage Dynamic Cluster Trailing.</span>';
                     }
 
-                    // 🚨 INJECT THE BADGE 🚨
+                    // 🚨 INJECT THE BADGE INTO THE HUGE BLUE HEADER 🚨
                     const badgeEl = document.getElementById('aiTopPeakBadge');
                     if (badgeEl) {
                         badgeEl.innerHTML = '🏆 Peak: +$' + peakW.toFixed(4) + ' &nbsp;|&nbsp; 💧 Tension: ' + pctToDrop + '%';
