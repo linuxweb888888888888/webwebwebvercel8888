@@ -60,7 +60,7 @@ const SubAccountSchema = new mongoose.Schema({
     leverage: { type: Number, default: 10 },
     baseQty: { type: Number, default: 1 },
     takeProfitPct: { type: Number, default: 5.0 },
-    stopLossPct: { type: Number, default: -25.0 },
+    stopLossPct: { type: Number, default: -25.0 }, // Re-enabled
     triggerRoiPct: { type: Number, default: -15.0 },
     dcaTargetRoiPct: { type: Number, default: -2.0 },
     maxContracts: { type: Number, default: 1000 },
@@ -75,9 +75,9 @@ const SettingsSchema = new mongoose.Schema({
     smartOffsetNetProfit: { type: Number, default: 0 },
     smartOffsetBottomRowV1: { type: Number, default: 5 }, 
     smartOffsetBottomRowV1StopLoss: { type: Number, default: 0 }, 
-    smartOffsetStopLoss: { type: Number, default: 0 },
+    smartOffsetStopLoss: { type: Number, default: 0 }, // Re-enabled
     smartOffsetNetProfit2: { type: Number, default: 0 }, 
-    smartOffsetStopLoss2: { type: Number, default: 0 },   
+    smartOffsetStopLoss2: { type: Number, default: 0 }, // Re-enabled
     smartOffsetMaxLossPerMinute: { type: Number, default: 0 }, 
     smartOffsetMaxLossTimeframeSeconds: { type: Number, default: 60 },
     minuteCloseAutoDynamic: { type: Boolean, default: false },
@@ -226,11 +226,12 @@ function startBot(userId, subAccount) {
                     cState.margin = margin;
                     cState.currentRoi = margin > 0 ? (unrealizedPnl / margin) * 100 : 0;
 
-                    // TP ONLY (Standard Single-Coin SL Disabled as per user request)
+                    // TP OR SL (Re-enabled Standard Single-Coin SL)
                     const isTakeProfit = cState.currentRoi >= currentSettings.takeProfitPct;
+                    const isStopLoss = currentSettings.stopLossPct < 0 && cState.currentRoi <= currentSettings.stopLossPct;
 
-                    if (isTakeProfit) {
-                        const reason = '🎯 Take Profit';
+                    if (isTakeProfit || isStopLoss) {
+                        const reason = isTakeProfit ? '🎯 Take Profit' : '🛑 Stop Loss';
                         logForProfile(profileId, `[${coin.symbol}] ${reason} hit! (${cState.currentRoi.toFixed(2)}%). Closing ${cState.contracts} contracts.`);
                         
                         const contractsToClose = cState.contracts;
@@ -442,7 +443,9 @@ const executeGlobalProfitMonitor = async () => {
             const smartOffsetNetProfit = parseFloat(userSetting.smartOffsetNetProfit) || 0;
             const smartOffsetBottomRowV1 = parseInt(userSetting.smartOffsetBottomRowV1) || 5;
             const smartOffsetBottomRowV1StopLoss = parseFloat(userSetting.smartOffsetBottomRowV1StopLoss) || 0; 
+            const smartOffsetStopLoss = parseFloat(userSetting.smartOffsetStopLoss) || 0; // Re-enabled Full Group SL
             const smartOffsetNetProfit2 = parseFloat(userSetting.smartOffsetNetProfit2) || 0;
+            const smartOffsetStopLoss2 = parseFloat(userSetting.smartOffsetStopLoss2) || 0; // Re-enabled V2 SL
             
             const smartOffsetMaxLossPerMinute = parseFloat(userSetting.smartOffsetMaxLossPerMinute) || 0;
             const smartOffsetMaxLossTimeframeSeconds = parseInt(userSetting.smartOffsetMaxLossTimeframeSeconds) || 60;
@@ -485,7 +488,7 @@ const executeGlobalProfitMonitor = async () => {
             let offsetExecuted = false;
 
             // SMART OFFSET V1
-            if ((smartOffsetNetProfit > 0 || smartOffsetBottomRowV1StopLoss < 0) && activeCandidates.length >= 2) {
+            if ((smartOffsetNetProfit > 0 || smartOffsetBottomRowV1StopLoss < 0 || smartOffsetStopLoss < 0) && activeCandidates.length >= 2) {
                 activeCandidates.sort((a, b) => b.unrealizedPnl - a.unrealizedPnl); 
                 
                 const totalCoins = activeCandidates.length;
@@ -516,6 +519,8 @@ const executeGlobalProfitMonitor = async () => {
                 let reason = '';
                 let finalPairsToClose = [];
                 let finalNetProfit = 0;
+                
+                const isFullGroupSl = (smartOffsetStopLoss < 0 && runningAccumulation <= smartOffsetStopLoss);
 
                 if (smartOffsetNetProfit > 0 && peakAccumulation >= targetV1 && peakAccumulation > 0 && peakRowIndex >= 0) {
                     triggerOffset = true;
@@ -526,10 +531,11 @@ const executeGlobalProfitMonitor = async () => {
                         finalPairsToClose.push(activeCandidates[totalCoins - totalPairs + i]);
                     }
                 } 
-                // ONLY ALLOW Nth Bottom Row Stop Loss execution here.
-                else if (stopLossNth < 0 && nthBottomAccumulation <= stopLossNth) {
+                // Stop Losses (Nth Row OR Full Group)
+                else if ((stopLossNth < 0 && nthBottomAccumulation <= stopLossNth) || isFullGroupSl) {
                     let allowSl = false;
-                    let projectedLoss = runningAccumulation;
+                    let limitVal = isFullGroupSl ? smartOffsetStopLoss : stopLossNth;
+                    let projectedLoss = runningAccumulation; // Always uses full accumulation for max loss calculations
 
                     if (smartOffsetMaxLossPerMinute > 0) {
                         if (currentMinuteLoss + Math.abs(projectedLoss) <= smartOffsetMaxLossPerMinute) allowSl = true;
@@ -539,7 +545,9 @@ const executeGlobalProfitMonitor = async () => {
 
                     if (allowSl) {
                         triggerOffset = true;
-                        reason = `STOP LOSS (Nth Row [${smartOffsetBottomRowV1}] hit limit: $${stopLossNth.toFixed(4)})`;
+                        reason = isFullGroupSl 
+                            ? `STOP LOSS (Full Group hit limit: $${limitVal.toFixed(4)})` 
+                            : `STOP LOSS (Nth Row [${smartOffsetBottomRowV1}] hit limit: $${limitVal.toFixed(4)})`;
                         finalNetProfit = runningAccumulation; 
                         
                         if(smartOffsetMaxLossPerMinute <= 0) lastStopLossExecutions.set(dbUserId, Date.now());
@@ -587,8 +595,8 @@ const executeGlobalProfitMonitor = async () => {
                 }
             }
 
-            // SMART OFFSET V2 (TAKE PROFIT ONLY)
-            if (!offsetExecuted && (smartOffsetNetProfit2 > 0) && activeCandidates.length >= 2) {
+            // SMART OFFSET V2 (TAKE PROFIT AND STOP LOSS)
+            if (!offsetExecuted && (smartOffsetNetProfit2 > 0 || smartOffsetStopLoss2 < 0) && activeCandidates.length >= 2) {
                 let offsetExecuted2 = false;
                 const totalCoins = activeCandidates.length;
                 const totalPairs = Math.floor(totalCoins / 2);
@@ -606,8 +614,9 @@ const executeGlobalProfitMonitor = async () => {
 
                     if (smartOffsetNetProfit2 > 0 && netResult >= targetV2) {
                         triggerOffset = true; reason = `TAKE PROFIT V2 (Target: $${targetV2.toFixed(4)})`;
-                    } 
-                    // REMOVED: V2 Stop Loss is entirely disabled per instructions.
+                    } else if (smartOffsetStopLoss2 < 0 && netResult <= smartOffsetStopLoss2) {
+                        triggerOffset = true; reason = `STOP LOSS V2 (Limit: $${smartOffsetStopLoss2.toFixed(4)})`;
+                    }
                     
                     if (triggerOffset) {
                         logForProfile(firstProfileId, `⚖️ SMART OFFSET V2 [${reason}]: Paired Rank ${winnerIndex + 1} & ${loserIndex + 1} - Closing Winner [${biggestWinner.symbol}] & Loser [${biggestLoser.symbol}]. NET: ${netResult >= 0 ? '+' : ''}$${netResult.toFixed(4)}`);
@@ -959,9 +968,9 @@ app.get('/', (req, res) => {
                             <input type="number" step="0.1" id="smartOffsetNetProfit2" placeholder="e.g. 1.00 (0 = Disabled)">
                         </div>
                         <div style="margin-top: 12px;">
-                            <label style="margin-top:0;">Manual Offset Stop Loss V2 ($) [DISABLED]</label>
-                            <p style="font-size:0.75em; color:#5f6368; margin-top:2px; line-height:1.4;">This feature has been permanently disabled.</p>
-                            <input type="number" step="0.1" id="smartOffsetStopLoss2" placeholder="e.g. -2.00 (Disabled)" disabled>
+                            <label style="margin-top:0;">Manual Offset Stop Loss V2 ($)</label>
+                            <p style="font-size:0.75em; color:#5f6368; margin-top:2px; line-height:1.4;">If the paired Net Result drops below this amount, it closes the pair.</p>
+                            <input type="number" step="0.1" id="smartOffsetStopLoss2" placeholder="e.g. -2.00 (0 = Disabled)">
                         </div>
                         <button class="btn-blue" style="margin-top:16px;" onclick="saveGlobalSettings()">Save Global Offset V2 Settings</button>
                     </div>
@@ -1033,9 +1042,9 @@ app.get('/', (req, res) => {
                             </div>
 
                             <div style="margin-top: 12px;">
-                                <label style="margin-top:0;">Manual Offset Full Group Stop Loss V1 ($) [DISABLED]</label>
-                                <p style="font-size:0.75em; color:#5f6368; margin-top:2px; line-height:1.4;">This feature has been permanently disabled.</p>
-                                <input type="number" step="0.1" id="smartOffsetStopLoss" placeholder="e.g. -2.00 (Disabled)" disabled>
+                                <label style="margin-top:0;">Manual Offset Full Group Stop Loss V1 ($)</label>
+                                <p style="font-size:0.75em; color:#5f6368; margin-top:2px; line-height:1.4;">If the combined total of the entire group drops below this amount, it closes the entire group.</p>
+                                <input type="number" step="0.1" id="smartOffsetStopLoss" placeholder="e.g. -2.00 (0 = Disabled)">
                             </div>
 
                             <div style="margin-top: 12px; border-top: 1px solid #cce0ff; padding-top: 12px;">
@@ -1117,7 +1126,7 @@ app.get('/', (req, res) => {
                             <h3>Single Coin Math Logic</h3>
                             <div class="flex-row">
                                 <div style="flex:1"><label>Take Profit Exit (%)</label><input type="number" step="0.1" id="takeProfitPct"></div>
-                                <div style="flex:1"><label>Stop Loss (%) [DISABLED]</label><input type="number" step="0.1" id="stopLossPct" disabled placeholder="(Disabled)"></div>
+                                <div style="flex:1"><label>Stop Loss (%)</label><input type="number" step="0.1" id="stopLossPct" placeholder="e.g. -25.0"></div>
                             </div>
                             <div class="flex-row">
                                 <div style="flex:1"><label>Trigger DCA (%)</label><input type="number" step="0.1" id="triggerRoiPct"></div>
@@ -1273,7 +1282,9 @@ app.get('/', (req, res) => {
                 document.getElementById('smartOffsetNetProfit').value = mySmartOffsetNetProfit;
                 document.getElementById('smartOffsetBottomRowV1').value = mySmartOffsetBottomRowV1;
                 document.getElementById('smartOffsetBottomRowV1StopLoss').value = mySmartOffsetBottomRowV1StopLoss; 
+                document.getElementById('smartOffsetStopLoss').value = mySmartOffsetStopLoss;
                 document.getElementById('smartOffsetNetProfit2').value = mySmartOffsetNetProfit2;
+                document.getElementById('smartOffsetStopLoss2').value = mySmartOffsetStopLoss2;
                 document.getElementById('smartOffsetMaxLossPerMinute').value = mySmartOffsetMaxLossPerMinute;
                 document.getElementById('smartOffsetMaxLossTimeframeSeconds').value = mySmartOffsetMaxLossTimeframeSeconds;
                 
@@ -1301,9 +1312,9 @@ app.get('/', (req, res) => {
                 mySmartOffsetNetProfit = parseFloat(document.getElementById('smartOffsetNetProfit').value) || 0;
                 mySmartOffsetBottomRowV1 = parseInt(document.getElementById('smartOffsetBottomRowV1').value) || 5;
                 mySmartOffsetBottomRowV1StopLoss = parseFloat(document.getElementById('smartOffsetBottomRowV1StopLoss').value) || 0; 
-                mySmartOffsetStopLoss = 0; // Disabled
+                mySmartOffsetStopLoss = parseFloat(document.getElementById('smartOffsetStopLoss').value) || 0; 
                 mySmartOffsetNetProfit2 = parseFloat(document.getElementById('smartOffsetNetProfit2').value) || 0;
-                mySmartOffsetStopLoss2 = 0; // Disabled
+                mySmartOffsetStopLoss2 = parseFloat(document.getElementById('smartOffsetStopLoss2').value) || 0; 
                 mySmartOffsetMaxLossPerMinute = parseFloat(document.getElementById('smartOffsetMaxLossPerMinute').value) || 0;
                 mySmartOffsetMaxLossTimeframeSeconds = parseInt(document.getElementById('smartOffsetMaxLossTimeframeSeconds').value) || 60;
                 
@@ -1362,7 +1373,7 @@ app.get('/', (req, res) => {
                     document.getElementById('leverage').value = profile.leverage || 10;
                     document.getElementById('baseQty').value = profile.baseQty || 1;
                     document.getElementById('takeProfitPct').value = profile.takeProfitPct || 5.0;
-                    // document.getElementById('stopLossPct').value = profile.stopLossPct || -25.0; // Disabled UI
+                    document.getElementById('stopLossPct').value = profile.stopLossPct || -25.0; // Re-enabled Input
                     document.getElementById('triggerRoiPct').value = profile.triggerRoiPct || -15.0;
                     document.getElementById('dcaTargetRoiPct').value = profile.dcaTargetRoiPct || -2.0;
                     document.getElementById('maxContracts').value = profile.maxContracts || 1000;
@@ -1453,7 +1464,7 @@ app.get('/', (req, res) => {
                 profile.leverage = parseInt(document.getElementById('leverage').value);
                 profile.baseQty = parseInt(document.getElementById('baseQty').value);
                 profile.takeProfitPct = parseFloat(document.getElementById('takeProfitPct').value);
-                profile.stopLossPct = -25.0; // Enforced generic safe default, but backend ignores it anyway
+                profile.stopLossPct = parseFloat(document.getElementById('stopLossPct').value) || 0; // Re-enabled
                 profile.triggerRoiPct = parseFloat(document.getElementById('triggerRoiPct').value);
                 profile.dcaTargetRoiPct = parseFloat(document.getElementById('dcaTargetRoiPct').value);
                 profile.maxContracts = parseInt(document.getElementById('maxContracts').value);
@@ -1658,6 +1669,7 @@ app.get('/', (req, res) => {
 
                     const targetV1 = globalSet.smartOffsetNetProfit || 0;
                     const stopLossNth = globalSet.smartOffsetBottomRowV1StopLoss || 0; 
+                    const fullGroupSl = globalSet.smartOffsetStopLoss || 0; // Grab full group SL limit
                     const bottomRowN = globalSet.smartOffsetBottomRowV1 !== undefined ? globalSet.smartOffsetBottomRowV1 : 5;
 
                     if (totalPairs === 0) {
@@ -1693,11 +1705,12 @@ app.get('/', (req, res) => {
                         let executingSl = false;
                         
                         const isHitNthSl = (stopLossNth < 0 && nthBottomAccumulation <= stopLossNth);
+                        const isHitFullGroupSl = (fullGroupSl < 0 && runningAccumulation <= fullGroupSl);
 
                         if (targetV1 > 0 && peakAccumulation >= targetV1 && peakRowIndex >= 0) {
                             topStatusMessage = \`<span style="color:#1e8e3e; font-weight:bold;">🔥 Target Reached! Slicing at Row \${peakRowIndex + 1} to harvest Peak Profit ($\${peakAccumulation.toFixed(4)})!</span>\`;
                             executingPeak = true;
-                        } else if (isHitNthSl) {
+                        } else if (isHitNthSl || isHitFullGroupSl) {
                             let projectedLoss = runningAccumulation; 
                             let blockedByLimit = false;
 
@@ -1709,7 +1722,11 @@ app.get('/', (req, res) => {
                                 topStatusMessage = \`<span style="color:#d93025; font-weight:bold;">🛑 Stop Loss Reached but Blocked by \${timeframeSec}s Limit!</span>\`;
                             } else {
                                 executingSl = true;
-                                topStatusMessage = \`<span style="color:#d93025; font-weight:bold;">🔥 Stop Loss Hit (Nth Row [\${bottomRowN}] dropped to/below $\${stopLossNth.toFixed(4)})!</span>\`;
+                                if (isHitFullGroupSl) {
+                                    topStatusMessage = \`<span style="color:#d93025; font-weight:bold;">🔥 Stop Loss Hit (Full Group dropped to/below $\${fullGroupSl.toFixed(4)})!</span>\`;
+                                } else {
+                                    topStatusMessage = \`<span style="color:#d93025; font-weight:bold;">🔥 Stop Loss Hit (Nth Row [\${bottomRowN}] dropped to/below $\${stopLossNth.toFixed(4)})!</span>\`;
+                                }
                             }
                         } else {
                             let pColor = peakAccumulation > 0 ? '#1e8e3e' : '#5f6368';
@@ -1763,6 +1780,7 @@ app.get('/', (req, res) => {
                         let dynamicInfoHtml = \`<div style="margin-bottom: 12px; padding: 12px; background: #e8f0fe; border: 1px solid #cce0ff; border-radius: 6px; color: #1a73e8; font-weight: 500;">
                             <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
                                 <div>🎯 Strict Take Profit: $\${targetV1.toFixed(4)}</div>
+                                <div>🛑 Full Group Stop: $\${fullGroupSl.toFixed(4)}</div>
                                 <div>🛑 Row \${bottomRowN} Stop: $\${stopLossNth.toFixed(4)}</div>
                             </div>
                             \${lossTrackerHtml}
@@ -1781,6 +1799,7 @@ app.get('/', (req, res) => {
                     const totalPairs = Math.floor(totalCoins / 2);
 
                     const targetV2 = globalSet.smartOffsetNetProfit2 || 0;
+                    const limitV2 = globalSet.smartOffsetStopLoss2 || 0;
 
                     if (totalPairs === 0) {
                         document.getElementById('liveOffsetsContainer2').innerHTML = '<p style="color:#5f6368;">Not enough active trades to form pairs.</p>';
@@ -1803,12 +1822,16 @@ app.get('/', (req, res) => {
                             const nColor = net >= 0 ? '#1e8e3e' : '#d93025';
                             
                             const isTargetHit = (targetV2 > 0 && net >= targetV2);
+                            const isSlHit = (limitV2 < 0 && net <= limitV2);
                             
                             let statusIcon = '⏳ Evaluating';
                             if (isTargetHit) {
                                 statusIcon = '🔥 Executing (TP)...';
                                 topStatusMessage2 = \`<span style="color:#1e8e3e; font-weight:bold;">🔥 Executing Pair \${winnerIndex+1} & \${loserIndex+1} for TP!</span>\`;
-                            } 
+                            } else if (isSlHit) {
+                                statusIcon = '🛑 Executing (SL)...';
+                                topStatusMessage2 = \`<span style="color:#d93025; font-weight:bold;">🛑 Executing Pair \${winnerIndex+1} & \${loserIndex+1} for SL!</span>\`;
+                            }
 
                             liveHtml += \`<tr>
                                 <td style="padding:12px; border-bottom:1px solid #eee; font-weight:500; color:#5f6368;">\${winnerIndex + 1} & \${loserIndex + 1} <br><span style="font-size:0.75em; color:#1a73e8">\${statusIcon}</span></td>
@@ -1831,6 +1854,7 @@ app.get('/', (req, res) => {
                         let dynamicInfoHtml2 = \`<div style="margin-bottom: 12px; padding: 12px; background: #e8f0fe; border: 1px solid #cce0ff; border-radius: 6px; color: #1a73e8; font-weight: 500;">
                             <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
                                 <div>🎯 Strict Take Profit V2: $\${targetV2.toFixed(4)}</div>
+                                <div>🛑 Strict Stop Loss V2: $\${limitV2.toFixed(4)}</div>
                             </div>
                             \${lossTrackerHtml}
                             <div style="margin-top: 10px; padding-top: 10px; border-top: 1px dashed #b3d4ff; font-size: 1.1em;">
