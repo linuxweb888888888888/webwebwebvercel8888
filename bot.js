@@ -855,198 +855,218 @@ app.get('/', (req, res) => {
                 document.getElementById('offsetTableContainer').innerHTML = ih + '</table>';
             }
 
-            async function loadStatus() {
-                const res = await fetch('/api/status', { headers: { 'Authorization': 'Bearer ' + token } });
-                if (res.status === 401 || res.status === 403) return logout();
-                
-                const data = await res.json();
-                const allStatuses = data.states || {};
-                const globalSet = data.globalSettings || {};
+async function loadStatus() {
+                try {
+                    const res = await fetch('/api/status', { headers: { 'Authorization': 'Bearer ' + token } });
+                    if (res.status === 401 || res.status === 403) return logout();
+                    
+                    const data = await res.json();
+                    const allStatuses = data.states || {};
+                    const globalSet = data.globalSettings || {};
 
-                let globalTotal = 0; let globalUnrealized = 0;
-                (data.subAccounts || []).forEach(sub => globalTotal += (sub.realizedPnl || 0));
+                    let globalTotal = 0; let globalUnrealized = 0;
+                    (data.subAccounts || []).forEach(sub => globalTotal += (sub.realizedPnl || 0));
 
-                for (let pid in allStatuses) {
-                    const st = allStatuses[pid];
-                    if (st && st.coinStates) {
-                        for (let sym in st.coinStates) {
-                            if (st.coinStates[sym].status === 'Running' && st.coinStates[sym].contracts > 0) {
-                                globalUnrealized += (parseFloat(st.coinStates[sym].unrealizedPnl) || 0);
+                    for (let pid in allStatuses) {
+                        const st = allStatuses[pid];
+                        if (st && st.coinStates) {
+                            for (let sym in st.coinStates) {
+                                if (st.coinStates[sym] && st.coinStates[sym].status === 'Running' && st.coinStates[sym].contracts > 0) {
+                                    globalUnrealized += (parseFloat(st.coinStates[sym].unrealizedPnl) || 0);
+                                }
                             }
                         }
                     }
-                }
 
-                document.getElementById('topGlobalUnrealized').innerText = (globalUnrealized >= 0 ? "+$" : "-$") + Math.abs(globalUnrealized).toFixed(4);
-                document.getElementById('topGlobalUnrealized').className = globalUnrealized >= 0 ? 'val green' : 'val red';
-                document.getElementById('globalPnl').innerText = (globalTotal >= 0 ? "+$" : "-$") + Math.abs(globalTotal).toFixed(4);
+                    const elTopUnr = document.getElementById('topGlobalUnrealized');
+                    if (elTopUnr) {
+                        elTopUnr.innerText = (globalUnrealized >= 0 ? "+$" : "-$") + Math.abs(globalUnrealized).toFixed(4);
+                        elTopUnr.className = globalUnrealized >= 0 ? 'val green' : 'val red';
+                    }
+                    const elGlobalPnl = document.getElementById('globalPnl');
+                    if (elGlobalPnl) elGlobalPnl.innerText = (globalTotal >= 0 ? "+$" : "-$") + Math.abs(globalTotal).toFixed(4);
 
-                if(currentProfileIndex === -1) return;
-                const profile = mySubAccounts[currentProfileIndex];
-                document.getElementById('profilePnl').innerText = "$" + (profile.realizedPnl || 0).toFixed(4);
+                    // ==========================================
+                    // SAFE DASHBOARD RENDER
+                    // ==========================================
+                    let profile = null;
+                    let stateData = { coinStates: {}, logs: [] };
 
-                const stateData = allStatuses[profile._id] || { coinStates: {}, logs: [] };
-                let html = '';
-                myCoins.forEach(coin => {
-                    const state = stateData.coinStates[coin.symbol] || { status: 'Stopped', currentPrice: 0, avgEntry: 0, contracts: 0, currentRoi: 0, unrealizedPnl: 0 };
-                    let statusColor = state.status === 'Running' ? '#1e8e3e' : '#d93025';
-                    html += '<div class="status-box">' +
-                        '<div class="flex-row" style="justify-content: space-between; border-bottom: 1px solid #dadce0; padding-bottom: 16px; margin-bottom: 16px;">' +
-                            '<div style="font-size: 1.1em; font-weight: 500;">' + coin.symbol + ' - <span style="font-weight:700; color:' + statusColor + ';">' + state.status + '</span></div>' +
-                            '<div class="flex-row"><button class="btn-green" onclick="toggleCoinBot(\\'' + coin.symbol + '\\', true)">▶ Start</button><button class="btn-red" onclick="toggleCoinBot(\\'' + coin.symbol + '\\', false)">⏹ Stop</button></div>' +
-                        '</div>' +
-                        '<div class="flex-row" style="justify-content: space-between;">' +
-                            '<div><span class="stat-label">Live Price</span><span class="val">' + (state.currentPrice || 0) + '</span></div>' +
-                            '<div><span class="stat-label">Contracts</span><span class="val">' + (state.contracts || 0) + '</span></div>' +
-                            '<div><span class="stat-label">Unrealized PNL</span><span class="val ' + (state.unrealizedPnl >= 0 ? 'green' : 'red') + '">' + (state.unrealizedPnl || 0).toFixed(4) + '</span></div>' +
-                            '<div><span class="stat-label">ROI %</span><span class="val ' + (state.currentRoi >= 0 ? 'green' : 'red') + '">' + (state.currentRoi || 0).toFixed(2) + '%</span></div>' +
-                        '</div>' +
-                    '</div>';
-                });
-                document.getElementById('dashboardStatusContainer').innerHTML = html;
-                document.getElementById('logs').innerHTML = (stateData.logs || []).join('<br>');
+                    if (currentProfileIndex !== -1 && mySubAccounts[currentProfileIndex]) {
+                        profile = mySubAccounts[currentProfileIndex];
+                        const elProfilePnl = document.getElementById('profilePnl');
+                        if (elProfilePnl) elProfilePnl.innerText = "$" + (profile.realizedPnl || 0).toFixed(4);
 
-                // ============================================================
-                // 🤖 AI PILOT TELEMETRY RENDERER 
-                // ============================================================
-                if (document.getElementById('aipilot-tab').style.display !== 'none') {
-                    
-                    if(currentProfileIndex === -1) {
-                        document.getElementById('aiMasterStatus').innerText = "NO PROFILE LOADED ⚠️";
-                        document.getElementById('aiWinnersGroupRadar').innerHTML = '<p style="color:#d93025; text-align:center; font-weight:bold;">Please go back to the Dashboard tab and click "Load" on a profile first.</p>';
-                        return; 
+                        stateData = allStatuses[profile._id] || { coinStates: {}, logs: [] };
+                        let html = '';
+                        (myCoins || []).forEach(coin => {
+                            const state = stateData.coinStates[coin.symbol] || { status: 'Stopped', currentPrice: 0, avgEntry: 0, contracts: 0, currentRoi: 0, unrealizedPnl: 0 };
+                            let statusColor = state.status === 'Running' ? '#1e8e3e' : '#d93025';
+                            html += '<div class="status-box">' +
+                                '<div class="flex-row" style="justify-content: space-between; border-bottom: 1px solid #dadce0; padding-bottom: 16px; margin-bottom: 16px;">' +
+                                    '<div style="font-size: 1.1em; font-weight: 500;">' + coin.symbol + ' - <span style="font-weight:700; color:' + statusColor + ';">' + state.status + '</span></div>' +
+                                    '<div class="flex-row"><button class="btn-green" onclick="toggleCoinBot(\\'' + coin.symbol + '\\', true)">▶ Start</button><button class="btn-red" onclick="toggleCoinBot(\\'' + coin.symbol + '\\', false)">⏹ Stop</button></div>' +
+                                '</div>' +
+                                '<div class="flex-row" style="justify-content: space-between;">' +
+                                    '<div><span class="stat-label">Live Price</span><span class="val">' + (state.currentPrice || 0) + '</span></div>' +
+                                    '<div><span class="stat-label">Contracts</span><span class="val">' + (state.contracts || 0) + '</span></div>' +
+                                    '<div><span class="stat-label">Unrealized PNL</span><span class="val ' + (state.unrealizedPnl >= 0 ? 'green' : 'red') + '">' + (state.unrealizedPnl || 0).toFixed(4) + '</span></div>' +
+                                    '<div><span class="stat-label">ROI %</span><span class="val ' + (state.currentRoi >= 0 ? 'green' : 'red') + '">' + (state.currentRoi || 0).toFixed(2) + '%</span></div>' +
+                                '</div>' +
+                            '</div>';
+                        });
+                        const elDashCont = document.getElementById('dashboardStatusContainer');
+                        if (elDashCont) elDashCont.innerHTML = html;
+                        
+                        const elLogs = document.getElementById('logs');
+                        if (elLogs) elLogs.innerHTML = (stateData.logs || []).join('<br>');
                     }
 
-                    const aiStatusEl = document.getElementById('aiMasterStatus');
-                    if (globalSet.autonomousAiPilot !== false) {
-                        aiStatusEl.innerText = "STATUS: ENGAGED & HUNTING 🟢"; 
-                        aiStatusEl.style.color = "#4CAF50"; 
-                        aiStatusEl.style.backgroundColor = "transparent";
-                    } else {
-                        aiStatusEl.innerText = "STATUS: OFFLINE (Manual) 🔴"; 
-                        aiStatusEl.style.color = "#ff5252"; 
-                        aiStatusEl.style.backgroundColor = "transparent";
-                    }
-
-                    const aiLogs = (stateData.logs || []).filter(l => l.includes('🤖') || l.includes('AI') || l.includes('Trimmer') || l.includes('CLUSTER') || l.includes('Take-Profit'));
-                    document.getElementById('aiSpecificLogs').innerHTML = aiLogs.length > 0 ? aiLogs.join('<br>') : "<i>No AI actions recorded yet...</i>";
-
-                    // 🏆 1. RENDER WINNERS GROUP PEAK RADAR 🏆
-                    const winnersPeaks = data.winnersPeaks || {};
-                    const peakW = winnersPeaks[profile._id] || 0;
-                    
-                    let winners = []; let losers = [];
-                    myCoins.forEach(coin => {
-                        const state = stateData.coinStates[coin.symbol];
-                        if (state && state.status === 'Running' && state.contracts > 0) {
-                            if (state.unrealizedPnl > 0) winners.push({ sym: coin.symbol, pnl: parseFloat(state.unrealizedPnl) });
-                            else losers.push({ sym: coin.symbol, pnl: parseFloat(state.unrealizedPnl) });
+                    // ============================================================
+                    // 🤖 AI PILOT TELEMETRY RENDERER (FORCED DISPLAY)
+                    // ============================================================
+                    const aiTab = document.getElementById('aipilot-tab');
+                    if (aiTab && aiTab.style.display !== 'none') {
+                        
+                        // If no profile is loaded, stop here but show a warning on the UI.
+                        if (!profile) {
+                            document.getElementById('aiMasterStatus').innerText = "NO PROFILE LOADED ⚠️";
+                            document.getElementById('aiWinnersGroupRadar').innerHTML = '<p style="color:#d93025; text-align:center; font-weight:bold;">Please click "Load" on a profile in the Dashboard tab first.</p>';
+                            return; 
                         }
-                    });
 
-                    let currentWinnersSum = winners.reduce((sum, w) => sum + w.pnl, 0);
-                    let totalLosersSum = losers.reduce((sum, l) => sum + l.pnl, 0);
-
-                    let peakDrop = peakW - currentWinnersSum;
-                    let groupTrailStatus = "Gathering data...";
-                    let pctToDrop = 0;
-                    
-                    if (peakW > 0) {
-                        let peakTolerance = peakW > 10.0 ? peakW * 0.15 : Math.max(peakW * 0.25, 0.01);
-                        pctToDrop = ((Math.max(0, peakDrop) / peakTolerance) * 100).toFixed(0);
-                        if(pctToDrop > 100) pctToDrop = 100;
-                        
-                        let simNet = currentWinnersSum + totalLosersSum;
-                        let clusterSimMsg = "";
-                        
-                        if (simNet > 0) {
-                            clusterSimMsg = '<br><span style="color:#1e8e3e; font-weight:bold;">Cluster Simulation: Winners ($' + currentWinnersSum.toFixed(2) + ') > ALL Losers ($' + Math.abs(totalLosersSum).toFixed(2) + '). Will secure Full Portfolio Net: +$' + simNet.toFixed(2) + '</span>';
+                        // AI Status Badge
+                        const aiStatusEl = document.getElementById('aiMasterStatus');
+                        if (globalSet.autonomousAiPilot !== false) {
+                            aiStatusEl.innerText = "STATUS: ENGAGED & HUNTING 🟢"; 
+                            aiStatusEl.style.color = "#4CAF50"; 
                         } else {
-                            let tempNet = currentWinnersSum; let simLoserCount = 0;
-                            let sortedLosers = [...losers].sort((a,b) => b.pnl - a.pnl);
-                            for (let l of sortedLosers) {
-                                if (tempNet + l.pnl > 0) { tempNet += l.pnl; simLoserCount++; } else break;
-                            }
-                            if (simLoserCount > 0) {
-                                clusterSimMsg = '<br><span style="color:#f29900; font-weight:bold;">Cluster Simulation: AI will absorb ' + simLoserCount + ' small losers for a Net Profit of +$' + tempNet.toFixed(2) + '.</span>';
-                            } else if (currentWinnersSum > 0) {
-                                clusterSimMsg = '<br><span style="color:#1a73e8; font-weight:bold;">Group Profit Simulation: Winners cannot absorb any losers. AI will secure Group Profit of +$' + currentWinnersSum.toFixed(2) + '.</span>';
-                            } else {
-                                clusterSimMsg = '<br><span style="color:#d93025;">Cluster Simulation: Waiting for positive movement.</span>';
-                            }
+                            aiStatusEl.innerText = "STATUS: OFFLINE (Manual) 🔴"; 
+                            aiStatusEl.style.color = "#ff5252"; 
                         }
 
-                        groupTrailStatus = '<span style="color:#1a73e8; font-weight:bold;">Tracking Positive Winners Peak ($' + peakW.toFixed(4) + '). Dynamic Drop Tension: ' + pctToDrop + '%.</span> ' + clusterSimMsg;
-                    } else {
-                        groupTrailStatus = '<span style="color:#5f6368;">Waiting for positions to reach profit to engage Dynamic Cluster Trailing.</span>';
-                    }
+                        // Filter AI Logs
+                        const aiLogs = (stateData.logs || []).filter(l => l.includes('🤖') || l.includes('AI') || l.includes('Trimmer') || l.includes('CLUSTER') || l.includes('Take-Profit'));
+                        document.getElementById('aiSpecificLogs').innerHTML = aiLogs.length > 0 ? aiLogs.join('<br>') : "<i>No AI actions recorded yet...</i>";
 
-                    // 🚨 INJECT THE BADGE INTO THE HUGE BLUE HEADER 🚨
-                    const badgeEl = document.getElementById('aiTopPeakBadge');
-                    if (badgeEl) {
-                        badgeEl.innerHTML = '🏆 Peak: +$' + peakW.toFixed(4) + ' &nbsp;|&nbsp; 💧 Tension: ' + pctToDrop + '%';
-                    }
+                        // 🏆 1. CALCULATE PEAK & TENSION 🏆
+                        const winnersPeaks = data.winnersPeaks || {};
+                        const peakW = Number(winnersPeaks[profile._id]) || 0; // Forced to Number
+                        
+                        let winners = []; let losers = [];
+                        (myCoins || []).forEach(coin => {
+                            const state = stateData.coinStates[coin.symbol];
+                            if (state && state.status === 'Running' && state.contracts > 0) {
+                                const pnlNum = parseFloat(state.unrealizedPnl) || 0;
+                                if (pnlNum > 0) winners.push({ sym: coin.symbol, pnl: pnlNum });
+                                else losers.push({ sym: coin.symbol, pnl: pnlNum });
+                            }
+                        });
 
-                    document.getElementById('aiWinnersGroupRadar').innerHTML = 
-                        '<div class="flex-row" style="justify-content: space-between; margin-bottom: 12px;">' +
-                            '<div style="text-align:center; flex:1;">' +
-                                '<span style="font-size: 0.85em; color: #5f6368; text-transform: uppercase;">Sum of Winning Positions</span><br>' +
-                                '<span style="font-size: 1.5em; font-weight: bold; color: ' + (currentWinnersSum > 0 ? '#1e8e3e' : '#d93025') + ';">+$' + currentWinnersSum.toFixed(4) + '</span>' +
-                            '</div>' +
-                            '<div style="text-align:center; flex:1; border-left: 1px solid #dadce0; border-right: 1px solid #dadce0;">' +
-                                '<span style="font-size: 0.85em; color: #5f6368; text-transform: uppercase;">Highest Positive Peak</span><br>' +
-                                '<span style="font-size: 1.5em; font-weight: bold; color: #1e8e3e;">+$' + peakW.toFixed(4) + '</span>' +
-                            '</div>' +
-                            '<div style="text-align:center; flex:1;">' +
-                                '<span style="font-size: 0.85em; color: #5f6368; text-transform: uppercase;">Drawdown from Peak</span><br>' +
-                                '<span style="font-size: 1.5em; font-weight: bold; color: #d93025;">-$' + Math.max(0, peakDrop).toFixed(4) + '</span>' +
-                            '</div>' +
-                        '</div>' +
-                        '<div style="background: #e8f0fe; padding: 12px; border-radius: 6px; text-align: center; font-size: 0.9em;">' + groupTrailStatus + '</div>';
+                        let currentWinnersSum = winners.reduce((sum, w) => sum + w.pnl, 0);
+                        let totalLosersSum = losers.reduce((sum, l) => sum + l.pnl, 0);
 
-                    // ⚖️ 2. RENDER 1-TO-1 TRIMMER
-                    let trimmerHtml = '';
-                    if (winners.length > 0 && losers.length > 0) {
-                        let wSort = [...winners].sort((a,b) => b.pnl - a.pnl);
-                        let lSort = [...losers].sort((a,b) => b.pnl - a.pnl);
-                        let net = wSort[0].pnl + lSort[0].pnl;
-                        let nC = net > 0 ? '#1e8e3e' : '#5f6368';
-                        let nBg = net > 0 ? '#e6f4ea' : '#f1f3f4';
-                        let aMsg = net > 0 ? '⚡ <b>AI WILL EXECUTE 1-TO-1 MICRO CUT ON NEXT TICK!</b>' : 'Waiting for winner to cover loser...';
-                        trimmerHtml = 
-                            '<div style="display:flex; justify-content: space-between; align-items: center;">' +
-                                '<div style="text-align:center; padding: 12px; background: #e6f4ea; border-radius: 6px; width: 30%;">' +
-                                    '<div style="font-size: 0.8em; color: #1e8e3e;">Top Winner</div><strong>' + wSort[0].sym + '</strong><br>+$' + wSort[0].pnl.toFixed(4) +
-                                '</div><div style="font-size: 1.5em; color: #5f6368;">+</div>' +
-                                '<div style="text-align:center; padding: 12px; background: #fce8e6; border-radius: 6px; width: 30%;">' +
-                                    '<div style="font-size: 0.8em; color: #d93025;">Smallest Loser</div><strong>' + lSort[0].sym + '</strong><br>-$' + Math.abs(lSort[0].pnl).toFixed(4) +
-                                '</div><div style="font-size: 1.5em; color: #5f6368;">=</div>' +
-                                '<div style="text-align:center; padding: 12px; background: ' + nBg + '; border-radius: 6px; width: 30%;">' +
-                                    '<div style="font-size: 0.8em;">Net Result</div><strong style="color: ' + nC + ';">$' + net.toFixed(4) + '</strong>' +
+                        let peakDrop = peakW - currentWinnersSum;
+                        let groupTrailStatus = "Gathering data...";
+                        let pctToDrop = 0;
+                        
+                        if (peakW > 0) {
+                            let peakTolerance = peakW > 10.0 ? peakW * 0.15 : Math.max(peakW * 0.25, 0.01);
+                            pctToDrop = Number(((Math.max(0, peakDrop) / peakTolerance) * 100).toFixed(0));
+                            if(pctToDrop > 100) pctToDrop = 100;
+                            
+                            let simNet = currentWinnersSum + totalLosersSum;
+                            let clusterSimMsg = "";
+                            
+                            if (simNet > 0) {
+                                clusterSimMsg = '<br><span style="color:#1e8e3e; font-weight:bold;">Cluster Simulation: Winners ($' + currentWinnersSum.toFixed(2) + ') > ALL Losers ($' + Math.abs(totalLosersSum).toFixed(2) + '). Will secure Full Portfolio Net: +$' + simNet.toFixed(2) + '</span>';
+                            } else {
+                                let tempNet = currentWinnersSum; let simLoserCount = 0;
+                                let sortedLosers = [...losers].sort((a,b) => b.pnl - a.pnl);
+                                for (let l of sortedLosers) {
+                                    if (tempNet + l.pnl > 0) { tempNet += l.pnl; simLoserCount++; } else break;
+                                }
+                                if (simLoserCount > 0) {
+                                    clusterSimMsg = '<br><span style="color:#f29900; font-weight:bold;">Cluster Simulation: AI will absorb ' + simLoserCount + ' small losers for a Net Profit of +$' + tempNet.toFixed(2) + '.</span>';
+                                } else if (currentWinnersSum > 0) {
+                                    clusterSimMsg = '<br><span style="color:#1a73e8; font-weight:bold;">Group Profit Simulation: AI will secure Group Profit of +$' + currentWinnersSum.toFixed(2) + '.</span>';
+                                } else {
+                                    clusterSimMsg = '<br><span style="color:#d93025;">Cluster Simulation: Waiting for positive movement.</span>';
+                                }
+                            }
+
+                            groupTrailStatus = '<span style="color:#1a73e8; font-weight:bold;">Tracking Positive Winners Peak ($' + peakW.toFixed(4) + '). Dynamic Drop Tension: ' + pctToDrop + '%.</span> ' + clusterSimMsg;
+                        } else {
+                            groupTrailStatus = '<span style="color:#5f6368;">Waiting for positions to reach profit to engage Dynamic Cluster Trailing.</span>';
+                        }
+
+                        // 🔥 FORCED UI INJECTION 🔥 (This guarantees the Tension/Peak updates)
+                        const badgeEl = document.getElementById('aiTopPeakBadge');
+                        if (badgeEl) {
+                            badgeEl.innerHTML = '🏆 Peak: +$' + peakW.toFixed(4) + ' &nbsp;|&nbsp; 💧 Tension: ' + pctToDrop + '%';
+                        }
+
+                        document.getElementById('aiWinnersGroupRadar').innerHTML = 
+                            '<div class="flex-row" style="justify-content: space-between; margin-bottom: 12px;">' +
+                                '<div style="text-align:center; flex:1;">' +
+                                    '<span style="font-size: 0.85em; color: #5f6368; text-transform: uppercase;">Sum of Winning Positions</span><br>' +
+                                    '<span style="font-size: 1.5em; font-weight: bold; color: ' + (currentWinnersSum > 0 ? '#1e8e3e' : '#d93025') + ';">+$' + currentWinnersSum.toFixed(4) + '</span>' +
+                                '</div>' +
+                                '<div style="text-align:center; flex:1; border-left: 1px solid #dadce0; border-right: 1px solid #dadce0;">' +
+                                    '<span style="font-size: 0.85em; color: #5f6368; text-transform: uppercase;">Highest Positive Peak</span><br>' +
+                                    '<span style="font-size: 1.5em; font-weight: bold; color: #1e8e3e;">+$' + peakW.toFixed(4) + '</span>' +
+                                '</div>' +
+                                '<div style="text-align:center; flex:1;">' +
+                                    '<span style="font-size: 0.85em; color: #5f6368; text-transform: uppercase;">Drawdown from Peak</span><br>' +
+                                    '<span style="font-size: 1.5em; font-weight: bold; color: #d93025;">-$' + Math.max(0, peakDrop).toFixed(4) + '</span>' +
                                 '</div>' +
                             '</div>' +
-                            '<p style="text-align:center; margin-top:12px; font-size:0.9em; color:#5f6368;">' + aMsg + '</p>';
-                    } else { trimmerHtml = '<p style="color:#5f6368;">Waiting for at least 1 profitable coin and 1 losing coin...</p>'; }
-                    document.getElementById('aiTrimmerRadar').innerHTML = trimmerHtml;
+                            '<div style="background: #e8f0fe; padding: 12px; border-radius: 6px; text-align: center; font-size: 0.9em;">' + groupTrailStatus + '</div>';
 
-                    // 📡 3. RENDER COIN MOMENTUM RADAR
-                    let aiRadarHtml = '';
-                    myCoins.forEach(coin => {
-                        const state = stateData.coinStates[coin.symbol];
-                        if (!state || state.status !== 'Running' || state.contracts === 0) return;
-                        
-                        let momentumHtml = '<span style="color:#5f6368;">Gathering data...</span>';
-                        if (state.lastPrices && state.lastPrices.length >= 10) {
-                            const isStagnant = coin.side === 'long' ? state.lastPrices[9] <= state.lastPrices[0] : state.lastPrices[9] >= state.lastPrices[0];
-                            momentumHtml = isStagnant ? '<span style="color:#f29900; font-weight:bold;">Stalled (Dead Momentum)</span>' : '<span style="color:#1e8e3e; font-weight:bold;">Active Momentum</span>';
-                        }
-                        aiRadarHtml += 
-                        '<div class="coin-box" style="border-left: 4px solid #1a73e8; margin-bottom: 12px;">' +
-                            '<div class="flex-row" style="justify-content: space-between;"><strong>' + coin.symbol + '</strong><span>ROI: <b class="' + (state.currentRoi >= 0 ? 'green' : 'red') + '">' + state.currentRoi.toFixed(2) + '%</b></span></div>' +
-                            '<div style="font-size: 0.9em; margin-top: 8px;">Trend: ' + momentumHtml + '</div>' +
-                        '</div>';
-                    });
-                    document.getElementById('aiCoinRadarContainer').innerHTML = aiRadarHtml || '<p style="color:#5f6368;">No active positions to analyze.</p>';
+                        // ⚖️ 2. RENDER 1-TO-1 TRIMMER
+                        let trimmerHtml = '';
+                        if (winners.length > 0 && losers.length > 0) {
+                            let wSort = [...winners].sort((a,b) => b.pnl - a.pnl);
+                            let lSort = [...losers].sort((a,b) => b.pnl - a.pnl);
+                            let net = wSort[0].pnl + lSort[0].pnl;
+                            let nC = net > 0 ? '#1e8e3e' : '#5f6368';
+                            let nBg = net > 0 ? '#e6f4ea' : '#f1f3f4';
+                            trimmerHtml = 
+                                '<div style="display:flex; justify-content: space-between; align-items: center;">' +
+                                    '<div style="text-align:center; padding: 12px; background: #e6f4ea; border-radius: 6px; width: 30%;">' +
+                                        '<div style="font-size: 0.8em; color: #1e8e3e;">Top Winner</div><strong>' + wSort[0].sym + '</strong><br>+$' + wSort[0].pnl.toFixed(4) +
+                                    '</div><div style="font-size: 1.5em; color: #5f6368;">+</div>' +
+                                    '<div style="text-align:center; padding: 12px; background: #fce8e6; border-radius: 6px; width: 30%;">' +
+                                        '<div style="font-size: 0.8em; color: #d93025;">Smallest Loser</div><strong>' + lSort[0].sym + '</strong><br>-$' + Math.abs(lSort[0].pnl).toFixed(4) +
+                                    '</div><div style="font-size: 1.5em; color: #5f6368;">=</div>' +
+                                    '<div style="text-align:center; padding: 12px; background: ' + nBg + '; border-radius: 6px; width: 30%;">' +
+                                        '<div style="font-size: 0.8em;">Net Result</div><strong style="color: ' + nC + ';">$' + net.toFixed(4) + '</strong>' +
+                                    '</div>' +
+                                '</div>';
+                        } else { trimmerHtml = '<p style="color:#5f6368;">Waiting for at least 1 profitable coin and 1 losing coin...</p>'; }
+                        document.getElementById('aiTrimmerRadar').innerHTML = trimmerHtml;
+
+                        // 📡 3. RENDER COIN MOMENTUM RADAR
+                        let aiRadarHtml = '';
+                        (myCoins || []).forEach(coin => {
+                            const state = stateData.coinStates[coin.symbol];
+                            if (!state || state.status !== 'Running' || state.contracts === 0) return;
+                            
+                            let momentumHtml = '<span style="color:#5f6368;">Gathering data...</span>';
+                            if (state.lastPrices && state.lastPrices.length >= 10) {
+                                const isStagnant = coin.side === 'long' ? state.lastPrices[9] <= state.lastPrices[0] : state.lastPrices[9] >= state.lastPrices[0];
+                                momentumHtml = isStagnant ? '<span style="color:#f29900; font-weight:bold;">Stalled (Dead Momentum)</span>' : '<span style="color:#1e8e3e; font-weight:bold;">Active Momentum</span>';
+                            }
+                            aiRadarHtml += 
+                            '<div class="coin-box" style="border-left: 4px solid #1a73e8; margin-bottom: 12px;">' +
+                                '<div class="flex-row" style="justify-content: space-between;"><strong>' + coin.symbol + '</strong><span>ROI: <b class="' + (state.currentRoi >= 0 ? 'green' : 'red') + '">' + state.currentRoi.toFixed(2) + '%</b></span></div>' +
+                                '<div style="font-size: 0.9em; margin-top: 8px;">Trend: ' + momentumHtml + '</div>' +
+                            '</div>';
+                        });
+                        document.getElementById('aiCoinRadarContainer').innerHTML = aiRadarHtml || '<p style="color:#5f6368;">No active positions to analyze.</p>';
+                    }
+                } catch (err) {
+                    console.error("Critical rendering error in loadStatus:", err);
                 }
             }
 
