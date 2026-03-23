@@ -10,11 +10,12 @@ const path = require('path');
 const PORT = process.env.PORT || 3000;
 const JWT_SECRET = process.env.JWT_SECRET || 'super_secret_jwt_key_change_this_in_production';
 
-// 🚨 ORIGINAL HARDCODED DATABASE URL (PASSWORD MASKED FOR YOUR SECURITY)
-const MONGO_URI = 'mongodb+srv://web88888888888888_db_user:ZETrZHXzaxoekjkm@clusterweb8888.l0rv6hv.mongodb.net/botdb?appName=Clusterweb8888';
+// 🚨 ORIGINAL HARDCODED DATABASE URL 
+// (Recommended: change this to use process.env.MONGO_URI in production)
+const MONGO_URI = process.env.MONGO_URI || 'mongodb+srv://web88888888888888_db_user:ZETrZHXzaxoekjkm@clusterweb8888.l0rv6hv.mongodb.net/botdb?appName=Clusterweb8888';
 
 // ==========================================
-// 1. MONGODB DATABASE SETUP (Vercel Serverless Safe)
+// 1. MONGODB DATABASE SETUP
 // ==========================================
 let cachedDb = global.mongoose;
 if (!cachedDb) {
@@ -28,7 +29,7 @@ const connectDB = async () => {
             bufferCommands: false,
             maxPoolSize: 10 
         }).then((mongoose) => {
-            console.log('✅ Connected to MongoDB successfully (Serverless Cached)!');
+            console.log('✅ Connected to MongoDB successfully!');
             return mongoose;
         }).catch(err => {
             console.error('❌ MongoDB Connection Error:', err);
@@ -73,24 +74,6 @@ const SubAccountSchema = new mongoose.Schema({
 const SettingsSchema = new mongoose.Schema({
     userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, unique: true },
     autonomousAiPilot: { type: Boolean, default: true },
-    globalTargetPnl: { type: Number, default: 0 },       
-    globalTrailingPnl: { type: Number, default: 0 },     
-    smartOffsetNetProfit: { type: Number, default: 0 },
-    smartOffsetBottomRowV1: { type: Number, default: 5 }, 
-    smartOffsetBottomRowV1StopLoss: { type: Number, default: 0 }, 
-    smartOffsetStopLoss: { type: Number, default: 0 },
-    smartOffsetNetProfit2: { type: Number, default: 0 }, 
-    smartOffsetStopLoss2: { type: Number, default: 0 },
-    smartOffsetMaxLossPerMinute: { type: Number, default: 0 }, 
-    smartOffsetMaxLossTimeframeSeconds: { type: Number, default: 60 },
-    minuteCloseAutoDynamic: { type: Boolean, default: false },
-    minuteCloseTpMinPnl: { type: Number, default: 0 }, 
-    minuteCloseTpMaxPnl: { type: Number, default: 0 },
-    minuteCloseSlMinPnl: { type: Number, default: 0 }, 
-    minuteCloseSlMaxPnl: { type: Number, default: 0 },
-    walletRecoveryEnabled: { type: Boolean, default: false },
-    walletRecoveryMultiplier: { type: Number, default: 1.5 },
-    walletRecoveryWindowMinutes: { type: Number, default: 5 },
     subAccounts: [SubAccountSchema]
 });
 const Settings = mongoose.models.Settings || mongoose.model('Settings', SettingsSchema);
@@ -110,18 +93,10 @@ const OffsetRecord = mongoose.models.OffsetRecord || mongoose.model('OffsetRecor
 // 3. MULTI-PROFILE BOT ENGINE STATE
 // ==========================================
 global.activeBots = global.activeBots || new Map();
-global.globalWinnersPeaks = global.globalWinnersPeaks || new Map(); // 🏆 Tracks ONLY the Positive Sum Peak
-global.lastStopLossExecutions = global.lastStopLossExecutions || new Map(); 
-global.rollingStopLosses = global.rollingStopLosses || new Map(); 
-global.autoDynamicExecutions = global.autoDynamicExecutions || new Map(); 
-global.walletHistory = global.walletHistory || new Map(); 
+global.globalWinnersPeaks = global.globalWinnersPeaks || new Map(); 
 
 const activeBots = global.activeBots;
 const globalWinnersPeaks = global.globalWinnersPeaks;
-const lastStopLossExecutions = global.lastStopLossExecutions;
-const rollingStopLosses = global.rollingStopLosses;
-const autoDynamicExecutions = global.autoDynamicExecutions;
-const walletHistory = global.walletHistory;
 
 function logForProfile(profileId, msg) {
     console.log(`[Profile: ${profileId}] ${msg}`);
@@ -320,11 +295,8 @@ function stopBot(profileId) {
 }
 
 // =========================================================================
-// 4. BACKGROUND TASKS
+// 4. BACKGROUND TASKS (AI GROUP LOGIC)
 // =========================================================================
-const executeWalletTracker = async () => { /* Wallet Tracker logic remains unchanged */ };
-const executeOneMinuteCloser = async () => {};
-
 const executeGlobalProfitMonitor = async () => {
     if (global.isGlobalMonitoring) return;
     global.isGlobalMonitoring = true;
@@ -364,7 +336,7 @@ const executeGlobalProfitMonitor = async () => {
 
                 // 🏆 1. CALCULATE WINNERS GROUP SUM
                 let winners = activeCandidates.filter(c => c.unrealizedPnl > 0);
-                let losers = activeCandidates.filter(c => c.unrealizedPnl < 0).sort((a,b) => b.unrealizedPnl - a.unrealizedPnl); // Sort closest to 0 first
+                let losers = activeCandidates.filter(c => c.unrealizedPnl < 0).sort((a,b) => b.unrealizedPnl - a.unrealizedPnl);
                 
                 let currentWinnersSum = winners.reduce((sum, w) => sum + w.unrealizedPnl, 0);
                 let totalLosersSum = losers.reduce((sum, l) => sum + l.unrealizedPnl, 0);
@@ -381,8 +353,8 @@ const executeGlobalProfitMonitor = async () => {
                 if (isAutoPilot && currentWinnersSum > 0) {
                     let aiExecutedGroup = false;
 
-                    // A) 🛡️ DYNAMIC WINNERS PEAK TRAILING
-                    if (peakW > 1.0) {
+                    // A) 🛡️ DYNAMIC WINNERS PEAK TRAILING (Activates > $0)
+                    if (peakW > 0) {
                         let trailingTolerance = peakW > 10.0 ? peakW * 0.15 : peakW * 0.25; 
                         
                         if (peakW - currentWinnersSum >= trailingTolerance) {
@@ -439,12 +411,12 @@ const executeGlobalProfitMonitor = async () => {
                             pos.subAccount.realizedPnl = (pos.subAccount.realizedPnl || 0) + pos.unrealizedPnl;
                             Settings.updateOne({ "subAccounts._id": pos.subAccount._id }, { $set: { "subAccounts.$.realizedPnl": pos.subAccount.realizedPnl } }).catch(()=>{});
                         });
-                        continue; // Skip the micro trimmer below
+                        continue; 
                     }
 
-                    // B) ⚖️ STANDARD 1-to-1 FAT-TRIMMER (If group absorb didn't trigger)
+                    // B) ⚖️ STANDARD 1-to-1 FAT-TRIMMER
                     let availableWinners = winners.filter(w => !w.markedForClose).sort((a,b) => b.unrealizedPnl - a.unrealizedPnl);
-                    let availableLosers = losers.filter(l => !l.markedForClose); // already sorted closest to 0
+                    let availableLosers = losers.filter(l => !l.markedForClose); 
 
                     for (let w of availableWinners) {
                         if (w.markedForClose) continue;
@@ -515,7 +487,21 @@ app.get('/api/ping', async (req, res) => {
     res.status(200).json({ success: true, message: 'Bot is awake', timestamp: new Date().toISOString() });
 });
 
-app.post('/api/register', async (req, res) => { /* Registration code remains unchanged */ });
+app.post('/api/register', async (req, res) => {
+    await connectDB();
+    try {
+        const { username, password } = req.body;
+        if (!username || !password) return res.status(400).json({ error: 'Username and password required' });
+        const hashedPassword = await bcrypt.hash(password, 10);
+        const user = await User.create({ username, password: hashedPassword });
+        await Settings.create({ userId: user._id, autonomousAiPilot: true, subAccounts: [] });
+        const token = jwt.sign({ userId: user._id }, JWT_SECRET, { expiresIn: '7d' });
+        res.json({ token });
+    } catch (err) {
+        res.status(400).json({ error: 'Username already exists or invalid data' });
+    }
+});
+
 app.post('/api/login', async (req, res) => {
     await connectDB();
     const { username, password } = req.body;
@@ -525,21 +511,39 @@ app.post('/api/login', async (req, res) => {
     res.json({ token });
 });
 
-app.get('/api/settings', authMiddleware, async (req, res) => { bootstrapBots(); const settings = await Settings.findOne({ userId: req.userId }); res.json(settings); });
-app.post('/api/settings', authMiddleware, async (req, res) => { /* Settings code remains unchanged */ });
+app.get('/api/settings', authMiddleware, async (req, res) => { 
+    bootstrapBots(); 
+    const settings = await Settings.findOne({ userId: req.userId }); 
+    res.json(settings); 
+});
+
+app.post('/api/settings', authMiddleware, async (req, res) => {
+    await connectDB();
+    try {
+        const updateData = req.body;
+        const updated = await Settings.findOneAndUpdate(
+            { userId: req.userId },
+            { $set: updateData },
+            { new: true, upsert: true }
+        );
+        res.json({ success: true, settings: updated });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
 
 app.get('/api/status', authMiddleware, async (req, res) => {
     bootstrapBots(); 
     const settings = await Settings.findOne({ userId: req.userId });
     
     const userStatuses = {};
-    const userWinnersPeaks = {}; // 🏆
+    const userWinnersPeaks = {}; 
     const dbUserId = req.userId.toString();
 
     for (let [profileId, botData] of activeBots.entries()) {
         if (botData.userId === dbUserId) {
             userStatuses[profileId] = botData.state;
-            userWinnersPeaks[profileId] = global.globalWinnersPeaks.get(profileId) || 0; // 🏆
+            userWinnersPeaks[profileId] = global.globalWinnersPeaks.get(profileId) || 0; 
         }
     }
     
@@ -547,7 +551,7 @@ app.get('/api/status', authMiddleware, async (req, res) => {
         states: userStatuses, 
         subAccounts: settings ? settings.subAccounts : [], 
         globalSettings: settings, 
-        winnersPeaks: userWinnersPeaks // 🏆 Sent to frontend
+        winnersPeaks: userWinnersPeaks 
     });
 });
 
@@ -629,7 +633,7 @@ app.get('/', (req, res) => {
                 </div>
             </div>
 
-            <!-- ========================== NEW AI PILOT LIVE VIEW TAB ========================== -->
+            <!-- ========================== AI PILOT LIVE VIEW TAB ========================== -->
             <div id="aipilot-tab" style="display:none;">
                 <div class="panel ai-glow" style="border: 1px solid #1a73e8;">
                     <div class="flex-row" style="justify-content: space-between;">
@@ -638,7 +642,7 @@ app.get('/', (req, res) => {
                     </div>
                     <p style="color: #5f6368; font-size: 0.9em;">Visualizing the AI's internal thought process, momentum tracking, and dynamic trimming logic.</p>
 
-                    <!-- 🏆 NEW: WINNERS GROUP PEAK RADAR -->
+                    <!-- 🏆 WINNERS GROUP PEAK RADAR -->
                     <h3 style="color: #202124;">🏆 Winners Group Peak Radar (Cluster Absorption)</h3>
                     <div id="aiWinnersGroupRadar" style="background: #f8f9fa; padding: 16px; border-radius: 6px; border: 1px dashed #ccc; margin-bottom: 24px;">
                         Waiting for data...
@@ -687,7 +691,6 @@ app.get('/', (req, res) => {
                             <button class="btn-blue" style="margin-top:12px; background:#1a73e8;" onclick="saveGlobalSettings()">Update AI Mode</button>
                         </div>
                         
-                        <!-- Profile setup section remains conceptually identical to your code -->
                         <h2>Profile Setup</h2>
                         <div style="background: #f8f9fa; padding: 12px; border-radius: 6px; margin-bottom: 16px; border: 1px solid #dadce0;">
                             <div class="flex-row" style="margin-bottom: 8px;">
@@ -889,7 +892,7 @@ app.get('/', (req, res) => {
                 document.getElementById('logs').innerHTML = (stateData.logs || []).join('<br>');
 
                 // ============================================================
-                // 🤖 NEW AI PILOT TELEMETRY RENDERER (INJECTED)
+                // 🤖 AI PILOT TELEMETRY RENDERER 
                 // ============================================================
                 if (document.getElementById('aipilot-tab').style.display !== 'none') {
                     const aiStatusEl = document.getElementById('aiMasterStatus');
@@ -921,7 +924,7 @@ app.get('/', (req, res) => {
                     let peakDrop = peakW - currentWinnersSum;
                     let groupTrailStatus = "Gathering data...";
                     
-                    if (peakW > 1.0) {
+                    if (peakW > 0) {
                         let peakTolerance = peakW > 10.0 ? peakW * 0.15 : peakW * 0.25;
                         let pctToDrop = ((peakDrop / peakTolerance) * 100).toFixed(0);
                         
@@ -945,9 +948,9 @@ app.get('/', (req, res) => {
                             }
                         }
 
-                        groupTrailStatus = `<span style="color:#1a73e8; font-weight:bold;">Tracking Positive Winners Peak ($${peakW.toFixed(2)}). Dynamic Drop Tension: ${Math.max(0, Math.min(pctToDrop, 100))}%.</span> ${clusterSimMsg}`;
+                        groupTrailStatus = `<span style="color:#1a73e8; font-weight:bold;">Tracking Positive Winners Peak ($${peakW.toFixed(4)}). Dynamic Drop Tension: ${Math.max(0, Math.min(pctToDrop, 100))}%.</span> ${clusterSimMsg}`;
                     } else {
-                        groupTrailStatus = `<span style="color:#5f6368;">Waiting for Total Winners PNL to exceed $1.00 to engage Dynamic Cluster Trailing.</span>`;
+                        groupTrailStatus = `<span style="color:#5f6368;">Waiting for positions to reach profit to engage Dynamic Cluster Trailing.</span>`;
                     }
 
                     document.getElementById('aiWinnersGroupRadar').innerHTML = \`
@@ -1021,7 +1024,9 @@ app.get('/', (req, res) => {
     `);
 });
 
-// VERCEL EXPORT
+// VERCEL EXPORT WARNING:
+// This application uses setInterval and global maps for a continuous trading loop. 
+// It will NOT work properly on Vercel Serverless. Host this on a dedicated server (Render, Railway, AWS, DigitalOcean).
 if (process.env.NODE_ENV !== 'production') {
     app.listen(PORT, () => console.log(`🚀 Running locally on http://localhost:${PORT}`));
 }
