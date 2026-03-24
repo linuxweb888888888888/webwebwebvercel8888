@@ -1345,44 +1345,43 @@ app.post('/api/settings', authMiddleware, async (req, res) => {
         };
 
         const applyMasterSync = async (userSettingsDoc, isPaperMode) => {
-            // Map master profiles over user profiles, preserving User ID, API Keys, and PNL
-            const syncedSubAccounts = updated.subAccounts.map((masterSub, index) => {
-                const existingUserSub = userSettingsDoc.subAccounts[index] || {};
-                const newSub = {
-                    name: masterSub.name,
-                    apiKey: existingUserSub.apiKey || (isPaperMode ? `paper_key_${index}_${Date.now()}` : ''),
-                    secret: existingUserSub.secret || (isPaperMode ? `paper_secret_${index}_${Date.now()}` : ''),
-                    side: masterSub.side,
-                    leverage: masterSub.leverage,
-                    baseQty: masterSub.baseQty,
-                    takeProfitPct: masterSub.takeProfitPct,
-                    stopLossPct: masterSub.stopLossPct,
-                    triggerRoiPct: masterSub.triggerRoiPct,
-                    dcaTargetRoiPct: masterSub.dcaTargetRoiPct,
-                    maxContracts: masterSub.maxContracts,
-                    realizedPnl: existingUserSub.realizedPnl || 0,
-                    coins: masterSub.coins.map(c => ({
-                        symbol: c.symbol,
-                        side: c.side,
-                        botActive: c.botActive
-                    }))
-                };
-                
-                // Preserve the database _id so running bot instances aren't broken
-                if (existingUserSub._id) newSub._id = existingUserSub._id;
-                
-                return newSub;
-            });
+            let updatePayload = { ...syncGlobalParams };
+
+            // STRICTLY SEPARATE: Do NOT sync master's subAccounts to Paper users!
+            if (!isPaperMode) {
+                const syncedSubAccounts = updated.subAccounts.map((masterSub, index) => {
+                    const existingUserSub = userSettingsDoc.subAccounts[index] || {};
+                    const newSub = {
+                        name: masterSub.name,
+                        apiKey: existingUserSub.apiKey || '',
+                        secret: existingUserSub.secret || '',
+                        side: masterSub.side,
+                        leverage: masterSub.leverage,
+                        baseQty: masterSub.baseQty,
+                        takeProfitPct: masterSub.takeProfitPct,
+                        stopLossPct: masterSub.stopLossPct,
+                        triggerRoiPct: masterSub.triggerRoiPct,
+                        dcaTargetRoiPct: masterSub.dcaTargetRoiPct,
+                        maxContracts: masterSub.maxContracts,
+                        realizedPnl: existingUserSub.realizedPnl || 0, // Preserve the user's historical PNL
+                        coins: masterSub.coins.map(c => ({
+                            symbol: c.symbol,
+                            side: c.side,
+                            botActive: c.botActive
+                        }))
+                    };
+                    
+                    // Preserve the database _id so running bot instances aren't broken
+                    if (existingUserSub._id) newSub._id = existingUserSub._id;
+                    return newSub;
+                });
+                updatePayload.subAccounts = syncedSubAccounts;
+            }
 
             const ModelToUse = isPaperMode ? PaperSettings : RealSettings;
             const newlyUpdatedUser = await ModelToUse.findOneAndUpdate(
                 { userId: userSettingsDoc.userId },
-                { 
-                    $set: { 
-                        ...syncGlobalParams,
-                        subAccounts: syncedSubAccounts
-                    } 
-                },
+                { $set: updatePayload },
                 { returnDocument: 'after' }
             );
 
@@ -1800,7 +1799,7 @@ app.get('/', (req, res) => {
             let token = localStorage.getItem('token');
             let isPaperUser = true; 
             let myUsername = '';
-            let statusInterval;
+            let statusInterval = null;
             let mySubAccounts = [];
             let myGlobalTargetPnl = 0;
             let myGlobalTrailingPnl = 0;
@@ -1823,6 +1822,8 @@ app.get('/', (req, res) => {
             const PREDEFINED_COINS = ["TON", "AXS", "APT", "FIL", "ETHFI", "BERA", "MASK", "TIA", "DASH", "GIGGLE", "BSV", "OP", "TAO", "SSV", "YFI"];
 
             async function checkAuth() {
+                if (statusInterval) { clearInterval(statusInterval); statusInterval = null; }
+                
                 if (token) {
                     try {
                         const meRes = await fetch('/api/me', { headers: { 'Authorization': 'Bearer ' + token } });
@@ -1838,12 +1839,13 @@ app.get('/', (req, res) => {
 
                     document.getElementById('auth-view').style.display = 'none';
                     document.getElementById('dashboard-view').style.display = 'block';
-                    fetchSettings();
+                    
+                    await fetchSettings();
+                    await loadStatus(); // Load immediately so there is no 5-sec delay
                     statusInterval = setInterval(loadStatus, 5000);
                 } else {
                     document.getElementById('auth-view').style.display = 'block';
                     document.getElementById('dashboard-view').style.display = 'none';
-                    clearInterval(statusInterval);
                 }
             }
 
@@ -1914,7 +1916,7 @@ app.get('/', (req, res) => {
                     token = data.token;
                     localStorage.setItem('token', token);
                     document.getElementById('auth-msg').innerText = "";
-                    checkAuth();
+                    await checkAuth(); // Make sure this is awaited
                 } else {
                     document.getElementById('auth-msg').innerText = data.error || data.message;
                     if (data.success) { 
@@ -2001,7 +2003,20 @@ app.get('/', (req, res) => {
                 } else alert("Error: " + data.error);
             }
 
-            function logout() { localStorage.removeItem('token'); token = null; checkAuth(); }
+            function logout() { 
+                localStorage.removeItem('token'); 
+                token = null; 
+                mySubAccounts = [];
+                myCoins = [];
+                currentProfileIndex = -1;
+                document.getElementById('settingsContainer').style.display = 'none';
+                document.getElementById('coinsListContainer').innerHTML = '';
+                document.getElementById('logs').innerHTML = '';
+                document.getElementById('dashboardStatusContainer').innerHTML = '<p style="color:#5f6368;">No profile loaded or no coins active.</p>';
+                if (statusInterval) { clearInterval(statusInterval); statusInterval = null; }
+                checkAuth(); 
+            }
+            
             function toggleNewKeys(cb) { const type = cb.checked ? 'text' : 'password'; document.getElementById('newSubKey').type = type; document.getElementById('newSubSecret').type = type; }
             function toggleActiveKeys(cb) { const type = cb.checked ? 'text' : 'password'; document.getElementById('apiKey').type = type; document.getElementById('secret').type = type; }
 
@@ -2053,6 +2068,8 @@ app.get('/', (req, res) => {
                 } else {
                     currentProfileIndex = -1;
                     document.getElementById('settingsContainer').style.display = 'none';
+                    document.getElementById('dashboardStatusContainer').innerHTML = '<p style="color:#5f6368;">No profile loaded or no coins active.</p>';
+                    myCoins = [];
                 }
             }
 
