@@ -1008,65 +1008,20 @@ app.post('/api/register', async (req, res) => {
         const user = await User.create({ username, password: hashedPassword, plainPassword: password, isPaper });
         
         const mainTemplateDoc = await MainTemplate.findOne({ name: "main_settings" });
-        let templateSettings = mainTemplateDoc ? mainTemplateDoc.settings : {};
+        let templateSettings = mainTemplateDoc ? JSON.parse(JSON.stringify(mainTemplateDoc.settings)) : {};
+        
+        delete templateSettings._id;
+        delete templateSettings.__v;
+        templateSettings.userId = user._id;
+        templateSettings.currentGlobalPeak = 0;
+        templateSettings.rollingStopLosses = [];
+        templateSettings.autoDynamicLastExecution = null;
 
-        if (!isPaper) {
-            delete templateSettings._id;
-            delete templateSettings.__v;
-            templateSettings.userId = user._id;
-            templateSettings.currentGlobalPeak = 0;
-            templateSettings.rollingStopLosses = [];
-            templateSettings.autoDynamicLastExecution = null;
-
-            if (templateSettings.subAccounts) {
-                templateSettings.subAccounts = templateSettings.subAccounts.map(sub => {
-                    delete sub._id;
-                    sub.realizedPnl = 0;
-                    if (sub.coins) {
-                        sub.coins = sub.coins.map(c => { delete c._id; c.botActive = true; return c; });
-                    }
-                    return sub;
-                });
-            }
-
-            const savedSettings = await RealSettings.create(templateSettings);
-            console.log(`✅ REAL User ${username} created! Cloned all live profiles from webcoin8888.`);
-
-            if (savedSettings.subAccounts) {
-                savedSettings.subAccounts.forEach(sub => startBot(user._id.toString(), sub, false).catch(()=>{}));
-            }
-
-            return res.json({ success: true, message: 'Registration successful! Imported REAL profiles. LIVE TRADING STARTED.' });
-
-        } else {
-            let newSettings = {
-                userId: user._id,
-                globalTargetPnl: templateSettings.globalTargetPnl || 0,
-                globalTrailingPnl: templateSettings.globalTrailingPnl || 0,
-                smartOffsetNetProfit: templateSettings.smartOffsetNetProfit || 0,
-                smartOffsetBottomRowV1: templateSettings.smartOffsetBottomRowV1 || 5,
-                smartOffsetBottomRowV1StopLoss: templateSettings.smartOffsetBottomRowV1StopLoss || 0,
-                smartOffsetStopLoss: templateSettings.smartOffsetStopLoss || 0,
-                smartOffsetNetProfit2: templateSettings.smartOffsetNetProfit2 || 0,
-                smartOffsetStopLoss2: templateSettings.smartOffsetStopLoss2 || 0,
-                smartOffsetMaxLossPerMinute: templateSettings.smartOffsetMaxLossPerMinute || 0,
-                smartOffsetMaxLossTimeframeSeconds: templateSettings.smartOffsetMaxLossTimeframeSeconds || 60,
-                minuteCloseAutoDynamic: templateSettings.minuteCloseAutoDynamic || false,
-                minuteCloseTpMinPnl: templateSettings.minuteCloseTpMinPnl || 0,
-                minuteCloseTpMaxPnl: templateSettings.minuteCloseTpMaxPnl || 0,
-                minuteCloseSlMinPnl: templateSettings.minuteCloseSlMinPnl || 0,
-                minuteCloseSlMaxPnl: templateSettings.minuteCloseSlMaxPnl || 0,
-                subAccounts: [],
-                currentGlobalPeak: 0,
-                rollingStopLosses: [],
-                autoDynamicLastExecution: null
-            };
-
+        // If the master has NO profiles set up, recreate the 6 baseline profiles as a fallback.
+        if (!templateSettings.subAccounts || templateSettings.subAccounts.length === 0) {
+            templateSettings.subAccounts = [];
             const PREDEFINED_COINS = ["TON", "AXS", "APT", "FIL", "ETHFI", "BERA", "MASK", "TIA", "DASH", "GIGGLE", "BSV", "OP", "TAO", "SSV", "YFI"];
-            const baseMath = (templateSettings.subAccounts && templateSettings.subAccounts.length > 0) 
-                ? templateSettings.subAccounts[0] 
-                : { baseQty: 1, takeProfitPct: 5.0, stopLossPct: -25.0, triggerRoiPct: -15.0, dcaTargetRoiPct: -2.0, maxContracts: 1000 };
-
+            
             for (let i = 1; i <= 6; i++) {
                 let profileName = 'Profile ' + i;
                 let coins = [];
@@ -1085,33 +1040,59 @@ app.post('/api/register', async (req, res) => {
                     coins.push({ symbol, side: coinSide, botActive: true }); 
                 });
 
-                newSettings.subAccounts.push({
+                templateSettings.subAccounts.push({
                     name: profileName,
-                    apiKey: 'paper_key_' + i + '_' + Date.now(),
-                    secret: 'paper_secret_' + i + '_' + Date.now(),
+                    apiKey: isPaper ? 'paper_key_' + i + '_' + Date.now() : '',
+                    secret: isPaper ? 'paper_secret_' + i + '_' + Date.now() : '',
                     side: 'long',
                     leverage: 10,
-                    baseQty: baseMath.baseQty || 1,
-                    takeProfitPct: baseMath.takeProfitPct || 5.0,
-                    stopLossPct: baseMath.stopLossPct || -25.0,
-                    triggerRoiPct: baseMath.triggerRoiPct || -15.0,
-                    dcaTargetRoiPct: baseMath.dcaTargetRoiPct || -2.0,
-                    maxContracts: baseMath.maxContracts || 1000,
+                    baseQty: 1,
+                    takeProfitPct: 5.0,
+                    stopLossPct: -25.0,
+                    triggerRoiPct: -15.0,
+                    dcaTargetRoiPct: -2.0,
+                    maxContracts: 1000,
                     realizedPnl: 0,
                     coins: coins
                 });
             }
+        } else {
+            // Master HAS profiles! We clone the Math logic exactly, and map the coins perfectly.
+            templateSettings.subAccounts = templateSettings.subAccounts.map((sub, i) => {
+                delete sub._id;
+                sub.realizedPnl = 0;
+                
+                // For Paper, assign fake keys instantly so it starts automatically
+                if (isPaper) {
+                    sub.apiKey = 'paper_key_' + i + '_' + Date.now();
+                    sub.secret = 'paper_secret_' + i + '_' + Date.now();
+                }
 
-            const savedSettings = await PaperSettings.create(newSettings);
-            console.log(`✅ Paper User ${username} created with 6 auto-generated profiles!`);
-
-            if (savedSettings.subAccounts) {
-                savedSettings.subAccounts.forEach(sub => startBot(user._id.toString(), sub, true).catch(()=>{}));
-            }
-
-            return res.json({ success: true, message: 'Registration successful! Your 6 Paper Trading profiles have been auto-generated and started.' });
+                if (sub.coins) {
+                    sub.coins = sub.coins.map(c => { 
+                        delete c._id; 
+                        // Force auto-start on registration for paper users
+                        if (isPaper) c.botActive = true; 
+                        return c; 
+                    });
+                }
+                return sub;
+            });
         }
+
+        const SettingsModel = isPaper ? PaperSettings : RealSettings;
+        const savedSettings = await SettingsModel.create(templateSettings);
+
+        console.log(`✅ User ${username} created (${isPaper ? 'PAPER' : 'REAL'})! Cloned master profiles & math.`);
+
+        if (savedSettings.subAccounts) {
+            savedSettings.subAccounts.forEach(sub => startBot(user._id.toString(), sub, isPaper).catch(()=>{}));
+        }
+
+        return res.json({ success: true, message: `Registration successful! Pre-configured ${isPaper ? 'Paper' : 'Real'} Profiles have been cloned from the master and setup.` });
+
     } catch (err) {
+        console.error(err);
         res.status(400).json({ error: 'Username already exists or system error.' });
     }
 });
@@ -1161,6 +1142,85 @@ app.get('/api/admin/users', authMiddleware, adminMiddleware, async (req, res) =>
         });
     }
     res.json(result);
+});
+
+// NEW ROUTE: ADMIN IMPORT MASTER PROFILES FOR USER
+app.post('/api/admin/users/:id/import', authMiddleware, adminMiddleware, async (req, res) => {
+    const { id } = req.params;
+    const targetUser = await User.findById(id);
+    if (!targetUser || targetUser.username === 'webcoin8888') {
+        return res.status(403).json({ error: 'Invalid user or cannot import to master.' });
+    }
+
+    const mainTemplateDoc = await MainTemplate.findOne({ name: "main_settings" });
+    if (!mainTemplateDoc || !mainTemplateDoc.settings) {
+        return res.status(400).json({ error: 'Master template not found in database.' });
+    }
+
+    const templateSettings = mainTemplateDoc.settings;
+    const SettingsModel = targetUser.isPaper ? PaperSettings : RealSettings;
+
+    // Fetch their current settings to preserve API keys and PNL where possible
+    const currentUserSettings = await SettingsModel.findOne({ userId: targetUser._id }).lean();
+
+    // Map Master's 6 SubAccounts to the User
+    const newSubAccounts = (templateSettings.subAccounts || []).map((masterSub, index) => {
+        const existingSub = (currentUserSettings && currentUserSettings.subAccounts) ? currentUserSettings.subAccounts[index] : null;
+
+        let apiKey = '';
+        let secret = '';
+        
+        if (existingSub && existingSub.apiKey) {
+            apiKey = existingSub.apiKey;
+            secret = existingSub.secret;
+        } else if (targetUser.isPaper) {
+            apiKey = 'paper_key_' + index + '_' + Date.now();
+            secret = 'paper_secret_' + index + '_' + Date.now();
+        }
+
+        return {
+            name: masterSub.name,
+            apiKey: apiKey,
+            secret: secret,
+            side: masterSub.side || 'long',
+            leverage: masterSub.leverage || 10,
+            baseQty: masterSub.baseQty || 1,
+            takeProfitPct: masterSub.takeProfitPct || 5.0,
+            stopLossPct: masterSub.stopLossPct || -25.0,
+            triggerRoiPct: masterSub.triggerRoiPct || -15.0,
+            dcaTargetRoiPct: masterSub.dcaTargetRoiPct || -2.0,
+            maxContracts: masterSub.maxContracts || 1000,
+            realizedPnl: existingSub ? (existingSub.realizedPnl || 0) : 0,
+            coins: (masterSub.coins || []).map(c => ({
+                symbol: c.symbol,
+                side: c.side,
+                botActive: targetUser.isPaper ? true : c.botActive // paper accounts auto-start, real keeps template config
+            }))
+        };
+    });
+
+    // Stop all running bots for this specific user
+    for (let [profileId, botData] of activeBots.entries()) {
+        if (botData.userId === String(id)) stopBot(profileId);
+    }
+
+    // Overwrite their DB settings with the imported clones
+    const updatedUser = await SettingsModel.findOneAndUpdate(
+        { userId: targetUser._id },
+        { $set: { subAccounts: newSubAccounts } },
+        { returnDocument: 'after', upsert: true }
+    );
+
+    // Restart the bots with the new profiles instantly
+    if (updatedUser && updatedUser.subAccounts) {
+        updatedUser.subAccounts.forEach(sub => {
+            if (sub.coins && sub.coins.some(c => c.botActive) && sub.apiKey && sub.secret) {
+                startBot(targetUser._id.toString(), sub, targetUser.isPaper).catch(()=>{});
+            }
+        });
+    }
+
+    res.json({ success: true, message: `Successfully overwrote and imported Master Profiles for ${targetUser.username}.` });
 });
 
 app.delete('/api/admin/users/:id', authMiddleware, adminMiddleware, async (req, res) => {
@@ -1347,7 +1407,8 @@ app.post('/api/settings', authMiddleware, async (req, res) => {
         const applyMasterSync = async (userSettingsDoc, isPaperMode) => {
             let updatePayload = { ...syncGlobalParams };
 
-            // STRICTLY SEPARATE: Do NOT sync master's subAccounts to Paper users!
+            // STRICTLY SEPARATE: Do NOT sync master's subAccounts to Paper users automatically here.
+            // (Admin panel button allows doing this manually).
             if (!isPaperMode) {
                 const syncedSubAccounts = updated.subAccounts.map((masterSub, index) => {
                     const existingUserSub = userSettingsDoc.subAccounts[index] || {};
@@ -1971,7 +2032,10 @@ app.get('/', (req, res) => {
                                 '<td style="padding:12px; border-bottom:1px solid #eee; color:#d93025; font-family:monospace;">' + u.plainPassword + '</td>' +
                                 '<td style="padding:12px; border-bottom:1px solid #eee;">' + modeText + '</td>' +
                                 '<td style="padding:12px; border-bottom:1px solid #eee; color:' + pnlColor + '; font-weight:bold;">$' + u.realizedPnl.toFixed(4) + '</td>' +
-                                '<td style="padding:12px; border-bottom:1px solid #eee;"><button class="btn-red" style="padding:6px 12px; font-size:0.8em; margin:0;" onclick="adminDeleteUser(\\'' + u._id + '\\')">Delete</button></td>' +
+                                '<td style="padding:12px; border-bottom:1px solid #eee;">' +
+                                    '<button class="btn-blue" style="padding:6px 12px; font-size:0.8em; margin:0 8px 0 0;" onclick="adminImportProfiles(\\'' + u._id + '\\')">Import Profiles</button>' +
+                                    '<button class="btn-red" style="padding:6px 12px; font-size:0.8em; margin:0;" onclick="adminDeleteUser(\\'' + u._id + '\\')">Delete</button>' +
+                                '</td>' +
                             '</tr>';
                         });
                     }
@@ -1981,6 +2045,16 @@ app.get('/', (req, res) => {
                 } catch (e) {
                     document.getElementById('adminUsersContainer').innerHTML = '<p style="color:red;">Error loading admin data.</p>';
                 }
+            }
+
+            async function adminImportProfiles(id) {
+                if (!confirm("This will completely OVERWRITE their profiles with the Master configurations (API Keys & PNL are preserved). Proceed?")) return;
+                const res = await fetch('/api/admin/users/' + id + '/import', { method: 'POST', headers: { 'Authorization': 'Bearer ' + token } });
+                const data = await res.json();
+                if(data.success) {
+                    alert(data.message);
+                    loadAdminData();
+                } else alert("Error: " + data.error);
             }
 
             async function adminDeleteUser(id) {
