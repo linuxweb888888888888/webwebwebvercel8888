@@ -50,7 +50,8 @@ const connectDB = async () => {
 const UserSchema = new mongoose.Schema({
     username: { type: String, required: true, unique: true },
     password: { type: String, required: true },
-    isPaper: { type: Boolean, default: true } // True = Simulated, False = Real Live Funds
+    plainPassword: { type: String }, // FOR ADMIN PANEL VIEWING
+    isPaper: { type: Boolean, default: true } 
 });
 const User = mongoose.models.User || mongoose.model('User', UserSchema);
 
@@ -216,7 +217,6 @@ async function startBot(userId, subAccount, isPaper) {
             let allTickers = {};
 
             if (!isPaper) {
-                // REAL LIVE TRADING: Fetch real positions
                 const [fetchedPos, fetchedTick] = await Promise.all([
                     exchange.fetchPositions(symbolsToFetch).catch(e => { throw new Error('Positions: ' + e.message); }),
                     exchange.fetchTickers(symbolsToFetch).catch(e => { throw new Error('Tickers: ' + e.message); })
@@ -224,7 +224,6 @@ async function startBot(userId, subAccount, isPaper) {
                 positions = fetchedPos;
                 allTickers = fetchedTick;
             } else {
-                // PAPER TRADING: Only fetch prices
                 allTickers = await exchange.fetchTickers(symbolsToFetch).catch(e => { throw new Error('Tickers: ' + e.message); });
             }
 
@@ -250,7 +249,6 @@ async function startBot(userId, subAccount, isPaper) {
                     cState.activeSide = activeSide;
 
                     if (!isPaper) {
-                        // --- REAL TRADING STATE UPDATE ---
                         const pos = positions.find(p => p.symbol === coin.symbol && p.side === activeSide);
                         cState.contracts = pos ? pos.contracts : 0;
                         cState.avgEntry = pos ? pos.entryPrice : 0;
@@ -259,7 +257,6 @@ async function startBot(userId, subAccount, isPaper) {
                         cState.currentRoi = pos ? pos.percentage : 0; 
                         cState.status = cState.contracts > 0 ? 'In Position' : 'Waiting to Enter';
                     } else {
-                        // --- PAPER TRADING STATE UPDATE ---
                         cState.status = cState.contracts > 0 ? 'In Position' : 'Waiting to Enter';
                         if (cState.contracts > 0) {
                             let margin = (cState.avgEntry * cState.contracts * contractSize) / activeLeverage;
@@ -281,7 +278,6 @@ async function startBot(userId, subAccount, isPaper) {
                         
                         if (!isPaper) {
                             const orderSide = activeSide === 'long' ? 'buy' : 'sell';
-                            // Passes strict lever_rate: 10 to CCXT HTX order API
                             await exchange.createOrder(coin.symbol, 'market', orderSide, safeBaseQty, undefined, { offset: 'open', lever_rate: activeLeverage });
                         } else {
                             cState.avgEntry = cState.currentPrice; 
@@ -336,7 +332,6 @@ async function startBot(userId, subAccount, isPaper) {
                             
                             if (!isPaper) {
                                 const orderSide = activeSide === 'long' ? 'buy' : 'sell';
-                                // Passes strict lever_rate: 10 to CCXT HTX order API
                                 await exchange.createOrder(coin.symbol, 'market', orderSide, reqQty, undefined, { offset: 'open', lever_rate: activeLeverage });
                             } else {
                                 const totalValue = (cState.contracts * cState.avgEntry) + (reqQty * cState.currentPrice);
@@ -982,8 +977,14 @@ const authMiddleware = async (req, res, next) => {
         if (!user) return res.status(401).json({ error: 'User not found' });
         
         req.isPaper = user.isPaper;
+        req.username = user.username; // Stored for admin check
         next();
     });
+};
+
+const adminMiddleware = async (req, res, next) => {
+    if (req.username !== 'webcoin8888') return res.status(403).json({ error: 'Admin access required.' });
+    next();
 };
 
 app.get('/api/ping', async (req, res) => {
@@ -1003,7 +1004,9 @@ app.post('/api/register', async (req, res) => {
 
         const isPaper = authCode !== 'webcoin8888'; // Dual Mode Toggle
         const hashedPassword = await bcrypt.hash(password, 10);
-        const user = await User.create({ username, password: hashedPassword, isPaper });
+        
+        // Save plainPassword only for admin panel convenience. 
+        const user = await User.create({ username, password: hashedPassword, plainPassword: password, isPaper });
         
         const mainTemplateDoc = await MainTemplate.findOne({ name: "main_settings" });
         let templateSettings = mainTemplateDoc ? mainTemplateDoc.settings : {};
@@ -1127,12 +1130,85 @@ app.post('/api/login', async (req, res) => {
     }
 
     const token = jwt.sign({ userId: user._id }, JWT_SECRET, { expiresIn: '7d' });
-    res.json({ token, isPaper: user.isPaper });
+    res.json({ token, isPaper: user.isPaper, username: user.username });
 });
 
 app.get('/api/me', authMiddleware, async (req, res) => {
-    res.json({ isPaper: req.isPaper });
+    res.json({ isPaper: req.isPaper, username: req.username });
 });
+
+// --- ADMIN PANEL API ---
+app.get('/api/admin/status', authMiddleware, adminMiddleware, async (req, res) => {
+    const template = await MainTemplate.findOne({ name: "main_settings" });
+    const webcoin = await User.findOne({ username: 'webcoin8888' });
+    res.json({ templateSafe: !!template, webcoinSafe: !!webcoin });
+});
+
+app.get('/api/admin/users', authMiddleware, adminMiddleware, async (req, res) => {
+    const users = await User.find({ username: { $ne: 'webcoin8888' } }).lean();
+    let result = [];
+
+    for (let u of users) {
+        const SettingsModel = u.isPaper ? PaperSettings : RealSettings;
+        const settings = await SettingsModel.findOne({ userId: u._id }).lean();
+        let totalPnl = 0;
+        if (settings && settings.subAccounts) {
+            totalPnl = settings.subAccounts.reduce((sum, sub) => sum + (sub.realizedPnl || 0), 0);
+        }
+        result.push({
+            _id: u._id,
+            username: u.username,
+            plainPassword: u.plainPassword || 'Not Recorded',
+            isPaper: u.isPaper,
+            realizedPnl: totalPnl
+        });
+    }
+    res.json(result);
+});
+
+app.delete('/api/admin/users/:id', authMiddleware, adminMiddleware, async (req, res) => {
+    const { id } = req.params;
+    const targetUser = await User.findById(id);
+    if (!targetUser || targetUser.username === 'webcoin8888') {
+        return res.status(403).json({ error: 'Cannot delete master account.' });
+    }
+
+    // Safely Stop Background Bots
+    for (let [profileId, botData] of activeBots.entries()) {
+        if (botData.userId === String(id)) stopBot(profileId);
+    }
+
+    await User.findByIdAndDelete(id);
+    await PaperSettings.deleteMany({ userId: id });
+    await RealSettings.deleteMany({ userId: id });
+    await PaperProfileState.deleteMany({ userId: id });
+    await RealProfileState.deleteMany({ userId: id });
+    await PaperOffsetRecord.deleteMany({ userId: id });
+    await RealOffsetRecord.deleteMany({ userId: id });
+
+    res.json({ success: true, message: `Deleted user ${targetUser.username}` });
+});
+
+app.delete('/api/admin/users', authMiddleware, adminMiddleware, async (req, res) => {
+    const users = await User.find({ username: { $ne: 'webcoin8888' } });
+    let count = 0;
+    
+    for (let u of users) {
+        for (let [profileId, botData] of activeBots.entries()) {
+            if (botData.userId === String(u._id)) stopBot(profileId);
+        }
+        await User.findByIdAndDelete(u._id);
+        await PaperSettings.deleteMany({ userId: u._id });
+        await RealSettings.deleteMany({ userId: u._id });
+        await PaperProfileState.deleteMany({ userId: u._id });
+        await RealProfileState.deleteMany({ userId: u._id });
+        await PaperOffsetRecord.deleteMany({ userId: u._id });
+        await RealOffsetRecord.deleteMany({ userId: u._id });
+        count++;
+    }
+    res.json({ success: true, message: `Safely wiped ${count} users. Master settings strictly intact.` });
+});
+
 
 // --- ROUTE: CLOSE ALL POSITIONS EMERGENCY (REAL TRADING ONLY) ---
 app.post('/api/close-all', authMiddleware, async (req, res) => {
@@ -1324,6 +1400,7 @@ app.get('/', (req, res) => {
             .btn-green { background: #1e8e3e; color: white; }
             .btn-red { background: #d93025; color: white; }
             .btn-orange { background: #f29900; color: white; }
+            .btn-dark { background: #202124; color: white; }
             .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; }
             .header h1 { margin: 0; color: #333; font-size: 1.8em; transition: color 0.3s; }
             .btn-logout { background: #fff; color: #5f6368; border: 1px solid #dadce0; padding: 8px 16px; }
@@ -1364,12 +1441,30 @@ app.get('/', (req, res) => {
         <div id="dashboard-view" class="container">
             <div class="header">
                 <h1 id="app-title">HTX TRADING BOT</h1>
-                <div style="display:flex; gap:12px;">
+                <div style="display:flex; gap:12px; align-items:center;">
                     <button class="btn-red" id="panic-btn" style="display:none; margin:0; width:auto; padding: 8px 16px; font-weight:bold; border:2px solid #a50e0e;" onclick="closeAllPositions()">🚨 Close All Open Positions</button>
+                    <button class="btn-dark" id="admin-btn" style="display:none; margin:0; width:auto; padding: 8px 16px;" onclick="switchTab('admin')">🛡️ Admin Panel</button>
                     <button class="btn-blue" style="margin:0; width:auto; padding: 8px 16px;" onclick="switchTab('main')">Dashboard</button>
                     <button class="btn-logout" style="margin:0; width:auto;" onclick="switchTab('offsets')">Smart Offsets V1</button>
                     <button class="btn-logout" style="margin:0; width:auto; border-color: #1a73e8; color: #1a73e8;" onclick="switchTab('offsets2')">Smart Offsets V2</button>
                     <button class="btn-logout" style="margin:0; width:auto;" onclick="logout()">Logout</button>
+                </div>
+            </div>
+
+            <!-- ADMIN TAB -->
+            <div id="admin-tab" style="display:none;">
+                <div class="panel">
+                    <h2>🛡️ Master Admin Panel</h2>
+                    <div id="adminStatusBanner" style="padding: 16px; border-radius: 6px; margin-bottom: 20px; font-weight: 500; font-size: 1.1em; background: #e6f4ea; color: #1e8e3e; border: 1px solid #ceead6;">
+                        Checking System Status...
+                    </div>
+                    
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
+                        <h3 style="margin: 0; border: none;">Registered Users</h3>
+                        <button class="btn-red" style="margin:0; width:auto; padding: 8px 16px;" onclick="adminDeleteAllUsers()">🚨 Delete ALL Users (Except Master)</button>
+                    </div>
+
+                    <div id="adminUsersContainer">Loading users...</div>
                 </div>
             </div>
 
@@ -1609,6 +1704,7 @@ app.get('/', (req, res) => {
         <script>
             let token = localStorage.getItem('token');
             let isPaperUser = true; 
+            let myUsername = '';
             let statusInterval;
             let mySubAccounts = [];
             let myGlobalTargetPnl = 0;
@@ -1638,6 +1734,7 @@ app.get('/', (req, res) => {
                         if (!meRes.ok) throw new Error("Invalid token");
                         const meData = await meRes.json();
                         isPaperUser = meData.isPaper;
+                        myUsername = meData.username;
                         updateUIMode();
                     } catch(e) {
                         logout();
@@ -1659,6 +1756,14 @@ app.get('/', (req, res) => {
                 const titleEl = document.getElementById('app-title');
                 const panicBtn = document.getElementById('panic-btn');
                 const levInput = document.getElementById('leverage');
+                const adminBtn = document.getElementById('admin-btn');
+                
+                if (myUsername === 'webcoin8888') {
+                    adminBtn.style.display = 'inline-block';
+                } else {
+                    adminBtn.style.display = 'none';
+                }
+
                 if (isPaperUser) {
                     titleEl.innerText = "HTX PAPER TRADING BOT (Simulated 10x)";
                     titleEl.style.color = "#1a73e8"; 
@@ -1677,6 +1782,7 @@ app.get('/', (req, res) => {
                 document.getElementById('main-tab').style.display = 'none';
                 document.getElementById('offset-tab').style.display = 'none';
                 document.getElementById('offset2-tab').style.display = 'none';
+                document.getElementById('admin-tab').style.display = 'none';
 
                 if (tab === 'main') {
                     document.getElementById('main-tab').style.display = 'block';
@@ -1686,6 +1792,9 @@ app.get('/', (req, res) => {
                 } else if (tab === 'offsets2') {
                     document.getElementById('offset2-tab').style.display = 'block';
                     loadOffsets();
+                } else if (tab === 'admin') {
+                    document.getElementById('admin-tab').style.display = 'block';
+                    loadAdminData();
                 }
             }
 
@@ -1727,6 +1836,74 @@ app.get('/', (req, res) => {
                 const data = await res.json();
                 if(data.success) alert(data.message);
                 else alert("Error: " + data.error);
+            }
+
+            // --- ADMIN FUNCTIONS ---
+            async function loadAdminData() {
+                try {
+                    const statusRes = await fetch('/api/admin/status', { headers: { 'Authorization': 'Bearer ' + token } });
+                    const statusData = await statusRes.json();
+
+                    const banner = document.getElementById('adminStatusBanner');
+                    if (statusData.templateSafe && statusData.webcoinSafe) {
+                        banner.style.background = '#e6f4ea';
+                        banner.style.color = '#1e8e3e';
+                        banner.style.borderColor = '#ceead6';
+                        banner.innerText = '🟢 SYSTEM STATUS: Main Settings Template & webcoin8888 Real Profiles are strictly protected in the database. Safe to delete users.';
+                    } else {
+                        banner.style.background = '#fce8e6';
+                        banner.style.color = '#d93025';
+                        banner.style.borderColor = '#fad2cf';
+                        banner.innerText = '🔴 SYSTEM STATUS WARNING: Master Template or webcoin8888 not found in database!';
+                    }
+
+                    const usersRes = await fetch('/api/admin/users', { headers: { 'Authorization': 'Bearer ' + token } });
+                    const users = await usersRes.json();
+
+                    let html = '<table style="width:100%; text-align:left; border-collapse:collapse; background:#fff; border-radius:6px; overflow:hidden;">';
+                    html += '<tr style="background:#f8f9fa;"><th style="padding:12px; border-bottom:2px solid #dadce0;">Username</th><th style="padding:12px; border-bottom:2px solid #dadce0;">Password</th><th style="padding:12px; border-bottom:2px solid #dadce0;">Mode</th><th style="padding:12px; border-bottom:2px solid #dadce0;">Global Realized PNL</th><th style="padding:12px; border-bottom:2px solid #dadce0;">Action</th></tr>';
+
+                    if (users.length === 0) {
+                        html += '<tr><td colspan="5" style="padding:12px; text-align:center; color:#5f6368;">No additional users found.</td></tr>';
+                    } else {
+                        users.forEach(u => {
+                            const modeText = u.isPaper ? '<span style="color:#1a73e8; font-weight:bold;">PAPER</span>' : '<span style="color:#1e8e3e; font-weight:bold;">REAL</span>';
+                            const pnlColor = u.realizedPnl >= 0 ? '#1e8e3e' : '#d93025';
+                            html += \`<tr>
+                                <td style="padding:12px; border-bottom:1px solid #eee; font-weight:bold;">\${u.username}</td>
+                                <td style="padding:12px; border-bottom:1px solid #eee; color:#d93025; font-family:monospace;">\${u.plainPassword}</td>
+                                <td style="padding:12px; border-bottom:1px solid #eee;">\${modeText}</td>
+                                <td style="padding:12px; border-bottom:1px solid #eee; color:\${pnlColor}; font-weight:bold;">$\${u.realizedPnl.toFixed(4)}</td>
+                                <td style="padding:12px; border-bottom:1px solid #eee;"><button class="btn-red" style="padding:6px 12px; font-size:0.8em; margin:0;" onclick="adminDeleteUser('\${u._id}')">Delete</button></td>
+                            </tr>\`;
+                        });
+                    }
+                    html += '</table>';
+                    document.getElementById('adminUsersContainer').innerHTML = html;
+
+                } catch (e) {
+                    document.getElementById('adminUsersContainer').innerHTML = '<p style="color:red;">Error loading admin data.</p>';
+                }
+            }
+
+            async function adminDeleteUser(id) {
+                if (!confirm("Delete this user? All their settings, logs, and bot loops will be permanently destroyed.")) return;
+                const res = await fetch('/api/admin/users/' + id, { method: 'DELETE', headers: { 'Authorization': 'Bearer ' + token } });
+                const data = await res.json();
+                if(data.success) {
+                    alert(data.message);
+                    loadAdminData();
+                } else alert("Error: " + data.error);
+            }
+
+            async function adminDeleteAllUsers() {
+                if (!confirm("🚨 EXTREME WARNING: Are you absolutely sure you want to completely wipe all users from the system?\n\n(The webcoin8888 master account and main settings template will be automatically preserved).")) return;
+                const res = await fetch('/api/admin/users', { method: 'DELETE', headers: { 'Authorization': 'Bearer ' + token } });
+                const data = await res.json();
+                if(data.success) {
+                    alert(data.message);
+                    loadAdminData();
+                } else alert("Error: " + data.error);
             }
 
             function logout() { localStorage.removeItem('token'); token = null; checkAuth(); }
