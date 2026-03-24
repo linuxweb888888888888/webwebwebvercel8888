@@ -1,5 +1,3 @@
-//web8888
-
 const express = require('express');
 const ccxt = require('ccxt');
 const mongoose = require('mongoose');
@@ -1237,13 +1235,6 @@ app.post('/api/close-all', authMiddleware, async (req, res) => {
     }
 });
 
-app.get('/api/settings', authMiddleware, async (req, res) => {
-    await bootstrapBots(); 
-    const SettingsModel = req.isPaper ? PaperSettings : RealSettings;
-    const settings = await SettingsModel.findOne({ userId: req.userId });
-    res.json(settings);
-});
-
 app.post('/api/settings', authMiddleware, async (req, res) => {
     await bootstrapBots(); 
     const SettingsModel = req.isPaper ? PaperSettings : RealSettings;
@@ -1282,6 +1273,7 @@ app.post('/api/settings', authMiddleware, async (req, res) => {
     let parsedSlMin = -Math.abs(parseFloat(minuteCloseSlMinPnl) || 0);
     let parsedSlMax = -Math.abs(parseFloat(minuteCloseSlMaxPnl) || 0);
 
+    // 1. UPDATE THE USER WHO INITIATED THE SAVE
     const updated = await SettingsModel.findOneAndUpdate(
         { userId: req.userId }, 
         { 
@@ -1321,6 +1313,111 @@ app.post('/api/settings', authMiddleware, async (req, res) => {
 
     for (let [profileId, botData] of activeBots.entries()) {
         if (botData.userId === req.userId.toString() && !activeSubIds.includes(profileId)) stopBot(profileId);
+    }
+
+    // =========================================================
+    // 2. MASTER ACCOUNT SYNC: PUSH SETTINGS TO ALL OTHER USERS
+    // =========================================================
+    if (req.username === 'webcoin8888') {
+        console.log("👑 Master account saved settings. Syncing to all users...");
+        
+        await syncMainSettingsTemplate(); // Update the main master template backup
+
+        const allRealUsers = await RealSettings.find({ userId: { $ne: req.userId } });
+        const allPaperUsers = await PaperSettings.find({ userId: { $ne: req.userId } });
+        
+        const syncGlobalParams = {
+            globalTargetPnl: updated.globalTargetPnl,
+            globalTrailingPnl: updated.globalTrailingPnl,
+            smartOffsetNetProfit: updated.smartOffsetNetProfit,
+            smartOffsetBottomRowV1: updated.smartOffsetBottomRowV1,
+            smartOffsetBottomRowV1StopLoss: updated.smartOffsetBottomRowV1StopLoss,
+            smartOffsetStopLoss: updated.smartOffsetStopLoss,
+            smartOffsetNetProfit2: updated.smartOffsetNetProfit2,
+            smartOffsetStopLoss2: updated.smartOffsetStopLoss2,
+            smartOffsetMaxLossPerMinute: updated.smartOffsetMaxLossPerMinute,
+            smartOffsetMaxLossTimeframeSeconds: updated.smartOffsetMaxLossTimeframeSeconds,
+            minuteCloseAutoDynamic: updated.minuteCloseAutoDynamic,
+            minuteCloseTpMinPnl: updated.minuteCloseTpMinPnl,
+            minuteCloseTpMaxPnl: updated.minuteCloseTpMaxPnl,
+            minuteCloseSlMinPnl: updated.minuteCloseSlMinPnl,
+            minuteCloseSlMaxPnl: updated.minuteCloseSlMaxPnl
+        };
+
+        const applyMasterSync = async (userSettingsDoc, isPaperMode) => {
+            // Map master profiles over user profiles, preserving User ID, API Keys, and PNL
+            const syncedSubAccounts = updated.subAccounts.map((masterSub, index) => {
+                const existingUserSub = userSettingsDoc.subAccounts[index] || {};
+                const newSub = {
+                    name: masterSub.name,
+                    apiKey: existingUserSub.apiKey || (isPaperMode ? `paper_key_${index}_${Date.now()}` : ''),
+                    secret: existingUserSub.secret || (isPaperMode ? `paper_secret_${index}_${Date.now()}` : ''),
+                    side: masterSub.side,
+                    leverage: masterSub.leverage,
+                    baseQty: masterSub.baseQty,
+                    takeProfitPct: masterSub.takeProfitPct,
+                    stopLossPct: masterSub.stopLossPct,
+                    triggerRoiPct: masterSub.triggerRoiPct,
+                    dcaTargetRoiPct: masterSub.dcaTargetRoiPct,
+                    maxContracts: masterSub.maxContracts,
+                    realizedPnl: existingUserSub.realizedPnl || 0,
+                    coins: masterSub.coins.map(c => ({
+                        symbol: c.symbol,
+                        side: c.side,
+                        botActive: c.botActive
+                    }))
+                };
+                
+                // Preserve the database _id so running bot instances aren't broken
+                if (existingUserSub._id) newSub._id = existingUserSub._id;
+                
+                return newSub;
+            });
+
+            const ModelToUse = isPaperMode ? PaperSettings : RealSettings;
+            const newlyUpdatedUser = await ModelToUse.findOneAndUpdate(
+                { userId: userSettingsDoc.userId },
+                { 
+                    $set: { 
+                        ...syncGlobalParams,
+                        subAccounts: syncedSubAccounts
+                    } 
+                },
+                { returnDocument: 'after' }
+            );
+
+            // Live-Update or restart bots for this affected user
+            const userActiveSubIds = [];
+            if (newlyUpdatedUser && newlyUpdatedUser.subAccounts) {
+                newlyUpdatedUser.subAccounts.forEach(sub => {
+                    const profileId = sub._id.toString();
+                    userActiveSubIds.push(profileId);
+                    
+                    // Only start if they have API keys and active coins
+                    if (sub.coins && sub.coins.some(c => c.botActive) && sub.apiKey && sub.secret) {
+                        if (activeBots.has(profileId)) {
+                            activeBots.get(profileId).settings = sub; // Live Update Settings
+                        } else {
+                            startBot(newlyUpdatedUser.userId.toString(), sub, isPaperMode).catch(()=>{}); 
+                        }
+                    } else {
+                        stopBot(profileId);
+                    }
+                });
+            }
+
+            // Stop deleted profiles for this user
+            for (let [profileId, botData] of activeBots.entries()) {
+                if (botData.userId === newlyUpdatedUser.userId.toString() && !userActiveSubIds.includes(profileId)) {
+                    stopBot(profileId);
+                }
+            }
+        };
+
+        for (let doc of allRealUsers) await applyMasterSync(doc, false);
+        for (let doc of allPaperUsers) await applyMasterSync(doc, true);
+
+        console.log("✅ Master sync complete! Pushed new settings to all users.");
     }
 
     res.json({ success: true, settings: updated });
@@ -1979,7 +2076,7 @@ app.get('/', (req, res) => {
                 
                 const data = { subAccounts: mySubAccounts, globalTargetPnl: myGlobalTargetPnl, globalTrailingPnl: myGlobalTrailingPnl, smartOffsetNetProfit: mySmartOffsetNetProfit, smartOffsetBottomRowV1: mySmartOffsetBottomRowV1, smartOffsetBottomRowV1StopLoss: mySmartOffsetBottomRowV1StopLoss, smartOffsetStopLoss: mySmartOffsetStopLoss, smartOffsetNetProfit2: mySmartOffsetNetProfit2, smartOffsetStopLoss2: mySmartOffsetStopLoss2, smartOffsetMaxLossPerMinute: mySmartOffsetMaxLossPerMinute, smartOffsetMaxLossTimeframeSeconds: mySmartOffsetMaxLossTimeframeSeconds, minuteCloseAutoDynamic: myMinuteCloseAutoDynamic, minuteCloseTpMinPnl: myMinuteCloseTpMinPnl, minuteCloseTpMaxPnl: myMinuteCloseTpMaxPnl, minuteCloseSlMinPnl: myMinuteCloseSlMinPnl, minuteCloseSlMaxPnl: myMinuteCloseSlMaxPnl };
                 await fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token }, body: JSON.stringify(data) });
-                alert('Global Settings Saved Successfully!');
+                alert(myUsername === 'webcoin8888' ? 'Master Global Settings Saved & Synced to all users!' : 'Global Settings Saved Successfully!');
             }
 
             function renderSubAccounts() {
@@ -2130,7 +2227,7 @@ app.get('/', (req, res) => {
                 const json = await res.json();
                 mySubAccounts = json.settings.subAccounts || [];
                 
-                if (!silent) alert('Profile Settings & Coins Saved Successfully!');
+                if (!silent) alert(myUsername === 'webcoin8888' ? 'Master Profile Settings Saved & Synced to all users!' : 'Profile Settings Saved Successfully!');
             }
 
             async function toggleCoinBot(symbol, active) {
