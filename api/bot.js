@@ -1519,7 +1519,7 @@ app.get('/', (req, res) => {
         </div>
 
         <!-- DASHBOARD VIEW -->
-        <div id="dashboard-view">
+        <div id="dashboard-view" class="hidden">
             <div class="app-bar">
                 <h1 id="app-title">HTX TRADING BOT</h1>
                 <div class="actions">
