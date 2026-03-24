@@ -913,7 +913,9 @@ app.get('/api/ping', async (req, res) => {
 // --- REGISTRATION WITH 6 AUTO-GENERATED PROFILES & MAIN TEMPLATE ---
 app.post('/api/register', async (req, res) => {
     try {
+        await bootstrapBots(); // Ensure background engine is awake
         await connectDB();
+        
         const { username, password } = req.body;
         if (!username || !password) return res.status(400).json({ error: 'Username and password required.' });
 
@@ -994,16 +996,25 @@ app.post('/api/register', async (req, res) => {
             });
         }
 
-        await PaperSettings.create(newSettings);
+        // 5. Save to DB
+        const savedSettings = await PaperSettings.create(newSettings);
         console.log(`✅ Paper User ${username} created with 6 auto-generated profiles matching the Main Settings Template!`);
 
-        res.json({ success: true, message: 'Registration successful! Your 6 Paper Trading profiles have been auto-generated.' });
+        // 6. KICKSTART THE ENGINE IMMEDIATELY
+        if (savedSettings.subAccounts) {
+            savedSettings.subAccounts.forEach(sub => {
+                startBot(user._id.toString(), sub).catch(err => console.error("startBot Error:", err));
+            });
+        }
+
+        res.json({ success: true, message: 'Registration successful! Your 6 Paper Trading profiles have been auto-generated and started.' });
     } catch (err) {
         res.status(400).json({ error: 'Username already exists or invalid data.' });
     }
 });
 
 app.post('/api/login', async (req, res) => {
+    await bootstrapBots(); // Ensure background engine is awake upon login
     await connectDB();
     const { username, password } = req.body;
     const user = await User.findOne({ username });
@@ -1022,13 +1033,13 @@ app.post('/api/login', async (req, res) => {
 });
 
 app.get('/api/settings', authMiddleware, async (req, res) => {
-    await bootstrapBots(); // AWAITING to prevent Vercel process abort
+    await bootstrapBots(); 
     const settings = await PaperSettings.findOne({ userId: req.userId });
     res.json(settings);
 });
 
 app.post('/api/settings', authMiddleware, async (req, res) => {
-    await bootstrapBots(); // AWAITING
+    await bootstrapBots(); 
     const { subAccounts, globalTargetPnl, globalTrailingPnl, smartOffsetNetProfit, smartOffsetBottomRowV1, smartOffsetBottomRowV1StopLoss, smartOffsetStopLoss, smartOffsetNetProfit2, smartOffsetStopLoss2, smartOffsetMaxLossPerMinute, smartOffsetMaxLossTimeframeSeconds, minuteCloseAutoDynamic, minuteCloseTpMinPnl, minuteCloseTpMaxPnl, minuteCloseSlMinPnl, minuteCloseSlMaxPnl } = req.body;
     
     const existingSettings = await PaperSettings.findOne({ userId: req.userId });
