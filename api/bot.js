@@ -274,7 +274,7 @@ async function startBot(userId, subAccount, isPaper) {
                     if (cState.contracts <= 0) {
                         const safeBaseQty = Math.max(1, Math.floor(currentSettings.baseQty));
                         const modeTxt = isPaper ? "PAPER" : "REAL";
-                        logForProfile(profileId, `[${modeTxt}] Opening base position of ${safeBaseQty} contracts (${activeSide}) at ~${cState.currentPrice}. Leverage: 10x Fixed.`);
+                        logForProfile(profileId, `[${modeTxt}] 🛒 Opening base position of ${safeBaseQty} contracts (${activeSide}) at ~${cState.currentPrice}. Leverage: 10x Fixed.`);
                         
                         if (!isPaper) {
                             const orderSide = activeSide === 'long' ? 'buy' : 'sell';
@@ -296,7 +296,7 @@ async function startBot(userId, subAccount, isPaper) {
                     const isStopLoss = currentSettings.stopLossPct < 0 && cState.currentRoi <= currentSettings.stopLossPct;
 
                     if (isTakeProfit || isStopLoss) {
-                        const reason = isTakeProfit ? 'Take Profit' : 'Stop Loss';
+                        const reason = isTakeProfit ? '🎯 Take Profit' : '🛑 Stop Loss';
                         const modeTxt = isPaper ? "PAPER" : "REAL";
                         logForProfile(profileId, `[${modeTxt}] ${reason} hit! (${cState.currentRoi.toFixed(2)}%). Closing ${cState.contracts} contracts.`);
                         
@@ -324,11 +324,11 @@ async function startBot(userId, subAccount, isPaper) {
                             cState.lastDcaTime = Date.now();
                         } else if ((cState.contracts + reqQty) > currentSettings.maxContracts) {
                             const modeTxt = isPaper ? "PAPER" : "REAL";
-                            logForProfile(profileId, `[${modeTxt}] DCA Safety Triggered. Max contracts reached.`);
+                            logForProfile(profileId, `[${modeTxt}] 🛡️ DCA Safety Triggered. Max contracts reached.`);
                             cState.lastDcaTime = Date.now(); 
                         } else {
                             const modeTxt = isPaper ? "PAPER" : "REAL";
-                            logForProfile(profileId, `[${modeTxt}] Executing DCA: Buying ${reqQty} contracts at ~${cState.currentPrice}`);
+                            logForProfile(profileId, `[${modeTxt}] ⚡ Executing DCA: Buying ${reqQty} contracts at ~${cState.currentPrice}`);
                             
                             if (!isPaper) {
                                 const orderSide = activeSide === 'long' ? 'buy' : 'sell';
@@ -344,7 +344,7 @@ async function startBot(userId, subAccount, isPaper) {
                         }
                     }
                 } catch (coinErr) {
-                    if (coinErr.message !== lastError) logForProfile(profileId, `[${coin.symbol}] Warning: ${coinErr.message}`);
+                    if (coinErr.message !== lastError) logForProfile(profileId, `[${coin.symbol}] ❌ Warning: ${coinErr.message}`);
                 }
             } 
             lastError = '';
@@ -356,7 +356,7 @@ async function startBot(userId, subAccount, isPaper) {
 
         } catch (err) {
             if (err.message !== lastError) {
-                logForProfile(profileId, `Global API Error (Retrying next cycle): ${err.message}`);
+                logForProfile(profileId, `❌ Global API Error (Retrying next cycle): ${err.message}`);
                 lastError = err.message;
             }
         } finally {
@@ -365,14 +365,14 @@ async function startBot(userId, subAccount, isPaper) {
     }, 6000);
 
     activeBots.set(profileId, { userId: String(userId), isPaper, settings: subAccount, state, exchange, intervalId });
-    logForProfile(profileId, `${isPaper ? 'Paper' : 'Real Live'} Engine Started for: ${subAccount.name}`);
+    logForProfile(profileId, `🚀 ${isPaper ? 'Paper' : 'Real Live'} Engine Started for: ${subAccount.name}`);
 }
 
 function stopBot(profileId) {
     if (activeBots.has(profileId)) {
         clearInterval(activeBots.get(profileId).intervalId);
         activeBots.delete(profileId);
-        console.log(`[Profile: ${profileId}] Bot Stopped.`);
+        console.log(`[Profile: ${profileId}] ⏹ Bot Stopped.`);
     }
 }
 
@@ -468,7 +468,7 @@ const executeOneMinuteCloser = async () => {
                     const autoDynData = { time: Date.now(), type: executionType, symbol: `Group up to Row ${i + 1} (WINNERS ONLY)`, pnl: runningAccumulation };
                     await SettingsModel.updateOne({ userId: dbUserId }, { $set: { autoDynamicLastExecution: autoDynData } }).catch(console.error);
 
-                    logForProfile(activeCandidates[0].profileId, `1-Min Group Closer: Group Accumulation $${runningAccumulation.toFixed(4)} matches boundary. Closing ${i + 1} WINNERS ONLY. [${userSetting.isPaper ? 'PAPER' : 'REAL'}]`);
+                    logForProfile(activeCandidates[0].profileId, `⏳ 1-Min Group Closer: Group Accumulation $${runningAccumulation.toFixed(4)} matches boundary. Closing ${i + 1} WINNERS ONLY. [${userSetting.isPaper ? 'PAPER' : 'REAL'}]`);
 
                     for (let k = 0; k <= i; k++) {
                         const cw = activeCandidates[k];
@@ -696,7 +696,7 @@ const executeGlobalProfitMonitor = async () => {
 
                     if (triggerOffset) {
                         const coinTypeLog = isNoPeakSl ? "LOWEST PNL" : "WINNER";
-                        logForProfile(firstProfileId, `SMART OFFSET V1 [${reason}]: Closing ${finalPairsToClose.length} ${coinTypeLog} coin(s). NET PROFIT OF CLOSURE: ${finalNetProfit >= 0 ? '+' : ''}$${finalNetProfit.toFixed(4)} [${userSetting.isPaper ? 'PAPER' : 'REAL'}]`);
+                        logForProfile(firstProfileId, `⚖️ SMART OFFSET V1 [${reason}]: Closing ${finalPairsToClose.length} ${coinTypeLog} coin(s). NET PROFIT OF CLOSURE: ${finalNetProfit >= 0 ? '+' : ''}$${finalNetProfit.toFixed(4)} [${userSetting.isPaper ? 'PAPER' : 'REAL'}]`);
                         
                         let totalWinnerPnl = 0;
 
@@ -788,7 +788,7 @@ const executeGlobalProfitMonitor = async () => {
                             const liveW = bStateW ? (parseFloat(bStateW.unrealizedPnl)||0) : biggestWinner.unrealizedPnl;
                             
                             if (liveW < biggestWinner.unrealizedPnl - 0.005) {
-                                logForProfile(firstProfileId, `SMART OFFSET V2 Skipped Position [${biggestWinner.symbol}]: Live PNL ($${liveW.toFixed(4)}) dropped below snapshotted.`);
+                                logForProfile(firstProfileId, `⚠️ SMART OFFSET V2 Skipped Position [${biggestWinner.symbol}]: Live PNL ($${liveW.toFixed(4)}) dropped below snapshotted.`);
                                 closeW = false;
                             }
                             
@@ -797,7 +797,7 @@ const executeGlobalProfitMonitor = async () => {
                         }
 
                         if (triggerOffset) {
-                            logForProfile(firstProfileId, `SMART OFFSET V2 [${reason}]: Paired Rank ${winnerIndex + 1} & ${loserIndex + 1} - Executing Winner ONLY Net: ${netResult >= 0 ? '+' : ''}$${netResult.toFixed(4)} [${userSetting.isPaper ? 'PAPER' : 'REAL'}]`);
+                            logForProfile(firstProfileId, `⚖️ SMART OFFSET V2 [${reason}]: Paired Rank ${winnerIndex + 1} & ${loserIndex + 1} - Executing Winner ONLY Net: ${netResult >= 0 ? '+' : ''}$${netResult.toFixed(4)} [${userSetting.isPaper ? 'PAPER' : 'REAL'}]`);
                             
                             OffsetModel.create({ userId: dbUserId, winnerSymbol: closeW ? biggestWinner.symbol : 'Skipped', winnerPnl: closeW ? biggestWinner.unrealizedPnl : 0, loserSymbol: 'Ignored', loserPnl: 0, netProfit: netResult }).catch(()=>{});
 
@@ -842,7 +842,7 @@ const executeGlobalProfitMonitor = async () => {
                         if (globalUnrealized > currentGlobalPeak) {
                             currentGlobalPeak = globalUnrealized;
                             dbUpdates.currentGlobalPeak = currentGlobalPeak;
-                            logForProfile(firstProfileId, `GLOBAL TARGET HIT: Peak Portfolio Profit is $${globalUnrealized.toFixed(2)}. Waiting for a $${globalTrailingPnl} drop to secure profits...`);
+                            logForProfile(firstProfileId, `📈 GLOBAL TARGET HIT: Peak Portfolio Profit is $${globalUnrealized.toFixed(2)}. Waiting for a $${globalTrailingPnl} drop to secure profits...`);
                         }
                     }
                     
@@ -851,7 +851,7 @@ const executeGlobalProfitMonitor = async () => {
                     }
 
                     if (executeGlobalClose) {
-                        logForProfile(firstProfileId, `GLOBAL PORTFOLIO CLOSE TRIGGERED! Securing Total Portfolio Net Profit: $${globalUnrealized.toFixed(4)} (ONLY CLOSING WINNERS) [${userSetting.isPaper ? 'PAPER' : 'REAL'}]`);
+                        logForProfile(firstProfileId, `🌍 GLOBAL PORTFOLIO CLOSE TRIGGERED! Securing Total Portfolio Net Profit: $${globalUnrealized.toFixed(4)} (ONLY CLOSING WINNERS) [${userSetting.isPaper ? 'PAPER' : 'REAL'}]`);
                         
                         currentGlobalPeak = 0;
                         dbUpdates.currentGlobalPeak = 0;
@@ -1595,6 +1595,8 @@ app.get('/', (req, res) => {
             .text-green { color: var(--success) !important; }
             .text-red { color: var(--danger) !important; }
             .text-blue { color: var(--primary) !important; }
+            .text-secondary { color: var(--text-secondary) !important; }
+            .text-warning { color: var(--warning) !important; }
             
             .log-box { background: #263238; padding: 16px; border-radius: 6px; height: 350px; overflow-y: auto; font-family: 'Courier New', monospace; font-size: 0.85em; color: #81C784; line-height: 1.5; }
             
@@ -1927,11 +1929,11 @@ app.get('/', (req, res) => {
                 }
 
                 if (isPaperUser) {
-                    titleEl.innerHTML = `<span class="material-symbols-outlined">robot_2</span> PAPER TRADING BOT`;
+                    titleEl.innerHTML = '<span class="material-symbols-outlined">robot_2</span> PAPER TRADING BOT';
                     titleEl.style.color = "var(--primary)"; 
                     panicBtn.style.display = "none";
                 } else {
-                    titleEl.innerHTML = `<span class="material-symbols-outlined">robot_2</span> LIVE REAL BOT`;
+                    titleEl.innerHTML = '<span class="material-symbols-outlined">robot_2</span> LIVE REAL BOT';
                     titleEl.style.color = "var(--success)"; 
                     panicBtn.style.display = "inline-flex";
                 }
