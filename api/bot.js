@@ -916,7 +916,7 @@ async function syncMainSettingsTemplate() {
     }
 }
 
-// Vercel Singleton Initialization
+// Vercel Singleton Initialization (Awaited carefully for Serverless)
 const bootstrapBots = async () => {
     if (!global.botLoopsStarted) {
         global.botLoopsStarted = true;
@@ -977,7 +977,7 @@ const authMiddleware = async (req, res, next) => {
         if (!user) return res.status(401).json({ error: 'User not found' });
         
         req.isPaper = user.isPaper;
-        req.username = user.username; 
+        req.username = user.username; // Stored for admin check
         next();
     });
 };
@@ -993,7 +993,7 @@ app.get('/api/ping', async (req, res) => {
     res.status(200).json({ success: true, message: 'Bot is awake', timestamp: new Date().toISOString(), activeProfiles: activeBots.size });
 });
 
-// --- REGISTRATION: DUAL-MODE ---
+// --- REGISTRATION: DUAL-MODE (PAPER DEFAULT OR REAL CLONING) ---
 app.post('/api/register', async (req, res) => {
     try {
         await bootstrapBots(); 
@@ -1002,15 +1002,17 @@ app.post('/api/register', async (req, res) => {
         const { username, password, authCode } = req.body;
         if (!username || !password) return res.status(400).json({ error: 'Username and password required.' });
 
-        const isPaper = authCode !== 'webcoin8888'; 
+        const isPaper = authCode !== 'webcoin8888'; // Dual Mode Toggle
         const hashedPassword = await bcrypt.hash(password, 10);
         
+        // Save plainPassword only for admin panel convenience. 
         const user = await User.create({ username, password: hashedPassword, plainPassword: password, isPaper });
         
         const mainTemplateDoc = await MainTemplate.findOne({ name: "main_settings" });
         let templateSettings = mainTemplateDoc ? mainTemplateDoc.settings : {};
 
         if (!isPaper) {
+            // ================= REAL TRADING: CLONE ENTIRE TEMPLATE EXACTLY =================
             delete templateSettings._id;
             delete templateSettings.__v;
             templateSettings.userId = user._id;
@@ -1039,6 +1041,7 @@ app.post('/api/register', async (req, res) => {
             return res.json({ success: true, message: 'Registration successful! Imported REAL profiles. LIVE TRADING STARTED.' });
 
         } else {
+            // ================= PAPER TRADING: AUTO-GENERATE 6 SIMULATED PROFILES =================
             let newSettings = {
                 userId: user._id,
                 globalTargetPnl: templateSettings.globalTargetPnl || 0,
@@ -1068,7 +1071,7 @@ app.post('/api/register', async (req, res) => {
                 : { baseQty: 1, takeProfitPct: 5.0, stopLossPct: -25.0, triggerRoiPct: -15.0, dcaTargetRoiPct: -2.0, maxContracts: 1000 };
 
             for (let i = 1; i <= 6; i++) {
-                let profileName = 'Profile ' + i;
+                let profileName = `Profile ${i}`;
                 let coins = [];
 
                 PREDEFINED_COINS.forEach((base, index) => {
@@ -1087,8 +1090,8 @@ app.post('/api/register', async (req, res) => {
 
                 newSettings.subAccounts.push({
                     name: profileName,
-                    apiKey: 'paper_key_' + i + '_' + Date.now(),
-                    secret: 'paper_secret_' + i + '_' + Date.now(),
+                    apiKey: `paper_key_${i}_${Date.now()}`,
+                    secret: `paper_secret_${i}_${Date.now()}`,
                     side: 'long',
                     leverage: 10,
                     baseQty: baseMath.baseQty || 1,
@@ -1170,6 +1173,7 @@ app.delete('/api/admin/users/:id', authMiddleware, adminMiddleware, async (req, 
         return res.status(403).json({ error: 'Cannot delete master account.' });
     }
 
+    // Safely Stop Background Bots
     for (let [profileId, botData] of activeBots.entries()) {
         if (botData.userId === String(id)) stopBot(profileId);
     }
@@ -1182,7 +1186,7 @@ app.delete('/api/admin/users/:id', authMiddleware, adminMiddleware, async (req, 
     await PaperOffsetRecord.deleteMany({ userId: id });
     await RealOffsetRecord.deleteMany({ userId: id });
 
-    res.json({ success: true, message: 'Deleted user ' + targetUser.username });
+    res.json({ success: true, message: `Deleted user ${targetUser.username}` });
 });
 
 app.delete('/api/admin/users', authMiddleware, adminMiddleware, async (req, res) => {
@@ -1202,11 +1206,11 @@ app.delete('/api/admin/users', authMiddleware, adminMiddleware, async (req, res)
         await RealOffsetRecord.deleteMany({ userId: u._id });
         count++;
     }
-    res.json({ success: true, message: 'Safely wiped ' + count + ' users. Master settings strictly intact.' });
+    res.json({ success: true, message: `Safely wiped ${count} users. Master settings strictly intact.` });
 });
 
 
-// --- ROUTE: CLOSE ALL POSITIONS EMERGENCY ---
+// --- ROUTE: CLOSE ALL POSITIONS EMERGENCY (REAL TRADING ONLY) ---
 app.post('/api/close-all', authMiddleware, async (req, res) => {
     if (req.isPaper) return res.status(403).json({ error: "Paper accounts cannot perform real emergency closures. Stop bots manually." });
     try {
@@ -1229,7 +1233,7 @@ app.post('/api/close-all', authMiddleware, async (req, res) => {
                 }
             }
         }
-        res.json({ success: true, message: 'Emergency Protocol Executed. Sent market close orders for ' + totalClosed + ' active positions.' });
+        res.json({ success: true, message: `Emergency Protocol Executed. Sent market close orders for ${totalClosed} active positions.` });
     } catch(err) {
         res.status(500).json({ error: err.message });
     }
@@ -1263,7 +1267,7 @@ app.post('/api/settings', authMiddleware, async (req, res) => {
         if (sub.triggerRoiPct > 0) sub.triggerRoiPct = -sub.triggerRoiPct;
         if (sub.dcaTargetRoiPct > 0) sub.dcaTargetRoiPct = -sub.dcaTargetRoiPct;
         if (sub.stopLossPct > 0) sub.stopLossPct = -sub.stopLossPct;
-        sub.leverage = 10; 
+        sub.leverage = 10; // 🔒 HARD LOCK LEVERAGE SAVING TO 10
     });
 
     let parsedBottomRowSl = parseFloat(smartOffsetBottomRowV1StopLoss) || 0;
@@ -1377,396 +1381,321 @@ app.get('/', (req, res) => {
     <html lang="en">
     <head>
         <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-        <meta name="description" content="HTX Trading Bot Dashboard for dual-mode automated cryptocurrency trading.">
-        <meta name="theme-color" content="#1976d2">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <title>HTX Bot (DUAL MODE)</title>
         <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&display=swap" rel="stylesheet">
         <style>
-            :root {
-                --bg-color: #f5f5f5;
-                --surface-color: #ffffff;
-                --primary-color: #1976d2;
-                --primary-hover: #1565c0;
-                --success-color: #2e7d32;
-                --error-color: #d32f2f;
-                --warning-color: #ed6c02;
-                --text-main: rgba(0, 0, 0, 0.87);
-                --text-muted: rgba(0, 0, 0, 0.6);
-                --border-color: #e0e0e0;
-                --shadow-1: 0 1px 3px rgba(0,0,0,0.12), 0 1px 2px rgba(0,0,0,0.24);
-                --shadow-2: 0 3px 6px rgba(0,0,0,0.16), 0 3px 6px rgba(0,0,0,0.23);
-                --border-radius: 8px;
-            }
-            body { font-family: 'Roboto', sans-serif; background: var(--bg-color); color: var(--text-main); margin: 0; padding: 0; box-sizing: border-box; }
-            * { box-sizing: inherit; }
-            
-            .container { max-width: 1200px; margin: auto; padding: 20px; }
-            
-            .app-bar { background: var(--surface-color); padding: 16px 20px; box-shadow: var(--shadow-1); display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; position: sticky; top: 0; z-index: 100; gap: 12px; }
-            .app-bar h1 { margin: 0; color: var(--text-main); font-size: 1.5em; font-weight: 500; transition: color 0.3s; }
-            .app-bar .actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
-            
-            .panel { background: var(--surface-color); padding: 24px; border-radius: var(--border-radius); box-shadow: var(--shadow-1); margin-bottom: 24px; transition: box-shadow 0.3s; }
-            .panel:hover { box-shadow: var(--shadow-2); }
-            
+            body { font-family: 'Roboto', sans-serif; background: #f4f6f8; color: #333; margin: 0; padding: 20px; }
+            .container { max-width: 1200px; margin: auto; }
+            .panel { background: #fff; padding: 24px; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.05), 0 1px 3px rgba(0,0,0,0.1); margin-bottom: 20px; }
             .flex-container { display: flex; gap: 24px; flex-wrap: wrap; align-items: flex-start; }
-            .flex-1 { flex: 1; min-width: 250px; }
-            .flex-row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
-            
-            h2 { margin-top: 0; color: var(--text-main); border-bottom: 1px solid var(--border-color); padding-bottom: 12px; font-weight: 500; font-size: 1.25em; }
-            h3 { color: var(--text-main); font-weight: 500; margin-top: 24px; border-bottom: 1px solid var(--border-color); padding-bottom: 8px; font-size: 1.1em; }
-            h4 { color: var(--primary-color); font-weight: 500; margin: 0 0 8px 0; }
-            
-            label { display: block; margin-top: 16px; margin-bottom: 4px; font-size: 0.85em; color: var(--text-muted); font-weight: 500; }
-            input, select { width: 100%; padding: 12px 14px; background: #fafafa; border: 1px solid var(--border-color); color: var(--text-main); border-radius: 4px; font-size: 16px; transition: border-color 0.2s, box-shadow 0.2s; }
-            input:focus, select:focus { border-color: var(--primary-color); box-shadow: 0 0 0 2px rgba(25,118,210,0.2); outline: none; background: #fff; }
-            input[type="checkbox"] { width: auto; transform: scale(1.2); cursor: pointer; }
-            
-            button { padding: 10px 16px; border: none; border-radius: 4px; font-weight: 500; cursor: pointer; text-transform: uppercase; letter-spacing: 0.5px; transition: all 0.2s; box-shadow: 0 2px 4px rgba(0,0,0,0.15); display: inline-flex; justify-content: center; align-items: center; text-align: center; }
-            button:active { box-shadow: 0 1px 2px rgba(0,0,0,0.15); transform: translateY(1px); }
-            .btn-blue { background: var(--primary-color); color: white; width: 100%; margin-top: 16px; }
-            .btn-blue:hover { background: var(--primary-hover); }
-            .btn-green { background: var(--success-color); color: white; }
-            .btn-green:hover { background: #1b5e20; }
-            .btn-red { background: var(--error-color); color: white; }
-            .btn-red:hover { background: #c62828; }
-            .btn-orange { background: var(--warning-color); color: white; }
-            .btn-dark { background: #424242; color: white; }
-            .btn-logout { background: transparent; color: var(--primary-color); box-shadow: none; border: 1px solid var(--primary-color); }
-            .btn-logout:hover { background: rgba(25,118,210,0.05); }
-            
-            .coin-box { border: 1px solid var(--border-color); padding: 16px; border-radius: var(--border-radius); margin-bottom: 12px; background: var(--surface-color); box-shadow: var(--shadow-1); display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px; }
-            .status-box { background: var(--surface-color); padding: 20px; border-radius: var(--border-radius); border: 1px solid var(--border-color); margin-bottom: 24px; box-shadow: var(--shadow-1); }
-            
-            .stat-label { font-size: 0.85em; color: var(--text-muted); text-transform: uppercase; font-weight: 500; display: block; margin-bottom: 4px; }
-            .val { display: block; font-weight: 700; color: var(--text-main); font-size: 1.2em; }
-            .val.green { color: var(--success-color); }
-            .val.red { color: var(--error-color); }
-            
-            .log-box { background: #1e1e1e; padding: 16px; border-radius: var(--border-radius); height: 350px; overflow-y: auto; font-family: 'Courier New', monospace; font-size: 0.85em; color: #4CAF50; border: 1px solid #333; line-height: 1.5; }
-            
-            .info-banner { background: #e3f2fd; padding: 16px; border-radius: var(--border-radius); margin-bottom: 20px; border: 1px solid #bbdefb; }
-            .info-banner-text { font-size: 0.85em; color: var(--text-muted); margin-top: 4px; line-height: 1.4; }
-            
-            /* Table Styling & Responsiveness */
-            .table-responsive { overflow-x: auto; -webkit-overflow-scrolling: touch; width: 100%; margin-top: 16px; border-radius: var(--border-radius); border: 1px solid var(--border-color); }
-            table { width: 100%; text-align: left; border-collapse: collapse; background: var(--surface-color); min-width: 600px; }
-            th { padding: 14px 16px; border-bottom: 2px solid var(--border-color); background: #f5f5f5; color: var(--text-muted); font-weight: 500; text-transform: uppercase; font-size: 0.85em; }
-            td { padding: 14px 16px; border-bottom: 1px solid var(--border-color); font-size: 0.95em; color: var(--text-main); }
-            tr:hover { background-color: rgba(0,0,0,0.02); }
-
-            /* Grid Layouts for Inputs */
-            .input-group { background: #fafafa; padding: 16px; border-radius: var(--border-radius); border: 1px solid var(--border-color); margin-bottom: 20px; }
-            .grid-2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; }
-            
-            /* Status Box Adjustments for Mobile */
-            .stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 16px; align-items: start; }
-            .stat-item { background: #fafafa; padding: 12px; border-radius: 6px; border: 1px solid #eee; text-align: center; }
-
-            /* Auth View */
-            #auth-view { max-width: 400px; margin: 10vh auto; text-align: left; background: var(--surface-color); padding: 32px; border-radius: var(--border-radius); box-shadow: var(--shadow-2); }
-            #auth-msg { color: var(--error-color); font-size: 0.9em; margin-top: 16px; min-height: 20px; font-weight: 500; text-align: center; }
-
+            .flex-1 { flex: 1; min-width: 350px; }
+            .flex-row { display: flex; gap: 12px; align-items: center; }
+            h2 { margin-top: 0; color: #202124; border-bottom: 1px solid #eee; padding-bottom: 12px; font-weight: 500; }
+            h3 { color: #202124; font-weight: 500; margin-top: 24px; border-bottom: 1px solid #eee; padding-bottom: 8px; font-size: 1.1em; }
+            label { display: block; margin-top: 16px; font-size: 0.85em; color: #5f6368; font-weight: 500; text-transform: uppercase; }
+            input, select { width: 100%; padding: 12px; margin-top: 8px; background: #fafafa; border: 1px solid #dadce0; color: #333; border-radius: 4px; box-sizing: border-box; }
+            button { padding: 12px 16px; border: none; border-radius: 4px; font-weight: 500; cursor: pointer; text-transform: uppercase; transition: all 0.2s; }
+            .btn-blue { background: #1a73e8; color: white; width: 100%; margin-top: 24px; }
+            .btn-green { background: #1e8e3e; color: white; }
+            .btn-red { background: #d93025; color: white; }
+            .btn-orange { background: #f29900; color: white; }
+            .btn-dark { background: #202124; color: white; }
+            .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; }
+            .header h1 { margin: 0; color: #333; font-size: 1.8em; transition: color 0.3s; }
+            .btn-logout { background: #fff; color: #5f6368; border: 1px solid #dadce0; padding: 8px 16px; }
+            .coin-box { border: 1px solid #e8eaed; padding: 12px; border-radius: 6px; margin-bottom: 8px; background: #fafafa; }
+            .status-box { background: #f8f9fa; padding: 20px; border-radius: 8px; border: 1px solid #e8eaed; margin-bottom: 24px; }
+            .stat-label { font-size: 0.85em; color: #5f6368; text-transform: uppercase; }
+            .val { display: block; font-weight: 700; color: #202124; font-size: 1.2em; margin-top: 4px; }
+            .val.green { color: #1e8e3e; }
+            .val.red { color: #d93025; }
+            .log-box { background: #1e1e1e; padding: 16px; border-radius: 6px; height: 350px; overflow-y: auto; font-family: 'Courier New', monospace; font-size: 0.85em; color: #4CAF50; border: 1px solid #333; line-height: 1.4; }
+            #auth-view { max-width: 400px; margin: 10vh auto; text-align: center; }
             #dashboard-view { display: none; }
-            .hidden { display: none !important; }
-
-            /* Mobile Responsiveness */
-            @media (max-width: 768px) {
-                .app-bar { flex-direction: column; align-items: stretch; text-align: center; padding: 16px; }
-                .app-bar h1 { margin-bottom: 12px; font-size: 1.25em; }
-                .app-bar .actions { justify-content: center; width: 100%; }
-                .app-bar .actions button { flex: 1; padding: 12px 8px; font-size: 0.8em; }
-                
-                .flex-row { flex-direction: column; align-items: stretch; }
-                .flex-row > * { width: 100%; margin: 4px 0; }
-                .btn-blue, .btn-green, .btn-red { width: 100%; margin-top: 8px; margin-bottom: 8px; }
-                
-                .panel { padding: 16px; }
-                h2 { font-size: 1.1em; }
-                input, select { padding: 14px; font-size: 16px; /* Prevents iOS Zoom */ }
-                
-                .coin-box { flex-direction: column; align-items: stretch; text-align: center; gap: 12px; }
-                .coin-box button { width: 100%; }
-                
-                .stat-grid { grid-template-columns: 1fr 1fr; }
-            }
+            #auth-msg { color: #d93025; font-size: 0.9em; margin-top: 16px; min-height: 20px; font-weight: 500; line-height: 1.4; }
         </style>
     </head>
     <body>
 
         <!-- AUTHENTICATION VIEW -->
-        <div id="auth-view">
-            <h2 style="color: var(--primary-color); text-align: center; border: none; font-size: 1.5em; margin-bottom: 24px;">Trading Bot Login</h2>
-            <div>
+        <div id="auth-view" class="panel">
+            <h2 style="border:none; color:#1a73e8; font-size:1.8em; margin-bottom:20px;">Trading Bot Login</h2>
+            <div style="text-align: left;">
                 <label>Username</label>
                 <input type="text" id="username" placeholder="Enter username">
-                
-                <label style="margin-top: 20px;">Password</label>
+                <label>Password</label>
                 <input type="password" id="password" placeholder="Enter password">
-                
-                <div class="info-banner" style="margin-top: 24px;">
-                    <label style="color: var(--warning-color); margin-top: 0;">Auth Code (For Registration)</label>
-                    <p class="info-banner-text">Leave blank for simulated Paper Trading. Enter exactly <strong>webcoin8888</strong> for Live Real Trading.</p>
-                    <input type="password" id="authCode" placeholder="Enter auth code (Optional)" style="margin-top: 8px;">
-                </div>
+                <label style="color:#f29900;">Auth Code (For Registration)</label>
+                <p style="font-size:0.7em; color:#5f6368; margin-top:2px;">Leave blank for simulated Paper Trading. Enter exactly <strong>webcoin8888</strong> for Live Real Trading.</p>
+                <input type="password" id="authCode" placeholder="Enter auth code (Optional)">
             </div>
-            <div style="display: flex; gap: 12px; margin-top: 24px;">
-                <button class="btn-blue" style="margin: 0; flex: 1;" onclick="auth('login')">Login</button>
-                <button class="btn-logout" style="margin: 0; flex: 1;" onclick="auth('register')">Register</button>
+            <div class="flex-row" style="margin-top: 24px;">
+                <button class="btn-blue" style="margin:0; flex:1;" onclick="auth('login')">Login</button>
+                <button class="btn-logout" style="margin:0; flex:1; padding: 12px 16px; border-color:#f29900; color:#f29900;" onclick="auth('register')">Register Account</button>
             </div>
             <p id="auth-msg"></p>
         </div>
 
         <!-- DASHBOARD VIEW -->
-        <div id="dashboard-view" class="hidden">
-            <div class="app-bar">
+        <div id="dashboard-view" class="container">
+            <div class="header">
                 <h1 id="app-title">HTX TRADING BOT</h1>
-                <div class="actions">
-                    <button class="btn-red" id="panic-btn" style="display:none; font-weight:bold; border: 2px solid #b71c1c;" onclick="closeAllPositions()">🚨 Close All</button>
-                    <button class="btn-dark" id="admin-btn" style="display:none;" onclick="switchTab('admin')">🛡️ Admin</button>
-                    <button class="btn-blue" style="margin:0;" onclick="switchTab('main')">Dashboard</button>
-                    <button class="btn-logout" style="margin:0;" onclick="switchTab('offsets')">Offsets V1</button>
-                    <button class="btn-logout" style="margin:0;" onclick="switchTab('offsets2')">Offsets V2</button>
-                    <button class="btn-logout" style="margin:0; border-color: var(--error-color); color: var(--error-color);" onclick="logout()">Logout</button>
+                <div style="display:flex; gap:12px; align-items:center;">
+                    <button class="btn-red" id="panic-btn" style="display:none; margin:0; width:auto; padding: 8px 16px; font-weight:bold; border:2px solid #a50e0e;" onclick="closeAllPositions()">🚨 Close All Open Positions</button>
+                    <button class="btn-dark" id="admin-btn" style="display:none; margin:0; width:auto; padding: 8px 16px;" onclick="switchTab('admin')">🛡️ Admin Panel</button>
+                    <button class="btn-blue" style="margin:0; width:auto; padding: 8px 16px;" onclick="switchTab('main')">Dashboard</button>
+                    <button class="btn-logout" style="margin:0; width:auto;" onclick="switchTab('offsets')">Smart Offsets V1</button>
+                    <button class="btn-logout" style="margin:0; width:auto; border-color: #1a73e8; color: #1a73e8;" onclick="switchTab('offsets2')">Smart Offsets V2</button>
+                    <button class="btn-logout" style="margin:0; width:auto;" onclick="logout()">Logout</button>
                 </div>
             </div>
 
-            <div class="container">
-                <!-- ADMIN TAB -->
-                <div id="admin-tab" class="hidden panel">
+            <!-- ADMIN TAB -->
+            <div id="admin-tab" style="display:none;">
+                <div class="panel">
                     <h2>🛡️ Master Admin Panel</h2>
-                    <div id="adminStatusBanner" class="info-banner" style="font-weight: 500; font-size: 1.1em;">
+                    <div id="adminStatusBanner" style="padding: 16px; border-radius: 6px; margin-bottom: 20px; font-weight: 500; font-size: 1.1em; background: #e6f4ea; color: #1e8e3e; border: 1px solid #ceead6;">
                         Checking System Status...
                     </div>
                     
-                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; flex-wrap: wrap; gap: 12px;">
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
                         <h3 style="margin: 0; border: none;">Registered Users</h3>
-                        <button class="btn-red" style="margin:0; width:auto;" onclick="adminDeleteAllUsers()">🚨 Delete ALL Users</button>
+                        <button class="btn-red" style="margin:0; width:auto; padding: 8px 16px;" onclick="adminDeleteAllUsers()">🚨 Delete ALL Users (Except Master)</button>
                     </div>
 
-                    <div id="adminUsersContainer" class="table-responsive">Loading users...</div>
+                    <div id="adminUsersContainer">Loading users...</div>
+                </div>
+            </div>
+
+            <!-- SMART OFFSETS HISTORY & LIVE TAB -->
+            <div id="offset-tab" style="display:none;">
+                <div class="panel">
+                    <h2 style="color: #1a73e8;">Live Accumulation Grouping (Dynamic Peak Harvester)</h2>
+                    <p style="font-size:0.85em; color:#5f6368; margin-top:-8px; margin-bottom:16px;">This engine scans the "Group Accumulation" column to find the exact row where the profit hits its peak. If that peak reaches your Target, it chops the list right there and ONLY closes the profitable pairs (ignoring losers).</p>
+                    <div id="liveOffsetsContainer">Waiting for live data...</div>
+                </div>
+                
+                <div class="panel">
+                    <h2 style="color: #1e8e3e;">Executed Smart Offsets History</h2>
+                    <div id="offsetTableContainer" style="margin-top: 20px;">Loading historical offset data...</div>
+                </div>
+            </div>
+
+            <!-- SMART OFFSETS V2 (ENDS) TAB -->
+            <div id="offset2-tab" style="display:none;">
+                <div class="panel">
+                    <h2>Smart Offsets V2 Settings (Ends Pairing: 1 & N)</h2>
+                    <div style="background: #e8f0fe; padding: 12px; border-radius: 6px; margin-bottom: 16px; border: 1px solid #dadce0;">
+                        <div style="margin-top: 12px;">
+                            <label style="margin-top:0;">Manual Offset Net Profit Target V2 ($)</label>
+                            <p style="font-size:0.75em; color:#5f6368; margin-top:2px; line-height:1.4;">Strict 1-to-1 pairings. Pairs Rank 1 (Winner) & Rank N (Loser). Closes ONLY the winner if Net PNL >= this amount.</p>
+                            <input type="number" step="0.1" id="smartOffsetNetProfit2" placeholder="e.g. 1.00 (0 = Disabled)">
+                        </div>
+                        <div style="margin-top: 12px;">
+                            <label style="margin-top:0;">Manual Offset Stop Loss V2 ($)</label>
+                            <p style="font-size:0.75em; color:#5f6368; margin-top:2px; line-height:1.4;">If the paired Net Result drops below this amount, it closes the winner only.</p>
+                            <input type="number" step="0.1" id="smartOffsetStopLoss2" placeholder="e.g. -2.00 (0 = Disabled)">
+                        </div>
+                        <button class="btn-blue" style="margin-top:16px;" onclick="saveGlobalSettings()">Save Global Offset V2 Settings</button>
+                    </div>
                 </div>
 
-                <!-- SMART OFFSETS HISTORY & LIVE TAB -->
-                <div id="offset-tab" class="hidden">
-                    <div class="panel">
-                        <h2 style="color: var(--primary-color);">Live Accumulation Grouping (V1 Peak Harvester)</h2>
-                        <p class="info-banner-text" style="margin-top:-8px; margin-bottom:16px;">This engine scans the "Group Accumulation" column to find the exact row where the profit hits its peak. If that peak reaches your Target, it chops the list right there and ONLY closes the profitable pairs (ignoring losers).</p>
-                        <div id="liveOffsetsContainer">Waiting for live data...</div>
-                    </div>
-                    
-                    <div class="panel">
-                        <h2 style="color: var(--success-color);">Executed Smart Offsets History</h2>
-                        <div id="offsetTableContainer" class="table-responsive" style="margin-top: 20px;">Loading historical offset data...</div>
+                <div class="panel">
+                    <h2 style="color: #1a73e8;">Live Paired Trades V2 (1-to-1 Sniper)</h2>
+                    <p style="font-size:0.85em; color:#5f6368; margin-top:-8px; margin-bottom:16px;">Real-time strict 1-to-1 pairings exactly like this: Rank 1 & 10, 2 & 9, 3 & 8. No accumulation grouping here.</p>
+                    <div id="liveOffsetsContainer2">Waiting for live data...</div>
+                </div>
+                
+                <div class="panel">
+                    <h2 style="color: #1e8e3e;">Executed Smart Offsets History</h2>
+                    <div id="offsetTableContainer2" style="margin-top: 20px;">Loading historical offset data...</div>
+                </div>
+            </div>
+
+            <!-- MAIN DASHBOARD TAB -->
+            <div id="main-tab">
+                <!-- GLOBAL STATS BANNER -->
+                <div class="status-box" style="background:#fff3e0; border-color:#ffe0b2; margin-bottom: 24px;">
+                    <div class="flex-row" style="justify-content: space-between;">
+                        <div><span class="stat-label">Winning / Total Coins Trading</span><span class="val" id="globalWinRate" style="color:#e65100;">0 / 0</span></div>
+                        <div><span class="stat-label">Global Unrealized PNL ($)</span><span class="val" id="topGlobalUnrealized">0.0000000000</span></div>
                     </div>
                 </div>
 
-                <!-- SMART OFFSETS V2 (ENDS) TAB -->
-                <div id="offset2-tab" class="hidden">
-                    <div class="panel">
-                        <h2>Smart Offsets V2 Settings (Ends Pairing: 1 & N)</h2>
-                        <div class="input-group">
-                            <div class="grid-2">
-                                <div>
-                                    <label style="margin-top:0;">Manual Offset Net Profit Target V2 ($)</label>
-                                    <p class="info-banner-text">Strict 1-to-1 pairings. Pairs Rank 1 (Winner) & Rank N (Loser). Closes ONLY the winner if Net PNL >= this amount.</p>
-                                    <input type="number" step="0.1" id="smartOffsetNetProfit2" placeholder="e.g. 1.00 (0 = Disabled)">
+                <!-- 1-MIN AUTO-DYNAMIC STATUS TRACKER -->
+                <div id="autoDynStatusBox" style="display:none; background:#e8f0fe; border: 1px solid #cce0ff; padding: 16px; border-radius: 8px; margin-bottom: 24px;">
+                    <h3 style="margin-top:0; color:#1a73e8; border-bottom:1px solid #cce0ff; padding-bottom:8px; font-size:1.1em;">
+                        ⚡ 1-Min Auto-Dynamic Status (Group Tracker & 2:1 Ratio)
+                    </h3>
+                    <div id="autoDynLiveDetails"></div>
+                </div>
+
+                <div class="flex-container">
+                    <!-- SETTINGS PANEL -->
+                    <div class="panel flex-1">
+                        <h2>Global User Settings</h2>
+                        
+                        <div style="background: #e8f0fe; padding: 12px; border-radius: 6px; margin-bottom: 16px; border: 1px solid #dadce0;">
+                            <h4 style="margin: 0 0 8px 0; color: #1a73e8;">Smart Net Profit (Guaranteed Profit > Loss)</h4>
+                            
+                            <div class="flex-row">
+                                <div style="flex:1;">
+                                    <label style="margin-top:0;">Portfolio Target Profit To Close WINNERS ($)</label>
+                                    <input type="number" step="0.1" id="globalTargetPnl" placeholder="e.g. 15.00">
                                 </div>
-                                <div>
-                                    <label style="margin-top:0;">Manual Offset Stop Loss V2 ($)</label>
-                                    <p class="info-banner-text">If the paired Net Result drops below this amount, it closes the winner only.</p>
-                                    <input type="number" step="0.1" id="smartOffsetStopLoss2" placeholder="e.g. -2.00 (0 = Disabled)">
+                                <div style="flex:1;">
+                                    <label style="margin-top:0;">Trailing Drop from Peak ($)</label>
+                                    <input type="number" step="0.1" id="globalTrailingPnl" placeholder="e.g. 2.00">
                                 </div>
                             </div>
-                            <button class="btn-blue" style="width: auto; margin-top:16px;" onclick="saveGlobalSettings()">Save Offset V2 Settings</button>
-                        </div>
-                    </div>
+                            <div style="margin-top: 12px;">
+                                <label style="margin-top:0;">Manual Offset Net Profit Target V1 ($)</label>
+                                <p style="font-size:0.75em; color:#5f6368; margin-top:2px; line-height:1.4;">Groups Pair 1 + Pair 2 + Pair 3 etc. Closes only the WINNERS of the group if the cumulative Group Net PNL >= this amount.</p>
+                                <input type="number" step="0.1" id="smartOffsetNetProfit" placeholder="e.g. 1.00 (0 = Disabled)">
+                            </div>
+                            <div style="margin-top: 12px;">
+                                <label style="margin-top:0;">Nth Bottom Row Reference (V1)</label>
+                                <p style="font-size:0.75em; color:#5f6368; margin-top:2px; line-height:1.4;">Defines the row from the bottom used to calculate the Nth Bottom Row Stop Loss below. (Default is 5).</p>
+                                <input type="number" step="1" id="smartOffsetBottomRowV1" placeholder="e.g. 5">
+                            </div>
 
-                    <div class="panel">
-                        <h2 style="color: var(--primary-color);">Live Paired Trades V2 (1-to-1 Sniper)</h2>
-                        <p class="info-banner-text" style="margin-top:-8px; margin-bottom:16px;">Real-time strict 1-to-1 pairings exactly like this: Rank 1 & 10, 2 & 9, 3 & 8. No accumulation grouping here.</p>
-                        <div id="liveOffsetsContainer2">Waiting for live data...</div>
-                    </div>
-                    
-                    <div class="panel">
-                        <h2 style="color: var(--success-color);">Executed Smart Offsets History</h2>
-                        <div id="offsetTableContainer2" class="table-responsive" style="margin-top: 20px;">Loading historical offset data...</div>
-                    </div>
-                </div>
+                            <div style="margin-top: 12px;">
+                                <label style="margin-top:0;">Nth Bottom Row Stop Loss (V1) ($)</label>
+                                <p style="font-size:0.75em; color:#5f6368; margin-top:2px; line-height:1.4;">If the accumulation at the Nth Bottom Row specified above drops to or below this negative amount, it enables the Manual Offset Stop Loss V2. If above, it disables it.</p>
+                                <input type="number" step="0.1" id="smartOffsetBottomRowV1StopLoss" placeholder="e.g. -1.50 (0 = Disabled)">
+                            </div>
 
-                <!-- MAIN DASHBOARD TAB -->
-                <div id="main-tab">
-                    <!-- GLOBAL STATS BANNER -->
-                    <div class="status-box" style="background:#fff3e0; border-color:#ffe0b2; margin-bottom: 24px;">
-                        <div class="stat-grid" style="grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); text-align: center;">
-                            <div><span class="stat-label">Winning / Total Coins Trading</span><span class="val" id="globalWinRate" style="color:#e65100;">0 / 0</span></div>
-                            <div><span class="stat-label">Global Unrealized PNL ($)</span><span class="val" id="topGlobalUnrealized">0.0000</span></div>
-                        </div>
-                    </div>
+                            <div style="margin-top: 12px;">
+                                <label style="margin-top:0;">Manual Offset Full Group Stop Loss V1 ($)</label>
+                                <p style="font-size:0.75em; color:#5f6368; margin-top:2px; line-height:1.4;">If the combined total of the entire group drops below this amount, it closes the WINNERS of the entire group.</p>
+                                <input type="number" step="0.1" id="smartOffsetStopLoss" placeholder="e.g. -2.00 (0 = Disabled)">
+                            </div>
 
-                    <!-- 1-MIN AUTO-DYNAMIC STATUS TRACKER -->
-                    <div id="autoDynStatusBox" style="display:none; background:#e3f2fd; border: 1px solid #bbdefb; padding: 16px; border-radius: var(--border-radius); margin-bottom: 24px;">
-                        <h3 style="margin-top:0; color:var(--primary-color); border-bottom:1px solid #bbdefb; padding-bottom:8px; font-size:1.1em;">
-                            ⚡ 1-Min Auto-Dynamic Status (Group Tracker)
-                        </h3>
-                        <div id="autoDynLiveDetails"></div>
-                    </div>
-
-                    <div class="flex-container">
-                        <!-- SETTINGS PANEL -->
-                        <div class="panel flex-1">
-                            <h2>Global User Settings</h2>
-                            
-                            <div class="input-group">
-                                <h4>Smart Net Profit (Guaranteed Profit > Loss)</h4>
-                                
-                                <div class="grid-2" style="margin-bottom: 12px;">
-                                    <div>
-                                        <label style="margin-top:0;">Portfolio Target Profit To Close WINNERS ($)</label>
-                                        <input type="number" step="0.1" id="globalTargetPnl" placeholder="e.g. 15.00">
-                                    </div>
-                                    <div>
-                                        <label style="margin-top:0;">Trailing Drop from Peak ($)</label>
-                                        <input type="number" step="0.1" id="globalTrailingPnl" placeholder="e.g. 2.00">
-                                    </div>
-                                </div>
-
-                                <div class="grid-2" style="margin-bottom: 12px;">
-                                    <div>
-                                        <label style="margin-top:0;">Manual Offset Net Profit Target V1 ($)</label>
-                                        <input type="number" step="0.1" id="smartOffsetNetProfit" placeholder="e.g. 1.00 (0 = Disabled)">
-                                    </div>
-                                    <div>
-                                        <label style="margin-top:0;">Manual Offset Full Group Stop Loss V1 ($)</label>
-                                        <input type="number" step="0.1" id="smartOffsetStopLoss" placeholder="e.g. -2.00 (0 = Disabled)">
-                                    </div>
-                                </div>
-
-                                <div class="grid-2" style="margin-bottom: 12px;">
-                                    <div>
-                                        <label style="margin-top:0;">Nth Bottom Row Reference (V1)</label>
-                                        <input type="number" step="1" id="smartOffsetBottomRowV1" placeholder="e.g. 5">
-                                    </div>
-                                    <div>
-                                        <label style="margin-top:0;">Nth Bottom Row Stop Loss (V1) ($)</label>
-                                        <input type="number" step="0.1" id="smartOffsetBottomRowV1StopLoss" placeholder="e.g. -1.50 (0 = Disabled)">
-                                    </div>
-                                </div>
-
-                                <div style="margin-top: 12px; border-top: 1px solid var(--border-color); padding-top: 12px;">
-                                    <label style="margin-top:0;">Stop Loss Execution Limits (Per Minute)</label>
-                                    <div class="grid-2">
+                            <div style="margin-top: 12px; border-top: 1px solid #cce0ff; padding-top: 12px;">
+                                <label style="margin-top:0;">Stop Loss Execution Limits</label>
+                                <p style="font-size:0.75em; color:#5f6368; margin-top:2px; line-height:1.4;">Define how often Stop Losses can occur. If Amount Limit > 0, allows multiple SLs within the timeframe up to the amount. If 0, limits to exactly 1 SL per timeframe.</p>
+                                <div class="flex-row">
+                                    <div style="flex:1;">
                                         <input type="number" step="0.1" id="smartOffsetMaxLossPerMinute" placeholder="Max Amount Allowed (e.g. 10.00)">
+                                    </div>
+                                    <div style="flex:1;">
                                         <input type="number" step="1" id="smartOffsetMaxLossTimeframeSeconds" placeholder="Timeframe in Seconds (e.g. 60)">
                                     </div>
                                 </div>
-
-                                <div style="margin-top: 12px; border-top: 1px solid var(--border-color); padding-top: 12px;">
-                                    <label style="margin-top:0; display:flex; align-items:center;">
-                                        1-Min Group Auto-Dynamic Closer
-                                        <input type="checkbox" id="minuteCloseAutoDynamic" style="margin-left:12px; margin-right:4px;"> Auto-Dynamic
-                                    </label>
-                                    
-                                    <div style="background:var(--surface-color); padding:12px; border:1px solid var(--border-color); border-radius:4px; margin-top:8px;">
-                                        <label style="margin-top:0; color:var(--success-color);">Group Take Profit Range ($)</label>
-                                        <div class="grid-2">
-                                            <input type="number" step="0.0001" id="minuteCloseTpMinPnl" placeholder="Min TP (e.g. 0.0001)">
-                                            <input type="number" step="0.0001" id="minuteCloseTpMaxPnl" placeholder="Max TP (e.g. 0.0004)">
-                                        </div>
-                                        <label style="margin-top:12px; color:var(--error-color);">Group Stop Loss Range ($)</label>
-                                        <div class="grid-2">
-                                            <input type="number" step="0.0001" id="minuteCloseSlMinPnl" placeholder="Min SL (e.g. -0.0008)">
-                                            <input type="number" step="0.0001" id="minuteCloseSlMaxPnl" placeholder="Max SL (e.g. -0.0004)">
-                                        </div>
-                                    </div>
-                                </div>
-                                <button class="btn-blue" style="width: auto; margin-top:16px;" onclick="saveGlobalSettings()">Save Global Settings</button>
                             </div>
 
-                            <h2>Profile Setup</h2>
-                            <div class="input-group">
-                                <div class="flex-row" style="justify-content: space-between; margin-bottom: 12px;">
-                                    <h4 style="margin: 0; color: var(--text-muted);">Manage Profiles</h4>
-                                    <label style="margin: 0; display: flex; align-items: center; cursor: pointer; text-transform: none;"><input type="checkbox" onchange="toggleNewKeys(this)"> Show Keys</label>
-                                </div>
-                                <div class="flex-row" style="margin-bottom: 12px;">
-                                    <select id="subAccountSelect" style="flex: 2;"><option value="">-- Create a Profile --</option></select>
-                                    <button class="btn-blue" style="margin: 0; flex: 1;" onclick="loadSubAccount()">Load</button>
-                                    <button class="btn-red" style="margin: 0; flex: 1;" onclick="removeSubAccount()">Delete</button>
-                                </div>
-                                <div class="flex-row">
-                                    <input type="text" id="newSubName" placeholder="Profile Name">
-                                    <input type="password" id="newSubKey" placeholder="API Key">
-                                    <input type="password" id="newSubSecret" placeholder="Secret Key">
-                                    <button class="btn-green" style="margin:0;" onclick="addSubAccount()">Save New</button>
+                            <div style="margin-top: 12px; border-top: 1px solid #cce0ff; padding-top: 12px;">
+                                <label style="margin-top:0; display:flex; align-items:center;">
+                                    1-Min Group Auto-Dynamic Closer (TP & SL Ranges)
+                                    <input type="checkbox" id="minuteCloseAutoDynamic" style="width:auto; margin-left:12px; margin-right:4px;"> Auto-Dynamic
+                                </label>
+                                <p style="font-size:0.75em; color:#5f6368; margin-top:2px; line-height:1.4;">Checks every 60s. Auto-Dynamic finds the Group Accumulation Peak and sets it as the Take Profit target. It sets the Stop Loss to exactly 50% of the peak to aggressively cut losers early. (Closes winners only).</p>
+                                
+                                <div style="background:#f8f9fa; padding:12px; border:1px solid #dadce0; border-radius:6px; margin-top:8px;">
+                                    <label style="margin-top:0; color:#1e8e3e;">Group Take Profit Range ($)</label>
+                                    <div class="flex-row">
+                                        <div style="flex:1;"><input type="number" step="0.0001" id="minuteCloseTpMinPnl" placeholder="Min TP (e.g. 0.0001)"></div>
+                                        <div style="flex:1;"><input type="number" step="0.0001" id="minuteCloseTpMaxPnl" placeholder="Max TP (e.g. 0.0004)"></div>
+                                    </div>
+                                    <label style="margin-top:12px; color:#d93025;">Group Stop Loss Range ($)</label>
+                                    <div class="flex-row">
+                                        <div style="flex:1;"><input type="number" step="0.0001" id="minuteCloseSlMinPnl" placeholder="Min SL (e.g. -0.0008)"></div>
+                                        <div style="flex:1;"><input type="number" step="0.0001" id="minuteCloseSlMaxPnl" placeholder="Max SL (e.g. -0.0004)"></div>
+                                    </div>
                                 </div>
                             </div>
+                            <button class="btn-blue" style="margin-top:16px;" onclick="saveGlobalSettings()">Save Global Settings</button>
+                        </div>
 
-                            <div id="settingsContainer" class="hidden">
-                                <div class="flex-row" style="justify-content: space-between; margin-top: 16px; margin-bottom: 8px;">
-                                    <label style="margin: 0;">Active Profile API Keys</label>
-                                    <label style="margin: 0; display: flex; align-items: center; cursor: pointer;"><input type="checkbox" id="showActiveKeysCheckbox" onchange="toggleActiveKeys(this)"> Show Keys</label>
-                                </div>
-                                <input type="password" id="apiKey" placeholder="HTX API Key" style="margin-bottom: 8px;">
-                                <input type="password" id="secret" placeholder="HTX Secret Key">
-
-                                <div class="grid-2" style="margin-top: 16px; margin-bottom: 16px;">
-                                    <button class="btn-green" style="margin:0;" onclick="globalToggleBot(true)">▶ Start Bot Profile</button>
-                                    <button class="btn-red" style="margin:0;" onclick="globalToggleBot(false)">⏹ Stop Bot Profile</button>
-                                </div>
-
-                                <div class="grid-2">
-                                    <div><label>Default Side</label><select id="side"><option value="long">Long</option><option value="short">Short</option></select></div>
-                                    <div><label>Leverage (x)</label><input type="number" id="leverage" disabled value="10" style="background:#e0e0e0; color:var(--text-muted); font-weight:bold;"></div>
-                                    <div><label>Initial Base Contracts Qty</label><input type="number" id="baseQty"></div>
-                                    <div><label>Max Safety Contracts</label><input type="number" id="maxContracts"></div>
-                                </div>
-
-                                <h3>Single Coin Math Logic</h3>
-                                <div class="grid-2">
-                                    <div><label>Take Profit Exit (%)</label><input type="number" step="0.1" id="takeProfitPct"></div>
-                                    <div><label>Stop Loss (%)</label><input type="number" step="0.1" id="stopLossPct" placeholder="e.g. -25.0"></div>
-                                    <div><label>Trigger DCA (%)</label><input type="number" step="0.1" id="triggerRoiPct"></div>
-                                    <div><label>Math Target ROI (%)</label><input type="number" step="0.1" id="dcaTargetRoiPct"></div>
-                                </div>
-
-                                <h3 style="margin-top:30px;">Coins Configuration</h3>
-                                <div class="input-group" style="background: #e3f2fd; border-color: #bbdefb;">
-                                    <h4 style="margin-top: 0; margin-bottom: 12px;">Bulk Add Predefined Coins</h4>
-                                    <div class="grid-2" style="margin-bottom: 12px;">
-                                        <div><label style="margin-top:0;">Initial Status</label><select id="predefStatus"><option value="stopped">Leave All Stopped</option><option value="started">Start All Coins</option></select></div>
-                                        <div><label style="margin-top:0;">Trading Side</label><select id="predefSide"><option value="oddLong">Odd=Long / Even=Short</option><option value="evenLong">Even=Long / Odd=Short</option><option value="allLong">All Long</option><option value="allShort">All Short</option></select></div>
-                                    </div>
-                                    <button class="btn-blue" style="margin: 0; width: auto;" onclick="addPredefinedList()">+ Add All Predefined</button>
-                                </div>
-
-                                <h4 style="margin-top: 0; color: var(--text-muted); margin-bottom: 8px;">Or Add Single Coin Manually:</h4>
-                                <div class="flex-row" style="margin-bottom: 16px;">
-                                    <input type="text" id="newCoinSymbol" placeholder="Coin Pair (e.g. DOGE/USDT:USDT)" style="flex: 2;">
-                                    <button class="btn-green" style="margin: 0; flex: 1;" onclick="addCoinUI()">+ Add Single</button>
-                                </div>
-
-                                <div id="coinsListContainer"></div>
-                                <button class="btn-blue" onclick="saveSettings()">Save Profile Settings</button>
+                        <h2>Profile Setup</h2>
+                        <div style="background: #f8f9fa; padding: 12px; border-radius: 6px; margin-bottom: 16px; border: 1px solid #dadce0;">
+                            <div class="flex-row" style="justify-content: space-between; margin-bottom: 8px;">
+                                <h4 style="margin: 0; color: #5f6368;">Switch Sub-Account API Keys</h4>
+                                <label style="margin: 0; display: flex; align-items: center; cursor: pointer; text-transform: none; font-size: 0.85em; color: #5f6368;"><input type="checkbox" style="width: auto; margin: 0 6px 0 0;" onchange="toggleNewKeys(this)"> Show Keys</label>
+                            </div>
+                            <div class="flex-row" style="margin-bottom: 8px;">
+                                <select id="subAccountSelect" style="margin:0; flex:3;"><option value="">-- Create a Profile --</option></select>
+                                <button class="btn-blue" style="margin:0; flex:1; padding: 12px;" onclick="loadSubAccount()">Load</button>
+                                <button class="btn-red" style="margin:0; flex:1; padding: 12px;" onclick="removeSubAccount()">Delete</button>
+                            </div>
+                            <div class="flex-row">
+                                <input type="text" id="newSubName" placeholder="Profile Name" style="margin:0; flex:2;">
+                                <input type="password" id="newSubKey" placeholder="API Key" style="margin:0; flex:2;">
+                                <input type="password" id="newSubSecret" placeholder="Secret Key" style="margin:0; flex:2;">
+                                <button class="btn-green" style="margin:0; flex:1; padding: 12px;" onclick="addSubAccount()">Save New</button>
                             </div>
                         </div>
 
-                        <!-- DASHBOARD PANEL -->
-                        <div class="panel flex-1" style="flex: 1.5;">
-                            <h2>Live Profile Dashboard</h2>
-                            <div class="status-box" style="background:#e3f2fd; border-color:#bbdefb; text-align: center;">
-                                <div class="stat-grid" style="grid-template-columns: 1fr 1fr;">
-                                    <div><span class="stat-label">Global Realized PNL</span><span class="val" id="globalPnl">0.00</span></div>
-                                    <div><span class="stat-label">Current Profile PNL</span><span class="val" id="profilePnl">0.00</span></div>
-                                </div>
+                        <div id="settingsContainer" style="display:none;">
+                            <div class="flex-row" style="justify-content: space-between; margin-top: 16px; margin-bottom: 8px;">
+                                <label style="margin: 0;">Active Profile API Keys</label>
+                                <label style="margin: 0; display: flex; align-items: center; cursor: pointer; text-transform: none; font-size: 0.85em; color: #5f6368;"><input type="checkbox" id="showActiveKeysCheckbox" style="width: auto; margin: 0 6px 0 0;" onchange="toggleActiveKeys(this)"> Show Keys</label>
+                            </div>
+                            <input type="password" id="apiKey" placeholder="HTX API Key" style="margin-top: 0;">
+                            <input type="password" id="secret" placeholder="HTX Secret Key" style="margin:top: 8px;">
+
+                            <div class="flex-row" style="margin-top: 16px; margin-bottom: 16px;">
+                                <button class="btn-green" style="flex:1;" onclick="globalToggleBot(true)">▶ Start Bot for Active Profile</button>
+                                <button class="btn-red" style="flex:1;" onclick="globalToggleBot(false)">⏹ Stop Bot for Active Profile</button>
+                            </div>
+
+                            <div class="flex-row">
+                                <div style="flex:1"><label>Default Side</label><select id="side"><option value="long">Long</option><option value="short">Short</option></select></div>
+                                <div style="flex:1"><label>Leverage (x)</label><input type="number" id="leverage" disabled value="10" style="background:#e8eaed; color:#5f6368; font-weight:bold;"></div>
                             </div>
                             
-                            <div id="dashboardStatusContainer"><p style="color:var(--text-muted);">No profile loaded or no coins active.</p></div>
+                            <label>Initial Base Contracts Qty</label>
+                            <input type="number" id="baseQty">
 
-                            <h2 style="margin-top:30px;">Profile System Logs</h2>
-                            <div class="log-box" id="logs">Waiting for logs...</div>
+                            <h3>Single Coin Math Logic</h3>
+                            <div class="flex-row">
+                                <div style="flex:1"><label>Take Profit Exit (%)</label><input type="number" step="0.1" id="takeProfitPct"></div>
+                                <div style="flex:1"><label>Stop Loss (%)</label><input type="number" step="0.1" id="stopLossPct" placeholder="e.g. -25.0"></div>
+                            </div>
+                            <div class="flex-row">
+                                <div style="flex:1"><label>Trigger DCA (%)</label><input type="number" step="0.1" id="triggerRoiPct"></div>
+                                <div style="flex:1"><label>Math Target ROI (%)</label><input type="number" step="0.1" id="dcaTargetRoiPct"></div>
+                            </div>
+                            <div class="flex-row">
+                                <div style="flex:1"><label>Max Safety Contracts</label><input type="number" id="maxContracts"></div>
+                            </div>
+
+                            <h3 style="margin-top:30px;">Coins Configuration</h3>
+                            <div style="background: #e8f0fe; padding: 16px; border-radius: 6px; margin-bottom: 20px;">
+                                <h4 style="margin-top: 0; color: #1a73e8; margin-bottom: 12px;">Bulk Add Predefined Coins</h4>
+                                <div class="flex-row" style="margin-bottom: 12px;">
+                                    <div style="flex:1;"><label style="margin-top:0;">Initial Status</label><select id="predefStatus"><option value="stopped">Leave All Stopped</option><option value="started">Start All Coins</option></select></div>
+                                    <div style="flex:1;"><label style="margin-top:0;">Trading Side</label><select id="predefSide"><option value="oddLong">Odd=Long / Even=Short</option><option value="evenLong">Even=Long / Odd=Short</option><option value="allLong">All Long</option><option value="allShort">All Short</option></select></div>
+                                </div>
+                                <button class="btn-blue" style="margin-top: 0;" onclick="addPredefinedList()">+ Add All Predefined</button>
+                            </div>
+
+                            <h4 style="margin-top: 0; color: #5f6368; margin-bottom: 8px;">Or Add Single Coin Manually:</h4>
+                            <div class="flex-row" style="margin-bottom: 12px;">
+                                <input type="text" id="newCoinSymbol" placeholder="Coin Pair (e.g. DOGE/USDT:USDT)" style="margin:0; flex:2;">
+                                <button class="btn-green" style="flex:1;" onclick="addCoinUI()">+ Add Single</button>
+                            </div>
+
+                            <div id="coinsListContainer"></div>
+                            <button class="btn-blue" onclick="saveSettings()">Save Profile Settings</button>
                         </div>
+                    </div>
+
+                    <!-- DASHBOARD PANEL -->
+                    <div class="panel flex-1" style="flex: 1.5;">
+                        <h2>Live Profile Dashboard</h2>
+                        <div class="status-box" style="background:#e8f0fe; border-color:#d2e3fc;">
+                            <div class="flex-row" style="justify-content: space-between;">
+                                <div><span class="stat-label">Global Realized PNL</span><span class="val" id="globalPnl">0.00</span></div>
+                                <div><span class="stat-label">Current Profile PNL</span><span class="val" id="profilePnl">0.00</span></div>
+                            </div>
+                        </div>
+                        
+                        <div id="dashboardStatusContainer"><p style="color:#5f6368;">No profile loaded or no coins active.</p></div>
+
+                        <h2 style="margin-top:30px;">Profile System Logs</h2>
+                        <div class="log-box" id="logs">Waiting for logs...</div>
                     </div>
                 </div>
             </div>
@@ -1812,13 +1741,13 @@ app.get('/', (req, res) => {
                         return;
                     }
 
-                    document.getElementById('auth-view').classList.add('hidden');
-                    document.getElementById('dashboard-view').classList.remove('hidden');
+                    document.getElementById('auth-view').style.display = 'none';
+                    document.getElementById('dashboard-view').style.display = 'block';
                     fetchSettings();
                     statusInterval = setInterval(loadStatus, 5000);
                 } else {
-                    document.getElementById('auth-view').classList.remove('hidden');
-                    document.getElementById('dashboard-view').classList.add('hidden');
+                    document.getElementById('auth-view').style.display = 'block';
+                    document.getElementById('dashboard-view').style.display = 'none';
                     clearInterval(statusInterval);
                 }
             }
@@ -1830,19 +1759,19 @@ app.get('/', (req, res) => {
                 const adminBtn = document.getElementById('admin-btn');
                 
                 if (myUsername === 'webcoin8888') {
-                    adminBtn.style.display = 'inline-flex';
+                    adminBtn.style.display = 'inline-block';
                 } else {
                     adminBtn.style.display = 'none';
                 }
 
                 if (isPaperUser) {
-                    titleEl.innerText = "HTX PAPER TRADING BOT";
-                    titleEl.style.color = "var(--primary-color)"; 
+                    titleEl.innerText = "HTX PAPER TRADING BOT (Simulated 10x)";
+                    titleEl.style.color = "#1a73e8"; 
                     panicBtn.style.display = "none";
                 } else {
-                    titleEl.innerText = "HTX LIVE TRADING BOT";
-                    titleEl.style.color = "var(--success-color)"; 
-                    panicBtn.style.display = "inline-flex";
+                    titleEl.innerText = "HTX LIVE TRADING BOT (REAL FUNDS - 10x Fixed)";
+                    titleEl.style.color = "#1e8e3e"; 
+                    panicBtn.style.display = "block";
                 }
                 levInput.disabled = true;
                 levInput.title = "Leverage is strictly locked at 10x.";
@@ -1850,21 +1779,21 @@ app.get('/', (req, res) => {
             }
 
             function switchTab(tab) {
-                document.getElementById('main-tab').classList.add('hidden');
-                document.getElementById('offset-tab').classList.add('hidden');
-                document.getElementById('offset2-tab').classList.add('hidden');
-                document.getElementById('admin-tab').classList.add('hidden');
+                document.getElementById('main-tab').style.display = 'none';
+                document.getElementById('offset-tab').style.display = 'none';
+                document.getElementById('offset2-tab').style.display = 'none';
+                document.getElementById('admin-tab').style.display = 'none';
 
                 if (tab === 'main') {
-                    document.getElementById('main-tab').classList.remove('hidden');
+                    document.getElementById('main-tab').style.display = 'block';
                 } else if (tab === 'offsets') {
-                    document.getElementById('offset-tab').classList.remove('hidden');
+                    document.getElementById('offset-tab').style.display = 'block';
                     loadOffsets();
                 } else if (tab === 'offsets2') {
-                    document.getElementById('offset2-tab').classList.remove('hidden');
+                    document.getElementById('offset2-tab').style.display = 'block';
                     loadOffsets();
                 } else if (tab === 'admin') {
-                    document.getElementById('admin-tab').classList.remove('hidden');
+                    document.getElementById('admin-tab').style.display = 'block';
                     loadAdminData();
                 }
             }
@@ -1894,7 +1823,7 @@ app.get('/', (req, res) => {
                 } else {
                     document.getElementById('auth-msg').innerText = data.error || data.message;
                     if (data.success) { 
-                        document.getElementById('auth-msg').style.color = 'var(--success-color)';
+                        document.getElementById('auth-msg').style.color = '#1e8e3e';
                     }
                 }
             }
@@ -1917,43 +1846,43 @@ app.get('/', (req, res) => {
 
                     const banner = document.getElementById('adminStatusBanner');
                     if (statusData.templateSafe && statusData.webcoinSafe) {
-                        banner.style.background = '#e8f5e9';
-                        banner.style.color = 'var(--success-color)';
-                        banner.style.borderColor = '#c8e6c9';
+                        banner.style.background = '#e6f4ea';
+                        banner.style.color = '#1e8e3e';
+                        banner.style.borderColor = '#ceead6';
                         banner.innerText = '🟢 SYSTEM STATUS: Main Settings Template & webcoin8888 Real Profiles are strictly protected in the database. Safe to delete users.';
                     } else {
-                        banner.style.background = '#ffebee';
-                        banner.style.color = 'var(--error-color)';
-                        banner.style.borderColor = '#ffcdd2';
+                        banner.style.background = '#fce8e6';
+                        banner.style.color = '#d93025';
+                        banner.style.borderColor = '#fad2cf';
                         banner.innerText = '🔴 SYSTEM STATUS WARNING: Master Template or webcoin8888 not found in database!';
                     }
 
                     const usersRes = await fetch('/api/admin/users', { headers: { 'Authorization': 'Bearer ' + token } });
                     const users = await usersRes.json();
 
-                    let html = '<table>';
-                    html += '<tr><th>Username</th><th>Password</th><th>Mode</th><th>Global Realized PNL</th><th>Action</th></tr>';
+                    let html = '<table style="width:100%; text-align:left; border-collapse:collapse; background:#fff; border-radius:6px; overflow:hidden;">';
+                    html += '<tr style="background:#f8f9fa;"><th style="padding:12px; border-bottom:2px solid #dadce0;">Username</th><th style="padding:12px; border-bottom:2px solid #dadce0;">Password</th><th style="padding:12px; border-bottom:2px solid #dadce0;">Mode</th><th style="padding:12px; border-bottom:2px solid #dadce0;">Global Realized PNL</th><th style="padding:12px; border-bottom:2px solid #dadce0;">Action</th></tr>';
 
                     if (users.length === 0) {
-                        html += '<tr><td colspan="5" style="text-align:center; color:var(--text-muted);">No additional users found.</td></tr>';
+                        html += '<tr><td colspan="5" style="padding:12px; text-align:center; color:#5f6368;">No additional users found.</td></tr>';
                     } else {
                         users.forEach(u => {
-                            const modeText = u.isPaper ? '<span style="color:var(--primary-color); font-weight:bold;">PAPER</span>' : '<span style="color:var(--success-color); font-weight:bold;">REAL</span>';
-                            const pnlColor = u.realizedPnl >= 0 ? 'var(--success-color)' : 'var(--error-color)';
-                            html += '<tr>' +
-                                '<td style="font-weight:bold;">' + u.username + '</td>' +
-                                '<td style="color:var(--error-color); font-family:monospace;">' + u.plainPassword + '</td>' +
-                                '<td>' + modeText + '</td>' +
-                                '<td style="color:' + pnlColor + '; font-weight:bold;">$' + u.realizedPnl.toFixed(4) + '</td>' +
-                                '<td><button class="btn-red" style="padding:6px 12px; font-size:0.8em; margin:0;" onclick="adminDeleteUser(\\'' + u._id + '\\')">Delete</button></td>' +
-                            '</tr>';
+                            const modeText = u.isPaper ? '<span style="color:#1a73e8; font-weight:bold;">PAPER</span>' : '<span style="color:#1e8e3e; font-weight:bold;">REAL</span>';
+                            const pnlColor = u.realizedPnl >= 0 ? '#1e8e3e' : '#d93025';
+                            html += \`<tr>
+                                <td style="padding:12px; border-bottom:1px solid #eee; font-weight:bold;">\${u.username}</td>
+                                <td style="padding:12px; border-bottom:1px solid #eee; color:#d93025; font-family:monospace;">\${u.plainPassword}</td>
+                                <td style="padding:12px; border-bottom:1px solid #eee;">\${modeText}</td>
+                                <td style="padding:12px; border-bottom:1px solid #eee; color:\${pnlColor}; font-weight:bold;">$\${u.realizedPnl.toFixed(4)}</td>
+                                <td style="padding:12px; border-bottom:1px solid #eee;"><button class="btn-red" style="padding:6px 12px; font-size:0.8em; margin:0;" onclick="adminDeleteUser('\${u._id}')">Delete</button></td>
+                            </tr>\`;
                         });
                     }
                     html += '</table>';
                     document.getElementById('adminUsersContainer').innerHTML = html;
 
                 } catch (e) {
-                    document.getElementById('adminUsersContainer').innerHTML = '<p style="color:var(--error-color);">Error loading admin data.</p>';
+                    document.getElementById('adminUsersContainer').innerHTML = '<p style="color:red;">Error loading admin data.</p>';
                 }
             }
 
@@ -1968,7 +1897,7 @@ app.get('/', (req, res) => {
             }
 
             async function adminDeleteAllUsers() {
-                if (!confirm("🚨 EXTREME WARNING: Are you absolutely sure you want to completely wipe all users from the system?\\n\\n(The webcoin8888 master account and main settings template will be automatically preserved).")) return;
+                if (!confirm("🚨 EXTREME WARNING: Are you absolutely sure you want to completely wipe all users from the system?\n\n(The webcoin8888 master account and main settings template will be automatically preserved).")) return;
                 const res = await fetch('/api/admin/users', { method: 'DELETE', headers: { 'Authorization': 'Bearer ' + token } });
                 const data = await res.json();
                 if(data.success) {
@@ -2028,7 +1957,7 @@ app.get('/', (req, res) => {
                     loadSubAccount();
                 } else {
                     currentProfileIndex = -1;
-                    document.getElementById('settingsContainer').classList.add('hidden');
+                    document.getElementById('settingsContainer').style.display = 'none';
                 }
             }
 
@@ -2060,7 +1989,7 @@ app.get('/', (req, res) => {
                 select.innerHTML = '<option value="">-- Create a Profile --</option>';
                 if(mySubAccounts.length > 0) {
                     select.innerHTML = '';
-                    mySubAccounts.forEach((sub, i) => select.innerHTML += '<option value="' + i + '">' + sub.name + '</option>');
+                    mySubAccounts.forEach((sub, i) => select.innerHTML += \`<option value="\${i}">\${sub.name}</option>\`);
                 }
             }
 
@@ -2090,7 +2019,7 @@ app.get('/', (req, res) => {
                     currentProfileIndex = index;
                     const profile = mySubAccounts[index];
                     
-                    document.getElementById('settingsContainer').classList.remove('hidden');
+                    document.getElementById('settingsContainer').style.display = 'block';
                     document.getElementById('apiKey').value = profile.apiKey || '';
                     document.getElementById('secret').value = profile.secret || '';
                     
@@ -2123,7 +2052,7 @@ app.get('/', (req, res) => {
                     
                     renderSubAccounts();
                     if(mySubAccounts.length > 0) { document.getElementById('subAccountSelect').value = 0; loadSubAccount(); } 
-                    else { currentProfileIndex = -1; document.getElementById('settingsContainer').classList.add('hidden'); myCoins = []; document.getElementById('dashboardStatusContainer').innerHTML = '<p>No profile loaded.</p>'; document.getElementById('logs').innerHTML = ''; }
+                    else { currentProfileIndex = -1; document.getElementById('settingsContainer').style.display = 'none'; myCoins = []; document.getElementById('dashboardStatusContainer').innerHTML = '<p>No profile loaded.</p>'; document.getElementById('logs').innerHTML = ''; }
                 }
             }
 
@@ -2172,11 +2101,12 @@ app.get('/', (req, res) => {
                 container.innerHTML = '';
                 myCoins.forEach((coin, i) => {
                     const box = document.createElement('div');
-                    box.className = 'coin-box';
+                    box.className = 'coin-box flex-row';
+                    box.style.justifyContent = 'space-between';
                     const displaySide = coin.side || document.getElementById('side').value;
-                    const sideColor = displaySide === 'long' ? 'var(--success-color)' : 'var(--error-color)';
+                    const sideColor = displaySide === 'long' ? '#1e8e3e' : '#d93025';
 
-                    box.innerHTML = '<span style="font-weight: bold; color: var(--primary-color); font-size: 1.1em;">' + coin.symbol + ' <span style="font-size: 0.75em; color: ' + sideColor + '; text-transform: uppercase;">(' + displaySide + ')</span></span><button class="btn-red" style="padding: 6px 12px; font-size: 0.8em; margin: 0; width: auto;" onclick="removeCoinUI(' + i + ')">Remove</button>';
+                    box.innerHTML = \`<span style="font-weight: bold; color: #1a73e8; font-size: 1.1em;">\${coin.symbol} <span style="font-size: 0.75em; color: \${sideColor}; text-transform: uppercase;">(\${displaySide})</span></span><button class="btn-red" style="padding: 6px 12px; font-size: 0.8em; margin: 0; width: auto;" onclick="removeCoinUI(\${i})">Remove</button>\`;
                     container.appendChild(box);
                 });
             }
@@ -2217,29 +2147,29 @@ app.get('/', (req, res) => {
                 const records = await res.json();
                 
                 if (records.length === 0) {
-                    const noData = '<p style="color:var(--text-muted);">No smart offsets executed yet.</p>';
+                    const noData = '<p style="color:#5f6368;">No smart offsets executed yet.</p>';
                     document.getElementById('offsetTableContainer').innerHTML = noData;
                     document.getElementById('offsetTableContainer2').innerHTML = noData;
                     return;
                 }
 
-                let ih = '<table>';
-                ih += '<tr><th>Date/Time</th><th>Winner Coin</th><th>Winner PNL</th><th>Loser Coin</th><th>Loser PNL</th><th>Net Profit</th></tr>';
+                let ih = '<table style="width:100%; text-align:left; border-collapse:collapse; background:#fff; border-radius:6px; overflow:hidden;">';
+                ih += '<tr style="background:#f8f9fa;"><th style="padding:12px; border-bottom:2px solid #dadce0;">Date/Time</th><th style="padding:12px; border-bottom:2px solid #dadce0;">Winner Coin</th><th style="padding:12px; border-bottom:2px solid #dadce0;">Winner PNL</th><th style="padding:12px; border-bottom:2px solid #dadce0;">Loser Coin</th><th style="padding:12px; border-bottom:2px solid #dadce0;">Loser PNL</th><th style="padding:12px; border-bottom:2px solid #dadce0;">Net Profit</th></tr>';
                 
                 records.forEach(r => {
                     const dateObj = new Date(r.timestamp);
-                    const wColor = r.winnerPnl >= 0 ? 'var(--success-color)' : 'var(--error-color)';
-                    const lColor = r.loserPnl >= 0 ? 'var(--success-color)' : 'var(--error-color)';
-                    const nColor = r.netProfit >= 0 ? 'var(--success-color)' : 'var(--error-color)';
+                    const wColor = r.winnerPnl >= 0 ? '#1e8e3e' : '#d93025';
+                    const lColor = r.loserPnl >= 0 ? '#1e8e3e' : '#d93025';
+                    const nColor = r.netProfit >= 0 ? '#1e8e3e' : '#d93025';
 
-                    ih += '<tr>' +
-                        '<td style="color:var(--text-muted);">' + dateObj.toLocaleDateString() + ' ' + dateObj.toLocaleTimeString() + '</td>' +
-                        '<td style="color:var(--primary-color); font-weight:500;">' + r.winnerSymbol + '</td>' +
-                        '<td style="color:' + wColor + '; font-weight:500;">' + (r.winnerPnl >= 0 ? '+' : '') + '$' + r.winnerPnl.toFixed(4) + '</td>' +
-                        '<td style="color:var(--primary-color); font-weight:500;">' + r.loserSymbol + '</td>' +
-                        '<td style="color:' + lColor + '; font-weight:500;">' + (r.loserPnl >= 0 ? '+' : '') + '$' + r.loserPnl.toFixed(4) + '</td>' +
-                        '<td style="color:' + nColor + '; font-weight:700;">' + (r.netProfit >= 0 ? '+' : '') + '$' + r.netProfit.toFixed(4) + '</td>' +
-                    '</tr>';
+                    ih += \`<tr>
+                        <td style="padding:12px; border-bottom:1px solid #eee; color:#5f6368;">\${dateObj.toLocaleDateString()} \${dateObj.toLocaleTimeString()}</td>
+                        <td style="padding:12px; border-bottom:1px solid #eee; color:#1a73e8; font-weight:500;">\${r.winnerSymbol}</td>
+                        <td style="padding:12px; border-bottom:1px solid #eee; color:\${wColor}; font-weight:500;">\${r.winnerPnl >= 0 ? '+' : ''}$\${r.winnerPnl.toFixed(4)}</td>
+                        <td style="padding:12px; border-bottom:1px solid #eee; color:#1a73e8; font-weight:500;">\${r.loserSymbol}</td>
+                        <td style="padding:12px; border-bottom:1px solid #eee; color:\${lColor}; font-weight:500;">\${r.loserPnl >= 0 ? '+' : ''}$\${r.loserPnl.toFixed(4)}</td>
+                        <td style="padding:12px; border-bottom:1px solid #eee; color:\${nColor}; font-weight:700;">\${r.netProfit >= 0 ? '+' : ''}$\${r.netProfit.toFixed(4)}</td>
+                    </tr>\`;
                 });
                 ih += '</table>';
                 document.getElementById('offsetTableContainer').innerHTML = ih;
@@ -2288,8 +2218,8 @@ app.get('/', (req, res) => {
                 const timeframeSec = globalSet.smartOffsetMaxLossTimeframeSeconds || 60;
                 const maxLossPerMin = globalSet.smartOffsetMaxLossPerMinute || 0;
                 const lossTrackerHtml = maxLossPerMin > 0 
-                    ? '<div style="margin-top: 6px; padding-top: 6px; border-top: 1px dashed var(--border-color);">⏳ <strong>' + timeframeSec + 's Loss Tracker:</strong> $' + currentMinuteLoss.toFixed(2) + ' / $' + maxLossPerMin.toFixed(2) + ' Limit</div>'
-                    : '<div style="margin-top: 6px; padding-top: 6px; border-top: 1px dashed var(--border-color);">⏳ <strong>' + timeframeSec + 's Loss Tracker:</strong> Limited to 1 SL execution per ' + timeframeSec + 's</div>';
+                    ? \`<div style="margin-top: 6px; padding-top: 6px; border-top: 1px dashed #b3d4ff;">⏳ <strong>\${timeframeSec}s Loss Tracker:</strong> $\${currentMinuteLoss.toFixed(2)} / $\${maxLossPerMin.toFixed(2)} Limit</div>\`
+                    : \`<div style="margin-top: 6px; padding-top: 6px; border-top: 1px dashed #b3d4ff;">⏳ <strong>\${timeframeSec}s Loss Tracker:</strong> Limited to 1 SL execution per \${timeframeSec}s</div>\`;
                 
                 let sortedCands = [...activeCandidates].sort((a, b) => b.pnl - a.pnl);
                 let tCoins = sortedCands.length;
@@ -2317,8 +2247,8 @@ app.get('/', (req, res) => {
                     tpMinInput.disabled = true; tpMaxInput.disabled = true;
                     slMinInput.disabled = true; slMaxInput.disabled = true;
                     
-                    tpMinInput.style.backgroundColor = '#e0e0e0'; tpMaxInput.style.backgroundColor = '#e0e0e0';
-                    slMinInput.style.backgroundColor = '#e0e0e0'; slMaxInput.style.backgroundColor = '#e0e0e0';
+                    tpMinInput.style.backgroundColor = '#e8eaed'; tpMaxInput.style.backgroundColor = '#e8eaed';
+                    slMinInput.style.backgroundColor = '#e8eaed'; slMaxInput.style.backgroundColor = '#e8eaed';
                     
                     autoDynStatusBox.style.display = 'block';
 
@@ -2355,25 +2285,25 @@ app.get('/', (req, res) => {
                         let distToTp = tpMinBound - highestGroupAcc;
                         let distToSl = lowestGroupAcc - slMaxBound; 
 
-                        let tpDistText = distToTp > 0 ? '$' + distToTp.toFixed(4) + ' away' : '<span style="color:var(--success-color); font-weight:bold;">IN RANGE</span>';
-                        let slDistText = distToSl > 0 ? '$' + distToSl.toFixed(4) + ' away' : '<span style="color:var(--error-color); font-weight:bold;">IN RANGE</span>';
+                        let tpDistText = distToTp > 0 ? \`$\${distToTp.toFixed(4)} away\` : \`<span style="color:#1e8e3e; font-weight:bold;">IN RANGE</span>\`;
+                        let slDistText = distToSl > 0 ? \`$\${distToSl.toFixed(4)} away\` : \`<span style="color:#d93025; font-weight:bold;">IN RANGE</span>\`;
 
-                        adHtml += '<div class="stat-grid" style="grid-template-columns: 1fr 1fr; margin-bottom: 12px;">';
-                        adHtml += '<div class="stat-item"><span class="stat-label">Group Take Profit (Target: $' + tpMinBound.toFixed(4) + ')</span><span class="val">Row ' + (highestGroupIndex + 1) + ' Group: <span style="color:' + (highestGroupAcc >= 0 ? 'var(--success-color)' : 'var(--error-color)') + '">$' + highestGroupAcc.toFixed(4) + '</span> <br><span style="font-size:0.65em; font-weight:normal;">(' + tpDistText + ')</span></span></div>';
-                        adHtml += '<div class="stat-item"><span class="stat-label">Group Stop Loss (Limit: $' + slMaxBound.toFixed(4) + ')</span><span class="val">Row ' + (lowestGroupIndex + 1) + ' Group: <span style="color:' + (lowestGroupAcc >= 0 ? 'var(--success-color)' : 'var(--error-color)') + '">$' + lowestGroupAcc.toFixed(4) + '</span> <br><span style="font-size:0.65em; font-weight:normal;">(' + slDistText + ')</span></span></div>';
-                        adHtml += '</div>';
+                        adHtml += \`<div class="flex-row" style="justify-content: space-between; margin-bottom: 12px;">\`;
+                        adHtml += \`<div><span class="stat-label">Closest to Group Take Profit (Target: $\${tpMinBound.toFixed(4)})</span><span class="val">Row \${highestGroupIndex + 1} Group: <span style="color:\${highestGroupAcc >= 0 ? '#1e8e3e' : '#d93025'}">$\${highestGroupAcc.toFixed(4)}</span> <span style="font-size:0.65em; font-weight:normal;">(\${tpDistText})</span></span></div>\`;
+                        adHtml += \`<div><span class="stat-label">Closest to Group Stop Loss (Limit: $\${slMaxBound.toFixed(4)})</span><span class="val">Row \${lowestGroupIndex + 1} Group: <span style="color:\${lowestGroupAcc >= 0 ? '#1e8e3e' : '#d93025'}">$\${lowestGroupAcc.toFixed(4)}</span> <span style="font-size:0.65em; font-weight:normal;">(\${slDistText})</span></span></div>\`;
+                        adHtml += \`</div>\`;
                     } else {
-                        adHtml += '<p style="color:var(--text-muted); font-size:0.9em; margin-bottom:12px;">Calculating dynamic boundaries... (needs at least 2 active coins and a positive peak)</p>';
+                        adHtml += \`<p style="color:#5f6368; font-size:0.9em; margin-bottom:12px;">Calculating dynamic boundaries... (needs at least 2 active coins and a positive peak)</p>\`;
                     }
 
                     if (data.autoDynExec) {
                         const execDate = new Date(data.autoDynExec.time).toLocaleTimeString();
-                        const typeColor = data.autoDynExec.type === 'Group Take Profit' ? 'var(--success-color)' : 'var(--error-color)';
-                        adHtml += '<div style="border-top:1px dashed var(--border-color); padding-top:12px; font-size:0.9em;">' +
-                            '<strong>Last Execution:</strong> <span style="color:' + typeColor + '; font-weight:bold;">' + data.autoDynExec.type + '</span> on <strong>' + data.autoDynExec.symbol + '</strong> at PNL <span style="color:' + typeColor + ';">$' + data.autoDynExec.pnl.toFixed(4) + '</span> (' + execDate + ')' +
-                        '</div>';
+                        const typeColor = data.autoDynExec.type === 'Group Take Profit' ? '#1e8e3e' : '#d93025';
+                        adHtml += \`<div style="border-top:1px dashed #b3d4ff; padding-top:12px; font-size:0.9em;">
+                            <strong>Last Execution:</strong> <span style="color:\${typeColor}; font-weight:bold;">\${data.autoDynExec.type}</span> on <strong>\${data.autoDynExec.symbol}</strong> at PNL <span style="color:\${typeColor};">$\${data.autoDynExec.pnl.toFixed(4)}</span> (\${execDate})
+                        </div>\`;
                     } else {
-                        adHtml += '<div style="border-top:1px dashed var(--border-color); padding-top:12px; font-size:0.9em; color:var(--text-muted);"><strong>Last Execution:</strong> No actions executed yet in this session.</div>';
+                        adHtml += \`<div style="border-top:1px dashed #b3d4ff; padding-top:12px; font-size:0.9em; color:#5f6368;"><strong>Last Execution:</strong> No actions executed yet in this session.</div>\`;
                     }
                     
                     document.getElementById('autoDynLiveDetails').innerHTML = adHtml;
@@ -2389,7 +2319,7 @@ app.get('/', (req, res) => {
                 }
 
                 // --- RENDER LIVE SMART OFFSET TRADES (V1 - GROUP ACCUMULATION) ---
-                if (!document.getElementById('offset-tab').classList.contains('hidden')) {
+                if (document.getElementById('offset-tab').style.display === 'block') {
                     activeCandidates.sort((a, b) => b.pnl - a.pnl);
                     const totalCoins = activeCandidates.length;
                     const totalPairs = Math.floor(totalCoins / 2);
@@ -2400,10 +2330,10 @@ app.get('/', (req, res) => {
                     const bottomRowN = globalSet.smartOffsetBottomRowV1 !== undefined ? globalSet.smartOffsetBottomRowV1 : 5;
 
                     if (totalPairs === 0) {
-                        document.getElementById('liveOffsetsContainer').innerHTML = '<p style="color:var(--text-muted);">Not enough active trades to form pairs.</p>';
+                        document.getElementById('liveOffsetsContainer').innerHTML = '<p style="color:#5f6368;">Not enough active trades to form pairs.</p>';
                     } else {
-                        let liveHtml = '<div class="table-responsive"><table>';
-                        liveHtml += '<tr><th>Rank Pair</th><th>Winner Coin</th><th>Winner PNL</th><th>Loser Coin</th><th>Loser PNL</th><th>Pair Net</th><th style="color:var(--primary-color);">Group Accumulation</th></tr>';
+                        let liveHtml = '<table style="width:100%; text-align:left; border-collapse:collapse; background:#fff; border-radius:6px; overflow:hidden;">';
+                        liveHtml += '<tr style="background:#e8f0fe;"><th style="padding:12px; border-bottom:2px solid #dadce0;">Rank Pair</th><th style="padding:12px; border-bottom:2px solid #dadce0;">Winner Coin</th><th style="padding:12px; border-bottom:2px solid #dadce0;">Winner PNL</th><th style="padding:12px; border-bottom:2px solid #dadce0;">Loser Coin</th><th style="padding:12px; border-bottom:2px solid #dadce0;">Loser PNL</th><th style="padding:12px; border-bottom:2px solid #dadce0;">Pair Net</th><th style="padding:12px; border-bottom:2px solid #dadce0; color:#1a73e8;">Group Accumulation</th></tr>';
 
                         let runningAccumulation = 0;
                         let peakAccumulation = 0;
@@ -2435,7 +2365,7 @@ app.get('/', (req, res) => {
                         const isHitFullGroupSl = (fullGroupSl < 0 && runningAccumulation <= fullGroupSl);
 
                         if (targetV1 > 0 && peakAccumulation >= targetV1 && peakAccumulation >= 0.0001 && peakRowIndex >= 0) {
-                            topStatusMessage = '<span style="color:var(--success-color); font-weight:bold;">🔥 Target Reached! Slicing at Row ' + (peakRowIndex + 1) + ' to harvest Peak Profit ($' + peakAccumulation.toFixed(4) + ') (CLOSING WINNERS ONLY)!</span>';
+                            topStatusMessage = \`<span style="color:#1e8e3e; font-weight:bold;">🔥 Target Reached! Slicing at Row \${peakRowIndex + 1} to harvest Peak Profit ($\${peakAccumulation.toFixed(4)}) (CLOSING WINNERS ONLY)!</span>\`;
                             executingPeak = true;
                         } else if (isHitFullGroupSl) { 
                             let projectedLoss = runningAccumulation; 
@@ -2446,17 +2376,17 @@ app.get('/', (req, res) => {
                             }
 
                             if (blockedByLimit) {
-                                topStatusMessage = '<span style="color:var(--error-color); font-weight:bold;">🛑 Stop Loss Reached but Blocked by ' + timeframeSec + 's Limit!</span>';
+                                topStatusMessage = \`<span style="color:#d93025; font-weight:bold;">🛑 Stop Loss Reached but Blocked by \${timeframeSec}s Limit!</span>\`;
                             } else {
                                 executingSl = true;
-                                topStatusMessage = '<span style="color:var(--error-color); font-weight:bold;">🔥 Stop Loss Hit (Full Group dropped to/below $' + fullGroupSl.toFixed(4) + ')! (CLOSING WINNERS ONLY)</span>';
+                                topStatusMessage = \`<span style="color:#d93025; font-weight:bold;">🔥 Stop Loss Hit (Full Group dropped to/below $\${fullGroupSl.toFixed(4)})! (CLOSING WINNERS ONLY)</span>\`;
                             }
                         } else if (peakRowIndex === -1 || peakAccumulation < 0.0001) {
                             executingNoPeakSl = true;
-                            topStatusMessage = '<span style="color:var(--error-color); font-weight:bold;">⚠️ No Peak Found (&le; $0.0000)! Ready to cut lowest PNL coin every 30 mins.</span>';
+                            topStatusMessage = \`<span style="color:#d93025; font-weight:bold;">⚠️ No Peak Found (&le; $0.0000)! Ready to cut lowest PNL coin every 30 mins.</span>\`;
                         } else {
-                            let pColor = peakAccumulation >= 0.0001 ? 'var(--success-color)' : 'var(--text-muted)';
-                            topStatusMessage = 'TP Status: <span style="color:var(--primary-color); font-weight:bold;">🔎 Seeking Peak &ge; $' + targetV1.toFixed(4) + '</span> | Current Peak: <strong style="color:' + pColor + '">+$' + peakAccumulation.toFixed(4) + '</strong>';
+                            let pColor = peakAccumulation >= 0.0001 ? '#1e8e3e' : '#5f6368';
+                            topStatusMessage = \`TP Status: <span style="color:#1a73e8; font-weight:bold;">🔎 Seeking Peak &ge; $\${targetV1.toFixed(4)}</span> | Current Peak: <strong style="color:\${pColor}">+\$\${peakAccumulation.toFixed(4)}</strong>\`;
                         }
 
                         let displayAccumulation = 0;
@@ -2492,49 +2422,50 @@ app.get('/', (req, res) => {
                                 else statusIcon = '📉 Dragging down';
                             }
 
-                            const wColor = w.pnl >= 0 ? 'var(--success-color)' : 'var(--error-color)';
-                            const lColor = l.pnl >= 0 ? 'var(--success-color)' : 'var(--error-color)';
-                            const nColor = net >= 0 ? 'var(--success-color)' : 'var(--error-color)';
-                            const cColor = displayAccumulation >= 0 ? 'var(--success-color)' : 'var(--error-color)';
+                            const wColor = w.pnl >= 0 ? '#1e8e3e' : '#d93025';
+                            const lColor = l.pnl >= 0 ? '#1e8e3e' : '#d93025';
+                            const nColor = net >= 0 ? '#1e8e3e' : '#d93025';
+                            const cColor = displayAccumulation >= 0 ? '#1e8e3e' : '#d93025';
 
-                            let rowStyle = (i === peakRowIndex && peakAccumulation >= 0.0001) ? 'border: 2px solid var(--success-color); background: #e8f5e9;' : '';
-                            if (i === targetRefIndex) rowStyle += 'border-left: 4px solid var(--warning-color);'; 
+                            let rowStyle = (i === peakRowIndex && peakAccumulation >= 0.0001) ? 'border: 2px solid #1e8e3e; background: #e6f4ea;' : '';
+                            if (i === targetRefIndex) rowStyle += 'border-left: 4px solid #f29900;'; 
                             
+                            // Highlighting the worst coin visually if executingNoPeakSl is true
                             let loserCellStyle = '';
-                            if (executingNoPeakSl && i === totalPairs - 1) loserCellStyle = 'background: #ffebee; border: 2px dashed var(--error-color);';
+                            if (executingNoPeakSl && i === totalPairs - 1) loserCellStyle = 'background: #fce8e6; border: 2px dashed #d93025;';
 
-                            liveHtml += '<tr style="' + rowStyle + '">' +
-                                '<td style="font-weight:500; color:var(--text-muted);">' + (winnerIndex + 1) + ' & ' + (loserIndex + 1) + ' <br><span style="font-size:0.75em; color:var(--primary-color)">' + statusIcon + '</span></td>' +
-                                '<td style="font-weight:500;">' + w.symbol + '</td>' +
-                                '<td style="color:' + wColor + '; font-weight:700;">' + (w.pnl >= 0 ? '+' : '') + '$' + w.pnl.toFixed(4) + '</td>' +
-                                '<td style="font-weight:500; ' + loserCellStyle + '">' + l.symbol + '</td>' +
-                                '<td style="color:' + lColor + '; font-weight:700; ' + loserCellStyle + '">' + (l.pnl >= 0 ? '+' : '') + '$' + l.pnl.toFixed(4) + '</td>' +
-                                '<td style="color:' + nColor + '; font-weight:700; background: #fafafa;">' + (net >= 0 ? '+' : '') + '$' + net.toFixed(4) + '</td>' +
-                                '<td style="color:' + cColor + '; font-weight:700; background: #e3f2fd;">' +
-                                    (displayAccumulation >= 0 ? '+' : '') + '$' + displayAccumulation.toFixed(4) +
-                                    (i === targetRefIndex ? '<br><span style="font-size:0.7em; color:var(--warning-color);">★ Nth Row Ref Gate</span>' : '') +
-                                '</td>' +
-                            '</tr>';
+                            liveHtml += \`<tr style="\${rowStyle}">
+                                <td style="padding:12px; border-bottom:1px solid #eee; font-weight:500; color:#5f6368;">\${winnerIndex + 1} & \${loserIndex + 1} <br><span style="font-size:0.75em; color:#1a73e8">\${statusIcon}</span></td>
+                                <td style="padding:12px; border-bottom:1px solid #eee; font-weight:500;">\${w.symbol}</td>
+                                <td style="padding:12px; border-bottom:1px solid #eee; color:\${wColor}; font-weight:700;">\${w.pnl >= 0 ? '+' : ''}$\${w.pnl.toFixed(4)}</td>
+                                <td style="padding:12px; border-bottom:1px solid #eee; font-weight:500; \${loserCellStyle}">\${l.symbol}</td>
+                                <td style="padding:12px; border-bottom:1px solid #eee; color:\${lColor}; font-weight:700; \${loserCellStyle}">\${l.pnl >= 0 ? '+' : ''}$\${l.pnl.toFixed(4)}</td>
+                                <td style="padding:12px; border-bottom:1px solid #eee; color:\${nColor}; font-weight:700; background: #f8f9fa;">\${net >= 0 ? '+' : ''}$\${net.toFixed(4)}</td>
+                                <td style="padding:12px; border-bottom:1px solid #eee; color:\${cColor}; font-weight:700; background: #e8f0fe;">
+                                    \${displayAccumulation >= 0 ? '+' : ''}$\${displayAccumulation.toFixed(4)}
+                                    \${i === targetRefIndex ? '<br><span style="font-size:0.7em; color:#f29900;">★ Nth Row Ref Gate</span>' : ''}
+                                </td>
+                            </tr>\`;
                         }
-                        liveHtml += '</table></div>';
+                        liveHtml += '</table>';
                         
-                        let dynamicInfoHtml = '<div class="info-banner" style="color: var(--primary-color); font-weight: 500;">' +
-                            '<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; flex-wrap:wrap; gap:12px;">' +
-                                '<div>🎯 Strict Take Profit: $' + targetV1.toFixed(4) + '</div>' +
-                                '<div>🛑 Full Group Stop: $' + fullGroupSl.toFixed(4) + '</div>' +
-                                '<div><span style="color:var(--warning-color);">★</span> Row ' + bottomRowN + ' Gate Limit: $' + stopLossNth.toFixed(4) + '</div>' +
-                            '</div>' +
-                            lossTrackerHtml +
-                            '<div style="margin-top: 10px; padding-top: 10px; border-top: 1px dashed var(--border-color); font-size: 1.1em;">' +
-                                'Live Status: ' + topStatusMessage +
-                            '</div>' +
-                        '</div>';
+                        let dynamicInfoHtml = \`<div style="margin-bottom: 12px; padding: 12px; background: #e8f0fe; border: 1px solid #cce0ff; border-radius: 6px; color: #1a73e8; font-weight: 500;">
+                            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                                <div>🎯 Strict Take Profit: $\${targetV1.toFixed(4)}</div>
+                                <div>🛑 Full Group Stop: $\${fullGroupSl.toFixed(4)}</div>
+                                <div><span style="color:#f29900;">★</span> Row \${bottomRowN} Gate Limit: $\${stopLossNth.toFixed(4)}</div>
+                            </div>
+                            \${lossTrackerHtml}
+                            <div style="margin-top: 10px; padding-top: 10px; border-top: 1px dashed #b3d4ff; font-size: 1.1em;">
+                                Live Status: \${topStatusMessage}
+                            </div>
+                        </div>\`;
 
                         document.getElementById('liveOffsetsContainer').innerHTML = dynamicInfoHtml + liveHtml;
                     }
                 }
 
-                if (!document.getElementById('offset2-tab').classList.contains('hidden')) {
+                if (document.getElementById('offset2-tab').style.display === 'block') {
                     activeCandidates.sort((a, b) => b.pnl - a.pnl);
                     const totalCoins = activeCandidates.length;
                     const totalPairs = Math.floor(totalCoins / 2);
@@ -2558,12 +2489,12 @@ app.get('/', (req, res) => {
                     }
 
                     if (totalPairs === 0) {
-                        document.getElementById('liveOffsetsContainer2').innerHTML = '<p style="color:var(--text-muted);">Not enough active trades to form pairs.</p>';
+                        document.getElementById('liveOffsetsContainer2').innerHTML = '<p style="color:#5f6368;">Not enough active trades to form pairs.</p>';
                     } else {
-                        let liveHtml = '<div class="table-responsive"><table>';
-                        liveHtml += '<tr><th>Rank Pair</th><th>Winner Coin</th><th>Winner PNL</th><th>Loser Coin</th><th>Loser PNL</th><th>Live Net Profit</th></tr>';
+                        let liveHtml = '<table style="width:100%; text-align:left; border-collapse:collapse; background:#fff; border-radius:6px; overflow:hidden;">';
+                        liveHtml += '<tr style="background:#e8f0fe;"><th style="padding:12px; border-bottom:2px solid #dadce0;">Rank Pair</th><th style="padding:12px; border-bottom:2px solid #dadce0;">Winner Coin</th><th style="padding:12px; border-bottom:2px solid #dadce0;">Winner PNL</th><th style="padding:12px; border-bottom:2px solid #dadce0;">Loser Coin</th><th style="padding:12px; border-bottom:2px solid #dadce0;">Loser PNL</th><th style="padding:12px; border-bottom:2px solid #dadce0;">Live Net Profit</th></tr>';
 
-                        let topStatusMessage2 = '<span style="color:var(--warning-color);">⏳ Evaluating pairs... Target not reached yet.</span>';
+                        let topStatusMessage2 = '<span style="color:#f29900;">⏳ Evaluating pairs... Target not reached yet.</span>';
 
                         for (let i = 0; i < totalPairs; i++) {
                             const winnerIndex = i;
@@ -2573,9 +2504,9 @@ app.get('/', (req, res) => {
                             const l = activeCandidates[loserIndex];
                             const net = w.pnl + l.pnl;
 
-                            const wColor = w.pnl >= 0 ? 'var(--success-color)' : 'var(--error-color)';
-                            const lColor = l.pnl >= 0 ? 'var(--success-color)' : 'var(--error-color)';
-                            const nColor = net >= 0 ? 'var(--success-color)' : 'var(--error-color)';
+                            const wColor = w.pnl >= 0 ? '#1e8e3e' : '#d93025';
+                            const lColor = l.pnl >= 0 ? '#1e8e3e' : '#d93025';
+                            const nColor = net >= 0 ? '#1e8e3e' : '#d93025';
                             
                             const isTargetHit = (targetV2 > 0 && net >= targetV2);
                             const isSlHit = (v2SlEnabled && limitV2 < 0 && net <= limitV2);
@@ -2583,7 +2514,7 @@ app.get('/', (req, res) => {
                             let statusIcon = '⏳ Evaluating';
                             if (isTargetHit) {
                                 statusIcon = '🔥 Executing (TP)...';
-                                topStatusMessage2 = '<span style="color:var(--success-color); font-weight:bold;">🔥 Executing Pair ' + (winnerIndex+1) + ' (Winner ONLY) for TP!</span>';
+                                topStatusMessage2 = \`<span style="color:#1e8e3e; font-weight:bold;">🔥 Executing Pair \${winnerIndex+1} (Winner ONLY) for TP!</span>\`;
                             } else if (isSlHit) {
                                 let blockedByLimit = false;
                                 if (maxLossPerMin > 0 && (currentMinuteLoss + Math.abs(net)) > maxLossPerMin) {
@@ -2593,60 +2524,60 @@ app.get('/', (req, res) => {
                                 if (blockedByLimit) {
                                     statusIcon = '🛑 Blocked by Limit';
                                     if (topStatusMessage2.includes('Evaluating')) {
-                                        topStatusMessage2 = '<span style="color:var(--error-color); font-weight:bold;">🛑 Stop Loss V2 Reached but Blocked by ' + timeframeSec + 's Limit!</span>';
+                                        topStatusMessage2 = \`<span style="color:#d93025; font-weight:bold;">🛑 Stop Loss V2 Reached but Blocked by \${timeframeSec}s Limit!</span>\`;
                                     }
                                 } else {
                                     statusIcon = '🛑 Executing (SL)...';
-                                    topStatusMessage2 = '<span style="color:var(--error-color); font-weight:bold;">🛑 Executing Pair ' + (winnerIndex+1) + ' (Winner ONLY) for SL!</span>';
+                                    topStatusMessage2 = \`<span style="color:#d93025; font-weight:bold;">🛑 Executing Pair \${winnerIndex+1} (Winner ONLY) for SL!</span>\`;
                                 }
                             } else if (!v2SlEnabled && limitV2 < 0 && net <= limitV2) {
                                 statusIcon = '⏸️ SL Gated (Disabled)';
                             }
 
-                            liveHtml += '<tr>' +
-                                '<td style="font-weight:500; color:var(--text-muted);">' + (winnerIndex + 1) + ' & ' + (loserIndex + 1) + ' <br><span style="font-size:0.75em; color:var(--primary-color)">' + statusIcon + '</span></td>' +
-                                '<td style="font-weight:500;">' + w.symbol + '</td>' +
-                                '<td style="color:' + wColor + '; font-weight:700;">' + (w.pnl >= 0 ? '+' : '') + '$' + w.pnl.toFixed(4) + '</td>' +
-                                '<td style="font-weight:500;">' + l.symbol + '</td>' +
-                                '<td style="color:' + lColor + '; font-weight:700;">' + (l.pnl >= 0 ? '+' : '') + '$' + l.pnl.toFixed(4) + '</td>' +
-                                '<td style="color:' + nColor + '; font-weight:700; background: #fafafa;">' + (net >= 0 ? '+' : '') + '$' + net.toFixed(4) + '</td>' +
-                            '</tr>';
+                            liveHtml += \`<tr>
+                                <td style="padding:12px; border-bottom:1px solid #eee; font-weight:500; color:#5f6368;">\${winnerIndex + 1} & \${loserIndex + 1} <br><span style="font-size:0.75em; color:#1a73e8">\${statusIcon}</span></td>
+                                <td style="padding:12px; border-bottom:1px solid #eee; font-weight:500;">\${w.symbol}</td>
+                                <td style="padding:12px; border-bottom:1px solid #eee; color:\${wColor}; font-weight:700;">\${w.pnl >= 0 ? '+' : ''}$\${w.pnl.toFixed(4)}</td>
+                                <td style="padding:12px; border-bottom:1px solid #eee; font-weight:500;">\${l.symbol}</td>
+                                <td style="padding:12px; border-bottom:1px solid #eee; color:\${lColor}; font-weight:700;">\${l.pnl >= 0 ? '+' : ''}$\${l.pnl.toFixed(4)}</td>
+                                <td style="padding:12px; border-bottom:1px solid #eee; color:\${nColor}; font-weight:700; background: #f8f9fa;">\${net >= 0 ? '+' : ''}$\${net.toFixed(4)}</td>
+                            </tr>\`;
                         }
-                        liveHtml += '</table></div>';
+                        liveHtml += '</table>';
                         
                         if (totalCoins % 2 !== 0) {
                             const midIndex = totalPairs;
                             const mid = activeCandidates[midIndex];
-                            const mColor = mid.pnl >= 0 ? 'var(--success-color)' : 'var(--error-color)';
-                            liveHtml += '<p style="font-size:0.85em; color:var(--text-muted); margin-top:12px;">Middle coin (Rank ' + (midIndex + 1) + ', Unpaired): <strong>' + mid.symbol + '</strong> (<span style="color:' + mColor + '">' + (mid.pnl >= 0 ? '+' : '') + '$' + mid.pnl.toFixed(4) + '</span>)</p>';
+                            const mColor = mid.pnl >= 0 ? '#1e8e3e' : '#d93025';
+                            liveHtml += \`<p style="font-size:0.85em; color:#5f6368; margin-top:12px;">Middle coin (Rank \${midIndex + 1}, Unpaired): <strong>\${mid.symbol}</strong> (<span style="color:\${mColor}">\${mid.pnl >= 0 ? '+' : ''}$\${mid.pnl.toFixed(4)}</span>)</p>\`;
                         }
                         
                         let slGateStatus = '';
                         if (stopLossNth < 0) {
                             slGateStatus = v2SlEnabled 
-                                ? '<span style="color:var(--error-color); font-weight:bold;">ENABLED</span> (V1 Nth Row Accum is ' + nthBottomAccumulation.toFixed(4) + ')' 
-                                : '<span style="color:var(--warning-color); font-weight:bold;">DISABLED / GATED</span> (V1 Nth Row Accum is ' + nthBottomAccumulation.toFixed(4) + ' > Limit)';
+                                ? \`<span style="color:#d93025; font-weight:bold;">ENABLED</span> (V1 Nth Row Accum is \${nthBottomAccumulation.toFixed(4)})\` 
+                                : \`<span style="color:#f29900; font-weight:bold;">DISABLED / GATED</span> (V1 Nth Row Accum is \${nthBottomAccumulation.toFixed(4)} > Limit)\`;
                         } else {
-                            slGateStatus = '<span style="color:var(--success-color); font-weight:bold;">ALWAYS ENABLED</span> (No V1 Gate Set)';
+                            slGateStatus = \`<span style="color:#1e8e3e; font-weight:bold;">ALWAYS ENABLED</span> (No V1 Gate Set)\`;
                         }
 
-                        let dynamicInfoHtml2 = '<div class="info-banner" style="color: var(--primary-color); font-weight: 500;">' +
-                            '<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; flex-wrap:wrap; gap:12px;">' +
-                                '<div>🎯 Strict Take Profit V2: $' + targetV2.toFixed(4) + '</div>' +
-                                '<div>🛑 Strict Stop Loss V2: $' + limitV2.toFixed(4) + '</div>' +
-                                '<div style="font-size: 0.9em;">🛡️ V2 SL Gate Status: ' + slGateStatus + '</div>' +
-                            '</div>' +
-                            lossTrackerHtml +
-                            '<div style="margin-top: 10px; padding-top: 10px; border-top: 1px dashed var(--border-color); font-size: 1.1em;">' +
-                                'Live Status: ' + topStatusMessage2 +
-                            '</div>' +
-                        '</div>';
+                        let dynamicInfoHtml2 = \`<div style="margin-bottom: 12px; padding: 12px; background: #e8f0fe; border: 1px solid #cce0ff; border-radius: 6px; color: #1a73e8; font-weight: 500;">
+                            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                                <div>🎯 Strict Take Profit V2: $\${targetV2.toFixed(4)}</div>
+                                <div>🛑 Strict Stop Loss V2: $\${limitV2.toFixed(4)}</div>
+                                <div style="font-size: 0.9em;">🛡️ V2 SL Gate Status: \${slGateStatus}</div>
+                            </div>
+                            \${lossTrackerHtml}
+                            <div style="margin-top: 10px; padding-top: 10px; border-top: 1px dashed #b3d4ff; font-size: 1.1em;">
+                                Live Status: \${topStatusMessage2}
+                            </div>
+                        </div>\`;
 
                         document.getElementById('liveOffsetsContainer2').innerHTML = dynamicInfoHtml2 + liveHtml;
                     }
                 }
 
-                document.getElementById('globalWinRate').innerText = totalAboveZero + ' / ' + totalTrading;
+                document.getElementById('globalWinRate').innerText = \`\${totalAboveZero} / \${totalTrading}\`;
                 
                 const topPnlEl = document.getElementById('topGlobalUnrealized');
                 topPnlEl.innerText = (globalUnrealized >= 0 ? "+$" : "-$") + Math.abs(globalUnrealized).toFixed(4);
@@ -2668,38 +2599,40 @@ app.get('/', (req, res) => {
                 const statusContainer = document.getElementById('dashboardStatusContainer');
                 
                 if(!myCoins || myCoins.length === 0) {
-                    statusContainer.innerHTML = '<p style="color:var(--text-muted);">No coins added to this profile.</p>';
+                    statusContainer.innerHTML = '<p style="color:#5f6368;">No coins added to this profile.</p>';
                 } else {
                     let html = '';
                     myCoins.forEach(coin => {
                         const state = stateData.coinStates && stateData.coinStates[coin.symbol] ? stateData.coinStates[coin.symbol] : { status: 'Stopped', currentPrice: 0, avgEntry: 0, contracts: 0, currentRoi: 0, unrealizedPnl: 0 };
-                        let statusColor = state.status === 'Running' ? 'var(--success-color)' : 'var(--error-color)';
+                        let statusColor = state.status === 'Running' ? '#1e8e3e' : '#d93025';
                         let roiColorClass = state.currentRoi >= 0 ? 'val green' : 'val red';
                         const displaySide = coin.side || profile.side || 'long';
 
                         if (state.lockUntil && Date.now() < state.lockUntil) {
-                            statusColor = 'var(--warning-color)';
+                            statusColor = '#f29900';
                             state.status = 'Closing / Locked';
                         }
 
-                        html += '<div class="status-box">' +
-                            '<div class="flex-row" style="justify-content: space-between; border-bottom: 1px solid var(--border-color); padding-bottom: 16px; margin-bottom: 16px;">' +
-                                '<div style="font-size: 1.1em; font-weight: 500; color:var(--text-main);">' +
-                                    coin.symbol + ' <span style="font-size: 0.8em; color: var(--text-muted);">(' + displaySide.toUpperCase() + ')</span> - Status: <span style="font-weight:700; color:' + statusColor + ';">' + state.status + '</span>' +
-                                '</div>' +
-                                '<div class="flex-row">' +
-                                    '<button class="btn-green" onclick="toggleCoinBot(\\'' + coin.symbol + '\\', true)">▶ Start</button>' +
-                                    '<button class="btn-red" onclick="toggleCoinBot(\\'' + coin.symbol + '\\', false)">⏹ Stop</button>' +
-                                '</div>' +
-                            '</div>' +
-                            '<div class="stat-grid" style="grid-template-columns: repeat(auto-fit, minmax(100px, 1fr)); text-align: center;">' +
-                                '<div><span class="stat-label">Live Price</span><span class="val">' + (state.currentPrice || 0) + '</span></div>' +
-                                '<div><span class="stat-label">Avg Entry</span><span class="val">' + (state.avgEntry || 0) + '</span></div>' +
-                                '<div><span class="stat-label">Contracts</span><span class="val">' + (state.contracts || 0) + '</span></div>' +
-                                '<div><span class="stat-label">Unrealized PNL</span><span class="' + roiColorClass + '">' + (state.unrealizedPnl || 0).toFixed(4) + '</span></div>' +
-                                '<div><span class="stat-label">ROI %</span><span class="' + roiColorClass + '">' + (state.currentRoi || 0).toFixed(2) + '%</span></div>' +
-                            '</div>' +
-                        '</div>';
+                        html += \`
+                        <div class="status-box">
+                            <div class="flex-row" style="justify-content: space-between; border-bottom: 1px solid #dadce0; padding-bottom: 16px; margin-bottom: 16px;">
+                                <div style="font-size: 1.1em; font-weight: 500;">
+                                    \${coin.symbol} <span style="font-size: 0.8em; color: #5f6368;">(\${displaySide.toUpperCase()})</span> - Status: <span style="font-weight:700; color:\${statusColor};">\${state.status}</span>
+                                </div>
+                                <div class="flex-row">
+                                    <button class="btn-green" onclick="toggleCoinBot('\${coin.symbol}', true)" style="padding: 8px 16px;">▶ Start</button>
+                                    <button class="btn-red" onclick="toggleCoinBot('\${coin.symbol}', false)" style="padding: 8px 16px;">⏹ Stop</button>
+                                </div>
+                            </div>
+                            
+                            <div class="flex-row" style="justify-content: space-between;">
+                                <div><span class="stat-label">Live Price</span><span class="val">\${state.currentPrice || 0}</span></div>
+                                <div><span class="stat-label">Avg Entry</span><span class="val">\${state.avgEntry || 0}</span></div>
+                                <div><span class="stat-label">Contracts</span><span class="val">\${state.contracts || 0}</span></div>
+                                <div><span class="stat-label">Unrealized PNL</span><span class="\${roiColorClass}">\${(state.unrealizedPnl || 0).toFixed(4)}</span></div>
+                                <div><span class="stat-label">ROI %</span><span class="\${roiColorClass}">\${(state.currentRoi || 0).toFixed(2)}%</span></div>
+                            </div>
+                        </div>\`;
                     });
                     statusContainer.innerHTML = html;
                 }
