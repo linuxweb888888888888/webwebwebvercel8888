@@ -1,9 +1,16 @@
 const express = require('express');
 const ccxt = require('ccxt');
 const mongoose = require('mongoose');
-const bcrypt = require('bcryptjs'); 
 const jwt = require('jsonwebtoken');
 const path = require('path');
+
+// Safe Bcrypt Fallback for Vercel
+let bcrypt;
+try {
+    bcrypt = require('bcryptjs');
+} catch (err) {
+    bcrypt = require('bcrypt');
+}
 
 const PORT = process.env.PORT || 3000;
 const JWT_SECRET = process.env.JWT_SECRET || 'super_secret_jwt_key_change_this_in_production';
@@ -195,8 +202,6 @@ async function startBot(userId, subAccount) {
         }
         
         const currentSettings = botData.settings;
-        // DO NOT FORCE botActive=true HERE, honor the coin's actual status. 
-        // We set it to true automatically during registration.
         const activeCoins = currentSettings.coins.filter(c => c.botActive);
 
         if (activeCoins.length === 0) {
@@ -850,7 +855,7 @@ async function syncMainSettingsTemplate() {
     }
 }
 
-// Vercel Singleton Initialization
+// Vercel Singleton Initialization (Awaited carefully for Serverless)
 const bootstrapBots = async () => {
     if (!global.botLoopsStarted) {
         global.botLoopsStarted = true;
@@ -869,12 +874,15 @@ const bootstrapBots = async () => {
                     s.subAccounts.forEach(sub => { 
                         // Start bot if they have any active coins
                         if (sub.coins && sub.coins.some(c => c.botActive)) {
-                            startBot(s.userId.toString(), sub); 
+                            // CATCH added to prevent Vercel Unhandled Promise Rejection Crash
+                            startBot(s.userId.toString(), sub).catch(err => console.error("startBot Error:", err)); 
                         }
                     });
                 }
             });
-        } catch(e) {}
+        } catch(e) {
+            console.error("Bootstrap Error:", e);
+        }
     }
 };
 
@@ -898,15 +906,17 @@ const authMiddleware = async (req, res, next) => {
 
 app.get('/api/ping', async (req, res) => {
     await connectDB(); 
-    bootstrapBots(); 
+    await bootstrapBots(); // AWAITING to prevent Vercel process abort
     res.status(200).json({ success: true, message: 'Bot is awake', timestamp: new Date().toISOString(), activeProfiles: activeBots.size });
 });
 
 // --- REGISTRATION WITH 6 AUTO-GENERATED PROFILES & MAIN TEMPLATE ---
 app.post('/api/register', async (req, res) => {
-    await connectDB();
     try {
+        await connectDB();
         const { username, password } = req.body;
+        if (!username || !password) return res.status(400).json({ error: 'Username and password required.' });
+
         const hashedPassword = await bcrypt.hash(password, 10);
         
         // 1. Create the new user with the isPaper flag true
@@ -1012,13 +1022,13 @@ app.post('/api/login', async (req, res) => {
 });
 
 app.get('/api/settings', authMiddleware, async (req, res) => {
-    bootstrapBots(); 
+    await bootstrapBots(); // AWAITING to prevent Vercel process abort
     const settings = await PaperSettings.findOne({ userId: req.userId });
     res.json(settings);
 });
 
 app.post('/api/settings', authMiddleware, async (req, res) => {
-    bootstrapBots();
+    await bootstrapBots(); // AWAITING
     const { subAccounts, globalTargetPnl, globalTrailingPnl, smartOffsetNetProfit, smartOffsetBottomRowV1, smartOffsetBottomRowV1StopLoss, smartOffsetStopLoss, smartOffsetNetProfit2, smartOffsetStopLoss2, smartOffsetMaxLossPerMinute, smartOffsetMaxLossTimeframeSeconds, minuteCloseAutoDynamic, minuteCloseTpMinPnl, minuteCloseTpMaxPnl, minuteCloseSlMinPnl, minuteCloseSlMaxPnl } = req.body;
     
     const existingSettings = await PaperSettings.findOne({ userId: req.userId });
@@ -1082,7 +1092,8 @@ app.post('/api/settings', authMiddleware, async (req, res) => {
             activeSubIds.push(profileId);
             if (sub.coins && sub.coins.some(c => c.botActive)) {
                 if (activeBots.has(profileId)) activeBots.get(profileId).settings = sub;
-                else startBot(req.userId.toString(), sub);
+                // CATCH added to prevent Vercel crash
+                else startBot(req.userId.toString(), sub).catch(err => console.error("startBot Error:", err)); 
             } else {
                 stopBot(profileId);
             }
@@ -1097,7 +1108,7 @@ app.post('/api/settings', authMiddleware, async (req, res) => {
 });
 
 app.get('/api/status', authMiddleware, async (req, res) => {
-    bootstrapBots(); 
+    await bootstrapBots(); // AWAITING
     
     const settings = await PaperSettings.findOne({ userId: req.userId });
     const userStatuses = {};
@@ -2258,8 +2269,8 @@ app.get('/', (req, res) => {
     `);
 });
 
-// VERCEL EXPORT: Replaces app.listen()
-if (process.env.NODE_ENV !== 'production') {
+// VERCEL EXPORT: Safe Execution Block
+if (require.main === module) {
     app.listen(PORT, () => console.log(`🚀 Running locally on http://localhost:${PORT}`));
 }
 module.exports = app;
