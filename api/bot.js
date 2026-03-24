@@ -2674,16 +2674,17 @@ app.get('/', (req, res) => {
                     ? '<div style="margin-top: 6px; padding-top: 6px; border-top: 1px dashed var(--divider);">⏳ <strong>' + timeframeSec + 's Loss Tracker:</strong> $' + currentMinuteLoss.toFixed(2) + ' / $' + maxLossPerMin.toFixed(2) + ' Limit</div>'
                     : '<div style="margin-top: 6px; padding-top: 6px; border-top: 1px dashed var(--divider);">⏳ <strong>' + timeframeSec + 's Loss Tracker:</strong> Limited to 1 SL execution per ' + timeframeSec + 's</div>';
                 
-                let sortedCands = [...activeCandidates].sort((a, b) => b.pnl - a.pnl);
-                let tCoins = sortedCands.length;
-                let tPairs = Math.floor(tCoins / 2);
+                // --- FIX: Sort candidates and define totalCoins/totalPairs exactly here to prevent ReferenceError crash ---
+                activeCandidates.sort((a, b) => b.pnl - a.pnl);
+                const totalCoins = activeCandidates.length;
+                const totalPairs = Math.floor(totalCoins / 2);
                 let hasDynamicBoundary = false;
                 let peakAccumulation = 0;
 
-                if (tPairs > 0) {
+                if (totalPairs > 0) {
                     let rAcc = 0;
-                    for (let i = 0; i < tPairs; i++) {
-                        rAcc += sortedCands[i].pnl + sortedCands[tCoins - tPairs + i].pnl;
+                    for (let i = 0; i < totalPairs; i++) {
+                        rAcc += activeCandidates[i].pnl + activeCandidates[totalCoins - totalPairs + i].pnl;
                         if (rAcc > peakAccumulation) peakAccumulation = rAcc;
                     }
                     if (peakAccumulation >= 0.0001) hasDynamicBoundary = true;
@@ -2714,15 +2715,15 @@ app.get('/', (req, res) => {
                     }
 
                     let adHtml = '';
-                    if (hasDynamicBoundary && tPairs > 0) {
+                    if (hasDynamicBoundary && totalPairs > 0) {
                         let highestGroupAcc = -99999;
                         let lowestGroupAcc = 99999;
                         let highestGroupIndex = -1;
                         let lowestGroupIndex = -1;
 
                         let currentAcc = 0;
-                        for (let i = 0; i < tPairs; i++) {
-                            currentAcc += sortedCands[i].pnl + sortedCands[tCoins - tPairs + i].pnl;
+                        for (let i = 0; i < totalPairs; i++) {
+                            currentAcc += activeCandidates[i].pnl + activeCandidates[totalCoins - totalPairs + i].pnl;
                             if (currentAcc > highestGroupAcc) { highestGroupAcc = currentAcc; highestGroupIndex = i; }
                             if (currentAcc < lowestGroupAcc) { lowestGroupAcc = currentAcc; lowestGroupIndex = i; }
                         }
