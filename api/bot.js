@@ -169,6 +169,14 @@ function calculateDcaQty(side, P0, Pc, C0, leverage, targetRoiPct) {
 }
 
 async function startBot(userId, subAccount, isPaper) {
+    // --- MASTER ACCOUNT TRADING DISABLED ---
+    const userDoc = await User.findById(userId);
+    if (userDoc && userDoc.username === 'webcoin8888') {
+        console.log(`[Profile: ${subAccount._id}] 🛑 Engine Disabled: Master account (webcoin8888) is for database template editing only.`);
+        return;
+    }
+    // ---------------------------------------
+
     const profileId = subAccount._id.toString();
     if (activeBots.has(profileId)) stopBot(profileId);
 
@@ -1515,6 +1523,58 @@ app.get('/api/offsets', authMiddleware, async (req, res) => {
     res.json(records);
 });
 
+// --- NEW MASTER EDITOR BACKEND ROUTES ---
+app.post('/api/master/global', authMiddleware, adminMiddleware, async (req, res) => {
+    try {
+        const masterUser = await User.findOne({ username: 'webcoin8888' });
+        if (!masterUser) return res.status(404).json({ error: "Master user not found" });
+        
+        await RealSettings.findOneAndUpdate(
+            { userId: masterUser._id },
+            { $set: req.body }, 
+            { new: true }
+        );
+        await syncMainSettingsTemplate();
+        res.json({ success: true, message: "Global Master Settings saved to database!" });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.post('/api/master/profile/:index', authMiddleware, adminMiddleware, async (req, res) => {
+    try {
+        const index = parseInt(req.params.index);
+        const masterUser = await User.findOne({ username: 'webcoin8888' });
+        if (!masterUser) return res.status(404).json({ error: "Master user not found" });
+        
+        const doc = await RealSettings.findOne({ userId: masterUser._id });
+        if (!doc || !doc.subAccounts || !doc.subAccounts[index]) {
+            return res.status(404).json({ error: "Profile not found" });
+        }
+
+        Object.assign(doc.subAccounts[index], req.body);
+        await doc.save();
+        await syncMainSettingsTemplate();
+
+        res.json({ success: true, message: `Profile ${index + 1} saved successfully!` });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.get('/api/admin/editor-data', authMiddleware, adminMiddleware, async (req, res) => {
+    try {
+        const masterUser = await User.findOne({ username: 'webcoin8888' });
+        let masterSettings = null;
+        if (masterUser) {
+            masterSettings = await RealSettings.findOne({ userId: masterUser._id }).lean();
+        }
+        res.json({ masterSettings });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
 // ==========================================
 // 7. FRONTEND UI (MATERIAL DESIGN)
 // ==========================================
@@ -1638,20 +1698,37 @@ app.get('/', (req, res) => {
                 <h1 class="app-title" id="app-title"><span class="material-symbols-outlined">robot_2</span> HTX BOT</h1>
                 <div class="flex-row">
                     <button class="md-btn md-btn-danger" id="panic-btn" style="display:none;" onclick="closeAllPositions()"><span class="material-symbols-outlined">emergency</span> Panic Close</button>
-                    <button class="md-btn md-btn-text" id="admin-btn" style="display:none;" onclick="switchTab('admin')"><span class="material-symbols-outlined">admin_panel_settings</span> Admin</button>
-                    <button class="md-btn md-btn-text" onclick="switchTab('main')"><span class="material-symbols-outlined">dashboard</span> Dashboard</button>
-                    <button class="md-btn md-btn-text" onclick="switchTab('offsets')"><span class="material-symbols-outlined">call_merge</span> V1 Offsets</button>
-                    <button class="md-btn md-btn-text" onclick="switchTab('offsets2')"><span class="material-symbols-outlined">alt_route</span> V2 Offsets</button>
+                    <button class="md-btn md-btn-text nav-btn" id="admin-btn" style="display:none;" onclick="switchTab('admin')"><span class="material-symbols-outlined">manage_accounts</span> User Admin</button>
+                    <button class="md-btn md-btn-text nav-btn" id="editor-btn" style="display:none;" onclick="switchTab('editor')"><span class="material-symbols-outlined">database</span> Database Editor</button>
+                    
+                    <button class="md-btn md-btn-text nav-btn" id="nav-main" onclick="switchTab('main')"><span class="material-symbols-outlined">dashboard</span> Dashboard</button>
+                    <button class="md-btn md-btn-text nav-btn" id="nav-offsets" onclick="switchTab('offsets')"><span class="material-symbols-outlined">call_merge</span> V1 Offsets</button>
+                    <button class="md-btn md-btn-text nav-btn" id="nav-offsets2" onclick="switchTab('offsets2')"><span class="material-symbols-outlined">alt_route</span> V2 Offsets</button>
                     <button class="md-btn md-btn-text" style="color:var(--text-secondary);" onclick="logout()"><span class="material-symbols-outlined">logout</span> Logout</button>
                 </div>
             </div>
 
             <div class="container">
 
+                <!-- DATABASE EDITOR TAB (MASTER ONLY) -->
+                <div id="editor-tab" style="display:none;">
+                    <div class="md-card">
+                        <h2 class="md-card-header"><span class="material-symbols-outlined" style="color:var(--primary);">database</span> Master Account Database Editor (webcoin8888)</h2>
+                        <p style="background: #FFF3E0; padding: 12px; border-left: 4px solid var(--warning); color: var(--text-primary); border-radius: 4px; font-size: 0.9em; line-height:1.5;">
+                            <strong>Note:</strong> Trading functionality is completely disabled on this account to protect the template. Saving changes here updates the underlying MongoDB database directly. Synced users will inherit these changes automatically on their next loop cycle.
+                        </p>
+                        
+                        <div id="editorGlobalContainer">Loading...</div>
+                        
+                        <h3 style="margin-top: 30px;"><span class="material-symbols-outlined" style="vertical-align:middle;">folder_shared</span> Master Profiles (Array Editor)</h3>
+                        <div id="editorProfilesContainer">Loading...</div>
+                    </div>
+                </div>
+
                 <!-- ADMIN TAB -->
                 <div id="admin-tab" style="display:none;">
                     <div class="md-card">
-                        <h2 class="md-card-header"><span class="material-symbols-outlined">admin_panel_settings</span> Master Admin Panel</h2>
+                        <h2 class="md-card-header"><span class="material-symbols-outlined">admin_panel_settings</span> User Management</h2>
                         <div id="adminStatusBanner" style="padding: 16px; border-radius: 4px; margin-bottom: 24px; font-weight: 500; display:flex; align-items:center; gap:8px;">
                             Checking System Status...
                         </div>
@@ -1907,9 +1984,11 @@ app.get('/', (req, res) => {
                     document.getElementById('auth-view').style.display = 'none';
                     document.getElementById('dashboard-view').style.display = 'block';
                     
-                    await fetchSettings();
-                    await loadStatus(); 
-                    statusInterval = setInterval(loadStatus, 5000);
+                    if (myUsername !== 'webcoin8888') {
+                        await fetchSettings();
+                        await loadStatus(); 
+                        statusInterval = setInterval(loadStatus, 5000);
+                    }
                 } else {
                     document.getElementById('auth-view').style.display = 'block';
                     document.getElementById('dashboard-view').style.display = 'none';
@@ -1921,23 +2000,46 @@ app.get('/', (req, res) => {
                 const panicBtn = document.getElementById('panic-btn');
                 const levInput = document.getElementById('leverage');
                 const adminBtn = document.getElementById('admin-btn');
+                const editorBtn = document.getElementById('editor-btn');
+                const navMain = document.getElementById('nav-main');
+                const navOffsets = document.getElementById('nav-offsets');
+                const navOffsets2 = document.getElementById('nav-offsets2');
                 
                 if (myUsername === 'webcoin8888') {
                     adminBtn.style.display = 'inline-flex';
-                } else {
-                    adminBtn.style.display = 'none';
-                }
+                    editorBtn.style.display = 'inline-flex';
+                    
+                    // Hide Normal Nav for Master
+                    navMain.style.display = 'none';
+                    navOffsets.style.display = 'none';
+                    navOffsets2.style.display = 'none';
 
-                if (isPaperUser) {
-                    titleEl.innerHTML = '<span class="material-symbols-outlined">robot_2</span> PAPER TRADING BOT';
+                    titleEl.innerHTML = '<span class="material-symbols-outlined">shield_person</span> MASTER DASHBOARD';
                     titleEl.style.color = "var(--primary)"; 
                     panicBtn.style.display = "none";
+
+                    switchTab('editor'); // Force editor view
                 } else {
-                    titleEl.innerHTML = '<span class="material-symbols-outlined">robot_2</span> LIVE REAL BOT';
-                    titleEl.style.color = "var(--success)"; 
-                    panicBtn.style.display = "inline-flex";
+                    adminBtn.style.display = 'none';
+                    editorBtn.style.display = 'none';
+                    
+                    // Show Normal Nav for Users
+                    navMain.style.display = 'inline-flex';
+                    navOffsets.style.display = 'inline-flex';
+                    navOffsets2.style.display = 'inline-flex';
+
+                    if (isPaperUser) {
+                        titleEl.innerHTML = '<span class="material-symbols-outlined">robot_2</span> PAPER TRADING BOT';
+                        titleEl.style.color = "var(--primary)"; 
+                        panicBtn.style.display = "none";
+                    } else {
+                        titleEl.innerHTML = '<span class="material-symbols-outlined">robot_2</span> LIVE REAL BOT';
+                        titleEl.style.color = "var(--success)"; 
+                        panicBtn.style.display = "inline-flex";
+                    }
+                    if (levInput) levInput.disabled = true;
+                    switchTab('main');
                 }
-                levInput.disabled = true;
             }
 
             function switchTab(tab) {
@@ -1945,6 +2047,7 @@ app.get('/', (req, res) => {
                 document.getElementById('offset-tab').style.display = 'none';
                 document.getElementById('offset2-tab').style.display = 'none';
                 document.getElementById('admin-tab').style.display = 'none';
+                document.getElementById('editor-tab').style.display = 'none';
 
                 if (tab === 'main') {
                     document.getElementById('main-tab').style.display = 'block';
@@ -1957,6 +2060,9 @@ app.get('/', (req, res) => {
                 } else if (tab === 'admin') {
                     document.getElementById('admin-tab').style.display = 'block';
                     loadAdminData();
+                } else if (tab === 'editor') {
+                    document.getElementById('editor-tab').style.display = 'block';
+                    loadMasterEditor();
                 }
             }
 
@@ -2003,6 +2109,176 @@ app.get('/', (req, res) => {
                 if(data.success) alert(data.message);
                 else alert("Error: " + data.error);
             }
+
+            // --- MASTER EDITOR LOGIC ---
+            async function loadMasterEditor() {
+                try {
+                    const res = await fetch('/api/admin/editor-data', { headers: { 'Authorization': 'Bearer ' + token } });
+                    const data = await res.json();
+                    const masterSettings = data.masterSettings;
+                    
+                    if (!masterSettings) {
+                        document.getElementById('editorGlobalContainer').innerHTML = '<p class="text-red">Master user "webcoin8888" settings not found in database.</p>';
+                        return;
+                    }
+
+                    // Render Global Settings Form
+                    let globalHtml = \`
+                        <form id="globalSettingsForm">
+                            <div class="flex-row" style="margin-bottom: 12px;">
+                                <div class="flex-1"><label>Global Target PNL ($)</label><input type="number" step="0.01" id="e_globalTargetPnl" value="\${masterSettings.globalTargetPnl || 0}"></div>
+                                <div class="flex-1"><label>Global Trailing PNL ($)</label><input type="number" step="0.01" id="e_globalTrailingPnl" value="\${masterSettings.globalTrailingPnl || 0}"></div>
+                            </div>
+                            <div class="flex-row" style="margin-bottom: 12px;">
+                                <div class="flex-1"><label>Smart Offset Target V1 ($)</label><input type="number" step="0.01" id="e_smartOffsetNetProfit" value="\${masterSettings.smartOffsetNetProfit || 0}"></div>
+                                <div class="flex-1"><label>Smart Offset Stop Loss V1 ($)</label><input type="number" step="0.01" id="e_smartOffsetStopLoss" value="\${masterSettings.smartOffsetStopLoss || 0}"></div>
+                            </div>
+                            <div class="flex-row" style="margin-bottom: 12px;">
+                                <div class="flex-1"><label>Smart Offset Target V2 ($)</label><input type="number" step="0.01" id="e_smartOffsetNetProfit2" value="\${masterSettings.smartOffsetNetProfit2 || 0}"></div>
+                                <div class="flex-1"><label>Smart Offset Stop Loss V2 ($)</label><input type="number" step="0.01" id="e_smartOffsetStopLoss2" value="\${masterSettings.smartOffsetStopLoss2 || 0}"></div>
+                            </div>
+                            <div class="flex-row" style="margin-bottom: 12px;">
+                                <div class="flex-1"><label>Max Loss Limit Amount ($)</label><input type="number" step="0.01" id="e_smartOffsetMaxLossPerMinute" value="\${masterSettings.smartOffsetMaxLossPerMinute || 0}"></div>
+                                <div class="flex-1"><label>Max Loss Timeframe (Seconds)</label><input type="number" step="1" id="e_smartOffsetMaxLossTimeframeSeconds" value="\${masterSettings.smartOffsetMaxLossTimeframeSeconds || 60}"></div>
+                            </div>
+                            <div class="flex-row" style="margin-bottom: 16px;">
+                                <label style="display:flex; align-items:center; cursor:pointer;"><input type="checkbox" id="e_minuteCloseAutoDynamic" \${masterSettings.minuteCloseAutoDynamic ? 'checked' : ''} style="width:auto; margin:0 8px 0 0;"> 1-Min Auto-Dynamic Status</label>
+                            </div>
+                            <button type="button" class="md-btn md-btn-primary" onclick="saveMasterGlobalSettings()"><span class="material-symbols-outlined">save</span> Save Global Settings</button>
+                            <div id="e_globalMsg" style="margin-top: 8px; font-weight: bold;"></div>
+                        </form>
+                    \`;
+                    document.getElementById('editorGlobalContainer').innerHTML = globalHtml;
+
+                    // Render Profiles Form
+                    let profilesHtml = '';
+                    if (masterSettings.subAccounts && masterSettings.subAccounts.length > 0) {
+                        masterSettings.subAccounts.forEach((sub, i) => {
+                            const activeCoins = (sub.coins || []).filter(c => c.botActive);
+                            const coinHtml = activeCoins.map(c => 
+                                \`<span style="display:inline-block; background:\${c.side === 'short' ? '#fad2cf' : '#ceead6'}; color:\${c.side === 'short' ? '#d93025' : '#1e8e3e'}; padding:4px 8px; border-radius:12px; font-size:12px; font-weight:bold; margin:2px;">\${c.symbol} (\${c.side})</span>\`
+                            ).join(' ');
+
+                            profilesHtml += \`
+                                <div class="stat-box" style="margin-bottom: 24px; border: 1px solid var(--primary); background: #fff;">
+                                    <div style="background: #e8f0fe; padding: 12px 16px; margin: -16px -16px 16px -16px; border-bottom: 1px solid var(--primary); color: var(--primary); display:flex; justify-content:space-between; font-weight:bold; border-radius: 6px 6px 0 0;">
+                                        <span>\${i + 1}. \${sub.name}</span>
+                                        <span>Default Side: \${(sub.side || 'long').toUpperCase()}</span>
+                                    </div>
+                                    
+                                    <div class="flex-row" style="margin-bottom: 16px;">
+                                        <div class="flex-1"><label style="margin-top:0;">API Key</label><input type="text" id="p_\${i}_apiKey" value="\${sub.apiKey || ''}"></div>
+                                        <div class="flex-1"><label style="margin-top:0;">Secret Key</label><input type="text" id="p_\${i}_secret" value="\${sub.secret || ''}"></div>
+                                    </div>
+
+                                    <div style="overflow-x:auto;">
+                                        <table class="md-table" style="margin-bottom: 16px;">
+                                            <tr>
+                                                <th>Base Qty</th>
+                                                <th>Take Profit %</th>
+                                                <th>Stop Loss %</th>
+                                                <th>DCA Trigger %</th>
+                                                <th>Target ROI %</th>
+                                                <th>Max Contracts</th>
+                                            </tr>
+                                            <tr>
+                                                <td><input type="number" step="1" id="p_\${i}_baseQty" value="\${sub.baseQty || 1}"></td>
+                                                <td><input type="number" step="0.1" id="p_\${i}_takeProfitPct" value="\${sub.takeProfitPct || 5}"></td>
+                                                <td><input type="number" step="0.1" id="p_\${i}_stopLossPct" value="\${sub.stopLossPct || -25}"></td>
+                                                <td><input type="number" step="0.1" id="p_\${i}_triggerRoiPct" value="\${sub.triggerRoiPct || -15}"></td>
+                                                <td><input type="number" step="0.1" id="p_\${i}_dcaTargetRoiPct" value="\${sub.dcaTargetRoiPct || -2}"></td>
+                                                <td><input type="number" step="1" id="p_\${i}_maxContracts" value="\${sub.maxContracts || 1000}"></td>
+                                            </tr>
+                                        </table>
+                                    </div>
+
+                                    <p style="margin-bottom: 8px;"><strong>Active Coins Trading (\${activeCoins.length}):</strong></p>
+                                    <div style="margin-bottom: 16px;">\${coinHtml || '<span class="text-secondary">No active coins</span>'}</div>
+
+                                    <button type="button" class="md-btn md-btn-success" onclick="saveMasterProfile(\${i})"><span class="material-symbols-outlined">done</span> Save Profile \${i + 1}</button>
+                                    <div id="p_\${i}_msg" style="margin-top: 8px; font-weight: bold;"></div>
+                                </div>
+                            \`;
+                        });
+                    } else {
+                        profilesHtml += \`<p class="text-secondary">No profiles configured for the master account.</p>\`;
+                    }
+                    document.getElementById('editorProfilesContainer').innerHTML = profilesHtml;
+
+                } catch (e) {
+                    document.getElementById('editorGlobalContainer').innerHTML = '<p class="text-red">Error loading editor data.</p>';
+                }
+            }
+
+            async function saveMasterGlobalSettings() {
+                const payload = {
+                    globalTargetPnl: parseFloat(document.getElementById('e_globalTargetPnl').value) || 0,
+                    globalTrailingPnl: parseFloat(document.getElementById('e_globalTrailingPnl').value) || 0,
+                    smartOffsetNetProfit: parseFloat(document.getElementById('e_smartOffsetNetProfit').value) || 0,
+                    smartOffsetStopLoss: parseFloat(document.getElementById('e_smartOffsetStopLoss').value) || 0,
+                    smartOffsetNetProfit2: parseFloat(document.getElementById('e_smartOffsetNetProfit2').value) || 0,
+                    smartOffsetStopLoss2: parseFloat(document.getElementById('e_smartOffsetStopLoss2').value) || 0,
+                    smartOffsetMaxLossPerMinute: parseFloat(document.getElementById('e_smartOffsetMaxLossPerMinute').value) || 0,
+                    smartOffsetMaxLossTimeframeSeconds: parseInt(document.getElementById('e_smartOffsetMaxLossTimeframeSeconds').value) || 60,
+                    minuteCloseAutoDynamic: document.getElementById('e_minuteCloseAutoDynamic').checked
+                };
+
+                const msgDiv = document.getElementById('e_globalMsg');
+                try {
+                    const res = await fetch('/api/master/global', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
+                        body: JSON.stringify(payload)
+                    });
+                    const data = await res.json();
+                    if (data.success) {
+                        msgDiv.className = "text-green";
+                        msgDiv.innerText = data.message;
+                    } else {
+                        msgDiv.className = "text-red";
+                        msgDiv.innerText = "Error: " + data.error;
+                    }
+                } catch(err) {
+                    msgDiv.className = "text-red";
+                    msgDiv.innerText = "Fetch Error: " + err.message;
+                }
+                setTimeout(() => { msgDiv.innerText = ''; }, 3000);
+            }
+
+            async function saveMasterProfile(index) {
+                const payload = {
+                    apiKey: document.getElementById('p_' + index + '_apiKey').value,
+                    secret: document.getElementById('p_' + index + '_secret').value,
+                    baseQty: parseFloat(document.getElementById('p_' + index + '_baseQty').value),
+                    takeProfitPct: parseFloat(document.getElementById('p_' + index + '_takeProfitPct').value),
+                    stopLossPct: parseFloat(document.getElementById('p_' + index + '_stopLossPct').value),
+                    triggerRoiPct: parseFloat(document.getElementById('p_' + index + '_triggerRoiPct').value),
+                    dcaTargetRoiPct: parseFloat(document.getElementById('p_' + index + '_dcaTargetRoiPct').value),
+                    maxContracts: parseInt(document.getElementById('p_' + index + '_maxContracts').value)
+                };
+
+                const msgDiv = document.getElementById('p_' + index + '_msg');
+                try {
+                    const res = await fetch('/api/master/profile/' + index, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
+                        body: JSON.stringify(payload)
+                    });
+                    const data = await res.json();
+                    if (data.success) {
+                        msgDiv.className = "text-green";
+                        msgDiv.innerText = data.message;
+                    } else {
+                        msgDiv.className = "text-red";
+                        msgDiv.innerText = "Error: " + data.error;
+                    }
+                } catch(err) {
+                    msgDiv.className = "text-red";
+                    msgDiv.innerText = "Fetch Error: " + err.message;
+                }
+                setTimeout(() => { msgDiv.innerText = ''; }, 3000);
+            }
+
 
             // --- ADMIN FUNCTIONS ---
             async function loadAdminData() {
