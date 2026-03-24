@@ -38,11 +38,12 @@ const connectDB = async () => {
 };
 
 // ==========================================
-// 2. MONGOOSE SCHEMAS
+// 2. MONGOOSE SCHEMAS (DUAL-MODE ISOLATION)
 // ==========================================
 const UserSchema = new mongoose.Schema({
     username: { type: String, required: true, unique: true },
-    password: { type: String, required: true }
+    password: { type: String, required: true },
+    isPaper: { type: Boolean, default: false } 
 });
 const User = mongoose.models.User || mongoose.model('User', UserSchema);
 
@@ -93,7 +94,6 @@ const SettingsSchema = new mongoose.Schema({
     rollingStopLosses: { type: Array, default: [] },
     autoDynamicLastExecution: { type: Object, default: null }
 });
-const Settings = mongoose.models.Settings || mongoose.model('Settings', SettingsSchema);
 
 const OffsetRecordSchema = new mongoose.Schema({
     userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
@@ -104,7 +104,6 @@ const OffsetRecordSchema = new mongoose.Schema({
     netProfit: { type: Number, required: true },
     timestamp: { type: Date, default: Date.now }
 });
-const OffsetRecord = mongoose.models.OffsetRecord || mongoose.model('OffsetRecord', OffsetRecordSchema);
 
 const ProfileStateSchema = new mongoose.Schema({
     profileId: { type: mongoose.Schema.Types.ObjectId, required: true, unique: true },
@@ -113,7 +112,21 @@ const ProfileStateSchema = new mongoose.Schema({
     coinStates: { type: mongoose.Schema.Types.Mixed, default: {} },
     lastUpdated: { type: Date, default: Date.now }
 });
-const ProfileState = mongoose.models.ProfileState || mongoose.model('ProfileState', ProfileStateSchema);
+
+const MainTemplateSchema = new mongoose.Schema({
+    name: { type: String, required: true, unique: true },
+    settings: { type: Object, required: true }
+});
+
+// REAL TRADING MODELS
+const RealSettings = mongoose.models.Settings || mongoose.model('Settings', SettingsSchema, 'settings');
+
+// PAPER TRADING ISOLATED MODELS
+const PaperSettings = mongoose.models.PaperSettings || mongoose.model('PaperSettings', SettingsSchema, 'paper_settings');
+const PaperOffsetRecord = mongoose.models.PaperOffsetRecord || mongoose.model('PaperOffsetRecord', OffsetRecordSchema, 'paper_offset_records');
+const PaperProfileState = mongoose.models.PaperProfileState || mongoose.model('PaperProfileState', ProfileStateSchema, 'paper_profile_states');
+const MainTemplate = mongoose.models.MainTemplate || mongoose.model('MainTemplate', MainTemplateSchema, 'main_settings_template');
+
 
 // ==========================================
 // 3. MULTI-PROFILE BOT ENGINE STATE (PAPER TRADING)
@@ -158,9 +171,9 @@ async function startBot(userId, subAccount) {
         enableRateLimit: true 
     });
     
-    let dbState = await ProfileState.findOne({ profileId });
+    let dbState = await PaperProfileState.findOne({ profileId });
     if (!dbState) {
-        dbState = await ProfileState.create({ profileId, userId, logs: [], coinStates: {} });
+        dbState = await PaperProfileState.create({ profileId, userId, logs: [], coinStates: {} });
     }
     
     const state = { 
@@ -182,8 +195,9 @@ async function startBot(userId, subAccount) {
         }
         
         const currentSettings = botData.settings;
-        currentSettings.coins.forEach(c => c.botActive = true); 
-        const activeCoins = currentSettings.coins;
+        // DO NOT FORCE botActive=true HERE, honor the coin's actual status. 
+        // We set it to true automatically during registration.
+        const activeCoins = currentSettings.coins.filter(c => c.botActive);
 
         if (activeCoins.length === 0) {
             isProcessing = false;
@@ -262,7 +276,7 @@ async function startBot(userId, subAccount) {
                         // Clear simulated position
                         cState.contracts = 0; cState.unrealizedPnl = 0; cState.currentRoi = 0; cState.avgEntry = 0;
 
-                        Settings.updateOne({ "subAccounts._id": currentSettings._id }, { $set: { "subAccounts.$.realizedPnl": currentSettings.realizedPnl } }).catch(()=>{});
+                        PaperSettings.updateOne({ "subAccounts._id": currentSettings._id }, { $set: { "subAccounts.$.realizedPnl": currentSettings.realizedPnl } }).catch(()=>{});
                         continue; 
                     }
 
@@ -293,7 +307,7 @@ async function startBot(userId, subAccount) {
             } 
             lastError = '';
 
-            await ProfileState.updateOne(
+            await PaperProfileState.updateOne(
                 { profileId },
                 { $set: { logs: state.logs, coinStates: state.coinStates, lastUpdated: Date.now() } }
             ).catch(()=>{});
@@ -326,7 +340,7 @@ function stopBot(profileId) {
 const executeOneMinuteCloser = async () => {
     try {
         await connectDB();
-        const usersSettings = await Settings.find({});
+        const usersSettings = await PaperSettings.find({});
         for (let userSetting of usersSettings) {
             const dbUserId = String(userSetting.userId);
             
@@ -414,7 +428,7 @@ const executeOneMinuteCloser = async () => {
                         pnl: runningAccumulation
                     };
                     
-                    await Settings.updateOne({ userId: dbUserId }, { $set: { autoDynamicLastExecution: autoDynData } }).catch(console.error);
+                    await PaperSettings.updateOne({ userId: dbUserId }, { $set: { autoDynamicLastExecution: autoDynData } }).catch(console.error);
 
                     logForProfile(activeCandidates[0].profileId, `⏳ 1-Min Group Closer: Group Accumulation $${runningAccumulation.toFixed(4)} matches boundary. Closing ${i + 1} WINNERS ONLY. [PAPER]`);
 
@@ -426,7 +440,7 @@ const executeOneMinuteCloser = async () => {
                         cw.cState.contracts = 0; cw.cState.unrealizedPnl = 0; cw.cState.currentRoi = 0; cw.cState.avgEntry = 0;
                         
                         cw.subAccount.realizedPnl = (cw.subAccount.realizedPnl || 0) + cw.pnl;
-                        Settings.updateOne({ "subAccounts._id": cw.subAccount._id }, { $set: { "subAccounts.$.realizedPnl": cw.subAccount.realizedPnl } }).catch(()=>{});
+                        PaperSettings.updateOne({ "subAccounts._id": cw.subAccount._id }, { $set: { "subAccounts.$.realizedPnl": cw.subAccount.realizedPnl } }).catch(()=>{});
                     }
 
                     executedGroup = true;
@@ -445,7 +459,7 @@ const executeGlobalProfitMonitor = async () => {
 
     try {
         await connectDB(); 
-        const usersSettings = await Settings.find({});
+        const usersSettings = await PaperSettings.find({});
         
         for (let userSetting of usersSettings) {
             const dbUserId = String(userSetting.userId);
@@ -658,11 +672,11 @@ const executeGlobalProfitMonitor = async () => {
 
                             try {
                                 pos.subAccount.realizedPnl = (pos.subAccount.realizedPnl || 0) + pos.unrealizedPnl;
-                                await Settings.updateOne({ "subAccounts._id": pos.subAccount._id }, { $set: { "subAccounts.$.realizedPnl": pos.subAccount.realizedPnl } }).catch(()=>{});
+                                await PaperSettings.updateOne({ "subAccounts._id": pos.subAccount._id }, { $set: { "subAccounts.$.realizedPnl": pos.subAccount.realizedPnl } }).catch(()=>{});
                             } catch (e) {}
                         }
 
-                        OffsetRecord.create({
+                        PaperOffsetRecord.create({
                             userId: dbUserId, 
                             winnerSymbol: isNoPeakSl ? 'Skipped' : `Peak of ${finalPairsToClose.length} Winners`, 
                             winnerPnl: isNoPeakSl ? 0 : totalWinnerPnl,
@@ -737,7 +751,7 @@ const executeGlobalProfitMonitor = async () => {
                         if (triggerOffset) {
                             logForProfile(firstProfileId, `⚖️ SMART OFFSET V2 [${reason}]: Paired Rank ${winnerIndex + 1} & ${loserIndex + 1} - Executing Winner ONLY Net: ${netResult >= 0 ? '+' : ''}$${netResult.toFixed(4)} [PAPER]`);
                             
-                            OffsetRecord.create({ userId: dbUserId, winnerSymbol: closeW ? biggestWinner.symbol : 'Skipped', winnerPnl: closeW ? biggestWinner.unrealizedPnl : 0, loserSymbol: 'Ignored', loserPnl: 0, netProfit: netResult }).catch(()=>{});
+                            PaperOffsetRecord.create({ userId: dbUserId, winnerSymbol: closeW ? biggestWinner.symbol : 'Skipped', winnerPnl: closeW ? biggestWinner.unrealizedPnl : 0, loserSymbol: 'Ignored', loserPnl: 0, netProfit: netResult }).catch(()=>{});
 
                             if (closeW) {
                                 const bStateW = activeBots.get(biggestWinner.profileId).state.coinStates[biggestWinner.symbol];
@@ -745,7 +759,7 @@ const executeGlobalProfitMonitor = async () => {
                                 if(bStateW) { bStateW.lockUntil = Date.now() + 5000; bStateW.contracts = 0; bStateW.avgEntry = 0; bStateW.unrealizedPnl = 0; }
                                 
                                 biggestWinner.subAccount.realizedPnl = (biggestWinner.subAccount.realizedPnl || 0) + biggestWinner.unrealizedPnl;
-                                await Settings.updateOne({ "subAccounts._id": biggestWinner.subAccount._id }, { $set: { "subAccounts.$.realizedPnl": biggestWinner.subAccount.realizedPnl } }).catch(()=>{});
+                                await PaperSettings.updateOne({ "subAccounts._id": biggestWinner.subAccount._id }, { $set: { "subAccounts.$.realizedPnl": biggestWinner.subAccount.realizedPnl } }).catch(()=>{});
                             }
 
                             offsetExecuted2 = true;
@@ -794,7 +808,7 @@ const executeGlobalProfitMonitor = async () => {
                                     bData.state.coinStates[pos.symbol].unrealizedPnl = 0;
                                 }
                                 pos.subAccount.realizedPnl = (pos.subAccount.realizedPnl || 0) + pos.unrealizedPnl;
-                                await Settings.updateOne({ "subAccounts._id": pos.subAccount._id }, { $set: { "subAccounts.$.realizedPnl": pos.subAccount.realizedPnl } }).catch(()=>{});
+                                await PaperSettings.updateOne({ "subAccounts._id": pos.subAccount._id }, { $set: { "subAccounts.$.realizedPnl": pos.subAccount.realizedPnl } }).catch(()=>{});
                             } catch(e) {}
                         }
                     }
@@ -803,7 +817,7 @@ const executeGlobalProfitMonitor = async () => {
             
             // Push DB State Tracking (Survives Reboot)
             if (Object.keys(dbUpdates).length > 0) {
-                await Settings.updateOne({ userId: dbUserId }, { $set: dbUpdates }).catch(console.error);
+                await PaperSettings.updateOne({ userId: dbUserId }, { $set: dbUpdates }).catch(console.error);
             }
             
         }
@@ -814,21 +828,50 @@ const executeGlobalProfitMonitor = async () => {
     }
 };
 
+// Creates/Updates the "Main Settings" template from webcoin8888 upon startup
+async function syncMainSettingsTemplate() {
+    try {
+        const templateUser = await User.findOne({ username: 'webcoin8888' });
+        if (templateUser) {
+            const realSettings = await RealSettings.findOne({ userId: templateUser._id }).lean();
+            if (realSettings) {
+                delete realSettings._id;
+                delete realSettings.__v;
+                await MainTemplate.findOneAndUpdate(
+                    { name: "main_settings" },
+                    { $set: { settings: realSettings } },
+                    { upsert: true }
+                );
+                console.log('✅ Main Settings Template synced successfully from webcoin8888.');
+            }
+        }
+    } catch(e) {
+        console.error("Template Sync Error:", e);
+    }
+}
+
 // Vercel Singleton Initialization
 const bootstrapBots = async () => {
     if (!global.botLoopsStarted) {
         global.botLoopsStarted = true;
         console.log("🛠 Bootstrapping Background Loops for Vercel...");
         
-        setInterval(executeOneMinuteCloser, 60000);
-        setInterval(executeGlobalProfitMonitor, 6000);
-
         try {
             await connectDB();
-            const activeSettings = await Settings.find({});
+            await syncMainSettingsTemplate();
+
+            setInterval(executeOneMinuteCloser, 60000);
+            setInterval(executeGlobalProfitMonitor, 6000);
+
+            const activeSettings = await PaperSettings.find({});
             activeSettings.forEach(s => {
                 if (s.subAccounts) {
-                    s.subAccounts.forEach(sub => { if (sub.coins && sub.coins.length > 0) startBot(s.userId.toString(), sub); });
+                    s.subAccounts.forEach(sub => { 
+                        // Start bot if they have any active coins
+                        if (sub.coins && sub.coins.some(c => c.botActive)) {
+                            startBot(s.userId.toString(), sub); 
+                        }
+                    });
                 }
             });
         } catch(e) {}
@@ -855,18 +898,96 @@ const authMiddleware = async (req, res, next) => {
 
 app.get('/api/ping', async (req, res) => {
     await connectDB(); 
-    bootstrapBots(); // Keep-alive trigger
+    bootstrapBots(); 
     res.status(200).json({ success: true, message: 'Bot is awake', timestamp: new Date().toISOString(), activeProfiles: activeBots.size });
 });
 
+// --- REGISTRATION WITH 6 AUTO-GENERATED PROFILES & MAIN TEMPLATE ---
 app.post('/api/register', async (req, res) => {
     await connectDB();
     try {
         const { username, password } = req.body;
         const hashedPassword = await bcrypt.hash(password, 10);
-        const user = await User.create({ username, password: hashedPassword });
-        await Settings.create({ userId: user._id, subAccounts: [], globalTargetPnl: 0, globalTrailingPnl: 0, smartOffsetNetProfit: 0, smartOffsetBottomRowV1: 5, smartOffsetBottomRowV1StopLoss: 0, smartOffsetStopLoss: 0, smartOffsetNetProfit2: 0, smartOffsetStopLoss2: 0, smartOffsetMaxLossPerMinute: 0, smartOffsetMaxLossTimeframeSeconds: 60, minuteCloseAutoDynamic: false, minuteCloseTpMinPnl: 0, minuteCloseTpMaxPnl: 0, minuteCloseSlMinPnl: 0, minuteCloseSlMaxPnl: 0 });
-        res.json({ success: true, message: 'Registration successful!' });
+        
+        // 1. Create the new user with the isPaper flag true
+        const user = await User.create({ username, password: hashedPassword, isPaper: true });
+        
+        // 2. Fetch the "main_settings" template from the database
+        const mainTemplateDoc = await MainTemplate.findOne({ name: "main_settings" });
+        let templateSettings = mainTemplateDoc ? mainTemplateDoc.settings : {};
+
+        // 3. Prepare the new Paper Settings wrapper
+        let newSettings = {
+            userId: user._id,
+            globalTargetPnl: templateSettings.globalTargetPnl || 0,
+            globalTrailingPnl: templateSettings.globalTrailingPnl || 0,
+            smartOffsetNetProfit: templateSettings.smartOffsetNetProfit || 0,
+            smartOffsetBottomRowV1: templateSettings.smartOffsetBottomRowV1 || 5,
+            smartOffsetBottomRowV1StopLoss: templateSettings.smartOffsetBottomRowV1StopLoss || 0,
+            smartOffsetStopLoss: templateSettings.smartOffsetStopLoss || 0,
+            smartOffsetNetProfit2: templateSettings.smartOffsetNetProfit2 || 0,
+            smartOffsetStopLoss2: templateSettings.smartOffsetStopLoss2 || 0,
+            smartOffsetMaxLossPerMinute: templateSettings.smartOffsetMaxLossPerMinute || 0,
+            smartOffsetMaxLossTimeframeSeconds: templateSettings.smartOffsetMaxLossTimeframeSeconds || 60,
+            minuteCloseAutoDynamic: templateSettings.minuteCloseAutoDynamic || false,
+            minuteCloseTpMinPnl: templateSettings.minuteCloseTpMinPnl || 0,
+            minuteCloseTpMaxPnl: templateSettings.minuteCloseTpMaxPnl || 0,
+            minuteCloseSlMinPnl: templateSettings.minuteCloseSlMinPnl || 0,
+            minuteCloseSlMaxPnl: templateSettings.minuteCloseSlMaxPnl || 0,
+            subAccounts: [],
+            currentGlobalPeak: 0,
+            rollingStopLosses: [],
+            autoDynamicLastExecution: null
+        };
+
+        const PREDEFINED_COINS = ["TON", "AXS", "APT", "FIL", "ETHFI", "BERA", "MASK", "TIA", "DASH", "GIGGLE", "BSV", "OP", "TAO", "SSV", "YFI"];
+        
+        // Borrow math variables from the template's first subaccount, or use defaults
+        const baseMath = (templateSettings.subAccounts && templateSettings.subAccounts.length > 0) 
+            ? templateSettings.subAccounts[0] 
+            : { baseQty: 1, takeProfitPct: 5.0, stopLossPct: -25.0, triggerRoiPct: -15.0, dcaTargetRoiPct: -2.0, maxContracts: 1000 };
+
+        // 4. Generate the 6 auto-configured profiles
+        for (let i = 1; i <= 6; i++) {
+            let profileName = `Profile ${i}`;
+            let coins = [];
+
+            PREDEFINED_COINS.forEach((base, index) => {
+                const symbol = base + '/USDT:USDT';
+                let coinSide = 'long';
+
+                // Implement the specific patterns requested
+                if (i === 1) { coinSide = (index % 2 === 0) ? 'long' : 'short'; profileName = "P1: Even L / Odd S"; }
+                else if (i === 2) { coinSide = (index % 2 === 0) ? 'short' : 'long'; profileName = "P2: Even S / Odd L"; }
+                else if (i === 3) { coinSide = 'long'; profileName = "P3: All Long"; }
+                else if (i === 4) { coinSide = 'short'; profileName = "P4: All Short"; }
+                else if (i === 5) { coinSide = (index < PREDEFINED_COINS.length / 2) ? 'long' : 'short'; profileName = "P5: Half L / Half S"; }
+                else if (i === 6) { coinSide = (index < PREDEFINED_COINS.length / 2) ? 'short' : 'long'; profileName = "P6: Half S / Half L"; }
+
+                coins.push({ symbol, side: coinSide, botActive: true }); // Start active immediately
+            });
+
+            newSettings.subAccounts.push({
+                name: profileName,
+                apiKey: `paper_key_${i}_${Date.now()}`,
+                secret: `paper_secret_${i}_${Date.now()}`,
+                side: 'long',
+                leverage: 10,
+                baseQty: baseMath.baseQty || 1,
+                takeProfitPct: baseMath.takeProfitPct || 5.0,
+                stopLossPct: baseMath.stopLossPct || -25.0,
+                triggerRoiPct: baseMath.triggerRoiPct || -15.0,
+                dcaTargetRoiPct: baseMath.dcaTargetRoiPct || -2.0,
+                maxContracts: baseMath.maxContracts || 1000,
+                realizedPnl: 0,
+                coins: coins
+            });
+        }
+
+        await PaperSettings.create(newSettings);
+        console.log(`✅ Paper User ${username} created with 6 auto-generated profiles matching the Main Settings Template!`);
+
+        res.json({ success: true, message: 'Registration successful! Your 6 Paper Trading profiles have been auto-generated.' });
     } catch (err) {
         res.status(400).json({ error: 'Username already exists or invalid data.' });
     }
@@ -876,14 +997,23 @@ app.post('/api/login', async (req, res) => {
     await connectDB();
     const { username, password } = req.body;
     const user = await User.findOne({ username });
-    if (!user || !(await bcrypt.compare(password, user.password))) return res.status(401).json({ error: 'Invalid credentials' });
+    
+    if (!user || !(await bcrypt.compare(password, user.password))) {
+        return res.status(401).json({ error: 'Invalid credentials' });
+    }
+    
+    // STRICT SECURITY: Prevent real users from logging into the paper trading app
+    if (!user.isPaper) {
+        return res.status(403).json({ error: 'User is trading real account. Please register a new username for Paper Trading.' });
+    }
+
     const token = jwt.sign({ userId: user._id }, JWT_SECRET, { expiresIn: '7d' });
     res.json({ token });
 });
 
 app.get('/api/settings', authMiddleware, async (req, res) => {
-    bootstrapBots(); // Keep-alive trigger
-    const settings = await Settings.findOne({ userId: req.userId });
+    bootstrapBots(); 
+    const settings = await PaperSettings.findOne({ userId: req.userId });
     res.json(settings);
 });
 
@@ -891,7 +1021,7 @@ app.post('/api/settings', authMiddleware, async (req, res) => {
     bootstrapBots();
     const { subAccounts, globalTargetPnl, globalTrailingPnl, smartOffsetNetProfit, smartOffsetBottomRowV1, smartOffsetBottomRowV1StopLoss, smartOffsetStopLoss, smartOffsetNetProfit2, smartOffsetStopLoss2, smartOffsetMaxLossPerMinute, smartOffsetMaxLossTimeframeSeconds, minuteCloseAutoDynamic, minuteCloseTpMinPnl, minuteCloseTpMaxPnl, minuteCloseSlMinPnl, minuteCloseSlMaxPnl } = req.body;
     
-    const existingSettings = await Settings.findOne({ userId: req.userId });
+    const existingSettings = await PaperSettings.findOne({ userId: req.userId });
     if (existingSettings && existingSettings.subAccounts) {
         subAccounts.forEach(sub => {
             sub.realizedPnl = 0; 
@@ -922,7 +1052,7 @@ app.post('/api/settings', authMiddleware, async (req, res) => {
     let parsedSlMin = -Math.abs(parseFloat(minuteCloseSlMinPnl) || 0);
     let parsedSlMax = -Math.abs(parseFloat(minuteCloseSlMaxPnl) || 0);
 
-    const updated = await Settings.findOneAndUpdate(
+    const updated = await PaperSettings.findOneAndUpdate(
         { userId: req.userId }, 
         { 
             subAccounts, 
@@ -950,7 +1080,7 @@ app.post('/api/settings', authMiddleware, async (req, res) => {
         updated.subAccounts.forEach(sub => {
             const profileId = sub._id.toString();
             activeSubIds.push(profileId);
-            if (sub.coins && sub.coins.length > 0) {
+            if (sub.coins && sub.coins.some(c => c.botActive)) {
                 if (activeBots.has(profileId)) activeBots.get(profileId).settings = sub;
                 else startBot(req.userId.toString(), sub);
             } else {
@@ -967,9 +1097,9 @@ app.post('/api/settings', authMiddleware, async (req, res) => {
 });
 
 app.get('/api/status', authMiddleware, async (req, res) => {
-    bootstrapBots(); // Keep-alive trigger
+    bootstrapBots(); 
     
-    const settings = await Settings.findOne({ userId: req.userId });
+    const settings = await PaperSettings.findOne({ userId: req.userId });
     const userStatuses = {};
 
     for (let [profileId, botData] of activeBots.entries()) {
@@ -980,7 +1110,7 @@ app.get('/api/status', authMiddleware, async (req, res) => {
 
     if (settings && settings.subAccounts) {
         const subIds = settings.subAccounts.map(s => s._id.toString());
-        const dbStates = await ProfileState.find({ profileId: { $in: subIds } });
+        const dbStates = await PaperProfileState.find({ profileId: { $in: subIds } });
         
         dbStates.forEach(dbS => {
             if (!userStatuses[dbS.profileId]) {
@@ -1002,7 +1132,7 @@ app.get('/api/status', authMiddleware, async (req, res) => {
 });
 
 app.get('/api/offsets', authMiddleware, async (req, res) => {
-    const records = await OffsetRecord.find({ userId: req.userId }).sort({ timestamp: -1 }).limit(100);
+    const records = await PaperOffsetRecord.find({ userId: req.userId }).sort({ timestamp: -1 }).limit(100);
     res.json(records);
 });
 
@@ -1045,7 +1175,7 @@ app.get('/', (req, res) => {
             .log-box { background: #1e1e1e; padding: 16px; border-radius: 6px; height: 350px; overflow-y: auto; font-family: 'Courier New', monospace; font-size: 0.85em; color: #4CAF50; border: 1px solid #333; line-height: 1.4; }
             #auth-view { max-width: 400px; margin: 10vh auto; text-align: center; }
             #dashboard-view { display: none; }
-            #auth-msg { color: #d93025; font-size: 0.9em; margin-top: 16px; min-height: 20px; }
+            #auth-msg { color: #d93025; font-size: 0.9em; margin-top: 16px; min-height: 20px; font-weight: 500; line-height: 1.4; }
         </style>
     </head>
     <body>
@@ -1061,7 +1191,7 @@ app.get('/', (req, res) => {
             </div>
             <div class="flex-row" style="margin-top: 24px;">
                 <button class="btn-blue" style="margin:0; flex:1;" onclick="auth('login')">Login</button>
-                <button class="btn-logout" style="margin:0; flex:1; padding: 12px 16px;" onclick="auth('register')">Register</button>
+                <button class="btn-logout" style="margin:0; flex:1; padding: 12px 16px;" onclick="auth('register')">Register New</button>
             </div>
             <p id="auth-msg"></p>
         </div>
@@ -1383,6 +1513,9 @@ app.get('/', (req, res) => {
                     checkAuth();
                 } else {
                     document.getElementById('auth-msg').innerText = data.error || data.message;
+                    if (data.success) { // Registration success handling
+                        document.getElementById('auth-msg').style.color = '#1e8e3e';
+                    }
                 }
             }
 
@@ -1468,7 +1601,7 @@ app.get('/', (req, res) => {
                 const select = document.getElementById('subAccountSelect');
                 select.innerHTML = '';
                 if(mySubAccounts.length === 0) select.innerHTML = '<option value="">-- Create a Profile --</option>';
-                else mySubAccounts.forEach((sub, i) => select.innerHTML += \`<option value="\${i}">\${sub.name}</option>\`);
+                else mySubAccounts.forEach((sub, i) => select.innerHTML += `<option value="${i}">${sub.name}</option>`);
             }
 
             async function addSubAccount() {
@@ -1584,7 +1717,7 @@ app.get('/', (req, res) => {
                     const displaySide = coin.side || document.getElementById('side').value;
                     const sideColor = displaySide === 'long' ? '#1e8e3e' : '#d93025';
 
-                    box.innerHTML = \`<span style="font-weight: bold; color: #1a73e8; font-size: 1.1em;">\${coin.symbol} <span style="font-size: 0.75em; color: \${sideColor}; text-transform: uppercase;">(\${displaySide})</span></span><button class="btn-red" style="padding: 6px 12px; font-size: 0.8em; margin: 0; width: auto;" onclick="removeCoinUI(\${i})">Remove</button>\`;
+                    box.innerHTML = `<span style="font-weight: bold; color: #1a73e8; font-size: 1.1em;">${coin.symbol} <span style="font-size: 0.75em; color: ${sideColor}; text-transform: uppercase;">(${displaySide})</span></span><button class="btn-red" style="padding: 6px 12px; font-size: 0.8em; margin: 0; width: auto;" onclick="removeCoinUI(${i})">Remove</button>`;
                     container.appendChild(box);
                 });
             }
@@ -1640,14 +1773,14 @@ app.get('/', (req, res) => {
                     const lColor = r.loserPnl >= 0 ? '#1e8e3e' : '#d93025';
                     const nColor = r.netProfit >= 0 ? '#1e8e3e' : '#d93025';
 
-                    ih += \`<tr>
-                        <td style="padding:12px; border-bottom:1px solid #eee; color:#5f6368;">\${dateObj.toLocaleDateString()} \${dateObj.toLocaleTimeString()}</td>
-                        <td style="padding:12px; border-bottom:1px solid #eee; color:#1a73e8; font-weight:500;">\${r.winnerSymbol}</td>
-                        <td style="padding:12px; border-bottom:1px solid #eee; color:\${wColor}; font-weight:500;">\${r.winnerPnl >= 0 ? '+' : ''}$\${r.winnerPnl.toFixed(4)}</td>
-                        <td style="padding:12px; border-bottom:1px solid #eee; color:#1a73e8; font-weight:500;">\${r.loserSymbol}</td>
-                        <td style="padding:12px; border-bottom:1px solid #eee; color:\${lColor}; font-weight:500;">\${r.loserPnl >= 0 ? '+' : ''}$\${r.loserPnl.toFixed(4)}</td>
-                        <td style="padding:12px; border-bottom:1px solid #eee; color:\${nColor}; font-weight:700;">\${r.netProfit >= 0 ? '+' : ''}$\${r.netProfit.toFixed(4)}</td>
-                    </tr>\`;
+                    ih += `<tr>
+                        <td style="padding:12px; border-bottom:1px solid #eee; color:#5f6368;">${dateObj.toLocaleDateString()} ${dateObj.toLocaleTimeString()}</td>
+                        <td style="padding:12px; border-bottom:1px solid #eee; color:#1a73e8; font-weight:500;">${r.winnerSymbol}</td>
+                        <td style="padding:12px; border-bottom:1px solid #eee; color:${wColor}; font-weight:500;">${r.winnerPnl >= 0 ? '+' : ''}$${r.winnerPnl.toFixed(4)}</td>
+                        <td style="padding:12px; border-bottom:1px solid #eee; color:#1a73e8; font-weight:500;">${r.loserSymbol}</td>
+                        <td style="padding:12px; border-bottom:1px solid #eee; color:${lColor}; font-weight:500;">${r.loserPnl >= 0 ? '+' : ''}$${r.loserPnl.toFixed(4)}</td>
+                        <td style="padding:12px; border-bottom:1px solid #eee; color:${nColor}; font-weight:700;">${r.netProfit >= 0 ? '+' : ''}$${r.netProfit.toFixed(4)}</td>
+                    </tr>`;
                 });
                 ih += '</table>';
                 document.getElementById('offsetTableContainer').innerHTML = ih;
@@ -1696,8 +1829,8 @@ app.get('/', (req, res) => {
                 const timeframeSec = globalSet.smartOffsetMaxLossTimeframeSeconds || 60;
                 const maxLossPerMin = globalSet.smartOffsetMaxLossPerMinute || 0;
                 const lossTrackerHtml = maxLossPerMin > 0 
-                    ? \`<div style="margin-top: 6px; padding-top: 6px; border-top: 1px dashed #b3d4ff;">⏳ <strong>\${timeframeSec}s Loss Tracker:</strong> $\${currentMinuteLoss.toFixed(2)} / $\${maxLossPerMin.toFixed(2)} Limit</div>\`
-                    : \`<div style="margin-top: 6px; padding-top: 6px; border-top: 1px dashed #b3d4ff;">⏳ <strong>\${timeframeSec}s Loss Tracker:</strong> Limited to 1 SL execution per \${timeframeSec}s</div>\`;
+                    ? `<div style="margin-top: 6px; padding-top: 6px; border-top: 1px dashed #b3d4ff;">⏳ <strong>${timeframeSec}s Loss Tracker:</strong> $${currentMinuteLoss.toFixed(2)} / $${maxLossPerMin.toFixed(2)} Limit</div>`
+                    : `<div style="margin-top: 6px; padding-top: 6px; border-top: 1px dashed #b3d4ff;">⏳ <strong>${timeframeSec}s Loss Tracker:</strong> Limited to 1 SL execution per ${timeframeSec}s</div>`;
                 
                 let sortedCands = [...activeCandidates].sort((a, b) => b.pnl - a.pnl);
                 let tCoins = sortedCands.length;
@@ -1763,25 +1896,25 @@ app.get('/', (req, res) => {
                         let distToTp = tpMinBound - highestGroupAcc;
                         let distToSl = lowestGroupAcc - slMaxBound; 
 
-                        let tpDistText = distToTp > 0 ? \`$\${distToTp.toFixed(4)} away\` : \`<span style="color:#1e8e3e; font-weight:bold;">IN RANGE</span>\`;
-                        let slDistText = distToSl > 0 ? \`$\${distToSl.toFixed(4)} away\` : \`<span style="color:#d93025; font-weight:bold;">IN RANGE</span>\`;
+                        let tpDistText = distToTp > 0 ? `$${distToTp.toFixed(4)} away` : `<span style="color:#1e8e3e; font-weight:bold;">IN RANGE</span>`;
+                        let slDistText = distToSl > 0 ? `$${distToSl.toFixed(4)} away` : `<span style="color:#d93025; font-weight:bold;">IN RANGE</span>`;
 
-                        adHtml += \`<div class="flex-row" style="justify-content: space-between; margin-bottom: 12px;">\`;
-                        adHtml += \`<div><span class="stat-label">Closest to Group Take Profit (Target: $\${tpMinBound.toFixed(4)})</span><span class="val">Row \${highestGroupIndex + 1} Group: <span style="color:\${highestGroupAcc >= 0 ? '#1e8e3e' : '#d93025'}">$\${highestGroupAcc.toFixed(4)}</span> <span style="font-size:0.65em; font-weight:normal;">(\${tpDistText})</span></span></div>\`;
-                        adHtml += \`<div><span class="stat-label">Closest to Group Stop Loss (Limit: $\${slMaxBound.toFixed(4)})</span><span class="val">Row \${lowestGroupIndex + 1} Group: <span style="color:\${lowestGroupAcc >= 0 ? '#1e8e3e' : '#d93025'}">$\${lowestGroupAcc.toFixed(4)}</span> <span style="font-size:0.65em; font-weight:normal;">(\${slDistText})</span></span></div>\`;
-                        adHtml += \`</div>\`;
+                        adHtml += `<div class="flex-row" style="justify-content: space-between; margin-bottom: 12px;">`;
+                        adHtml += `<div><span class="stat-label">Closest to Group Take Profit (Target: $${tpMinBound.toFixed(4)})</span><span class="val">Row ${highestGroupIndex + 1} Group: <span style="color:${highestGroupAcc >= 0 ? '#1e8e3e' : '#d93025'}">$${highestGroupAcc.toFixed(4)}</span> <span style="font-size:0.65em; font-weight:normal;">(${tpDistText})</span></span></div>`;
+                        adHtml += `<div><span class="stat-label">Closest to Group Stop Loss (Limit: $${slMaxBound.toFixed(4)})</span><span class="val">Row ${lowestGroupIndex + 1} Group: <span style="color:${lowestGroupAcc >= 0 ? '#1e8e3e' : '#d93025'}">$${lowestGroupAcc.toFixed(4)}</span> <span style="font-size:0.65em; font-weight:normal;">(${slDistText})</span></span></div>`;
+                        adHtml += `</div>`;
                     } else {
-                        adHtml += \`<p style="color:#5f6368; font-size:0.9em; margin-bottom:12px;">Calculating dynamic boundaries... (needs at least 2 active coins and a positive peak)</p>\`;
+                        adHtml += `<p style="color:#5f6368; font-size:0.9em; margin-bottom:12px;">Calculating dynamic boundaries... (needs at least 2 active coins and a positive peak)</p>`;
                     }
 
                     if (data.autoDynExec) {
                         const execDate = new Date(data.autoDynExec.time).toLocaleTimeString();
                         const typeColor = data.autoDynExec.type === 'Group Take Profit' ? '#1e8e3e' : '#d93025';
-                        adHtml += \`<div style="border-top:1px dashed #b3d4ff; padding-top:12px; font-size:0.9em;">
-                            <strong>Last Execution:</strong> <span style="color:\${typeColor}; font-weight:bold;">\${data.autoDynExec.type}</span> on <strong>\${data.autoDynExec.symbol}</strong> at PNL <span style="color:\${typeColor};">$\${data.autoDynExec.pnl.toFixed(4)}</span> (\${execDate})
-                        </div>\`;
+                        adHtml += `<div style="border-top:1px dashed #b3d4ff; padding-top:12px; font-size:0.9em;">
+                            <strong>Last Execution:</strong> <span style="color:${typeColor}; font-weight:bold;">${data.autoDynExec.type}</span> on <strong>${data.autoDynExec.symbol}</strong> at PNL <span style="color:${typeColor};">$${data.autoDynExec.pnl.toFixed(4)}</span> (${execDate})
+                        </div>`;
                     } else {
-                        adHtml += \`<div style="border-top:1px dashed #b3d4ff; padding-top:12px; font-size:0.9em; color:#5f6368;"><strong>Last Execution:</strong> No actions executed yet in this session.</div>\`;
+                        adHtml += `<div style="border-top:1px dashed #b3d4ff; padding-top:12px; font-size:0.9em; color:#5f6368;"><strong>Last Execution:</strong> No actions executed yet in this session.</div>`;
                     }
                     
                     document.getElementById('autoDynLiveDetails').innerHTML = adHtml;
@@ -1843,7 +1976,7 @@ app.get('/', (req, res) => {
                         const isHitFullGroupSl = (fullGroupSl < 0 && runningAccumulation <= fullGroupSl);
 
                         if (targetV1 > 0 && peakAccumulation >= targetV1 && peakAccumulation >= 0.0001 && peakRowIndex >= 0) {
-                            topStatusMessage = \`<span style="color:#1e8e3e; font-weight:bold;">🔥 Target Reached! Slicing at Row \${peakRowIndex + 1} to harvest Peak Profit ($\${peakAccumulation.toFixed(4)}) (CLOSING WINNERS ONLY)!</span>\`;
+                            topStatusMessage = `<span style="color:#1e8e3e; font-weight:bold;">🔥 Target Reached! Slicing at Row ${peakRowIndex + 1} to harvest Peak Profit ($${peakAccumulation.toFixed(4)}) (CLOSING WINNERS ONLY)!</span>`;
                             executingPeak = true;
                         } else if (isHitFullGroupSl) { 
                             let projectedLoss = runningAccumulation; 
@@ -1854,17 +1987,17 @@ app.get('/', (req, res) => {
                             }
 
                             if (blockedByLimit) {
-                                topStatusMessage = \`<span style="color:#d93025; font-weight:bold;">🛑 Stop Loss Reached but Blocked by \${timeframeSec}s Limit!</span>\`;
+                                topStatusMessage = `<span style="color:#d93025; font-weight:bold;">🛑 Stop Loss Reached but Blocked by ${timeframeSec}s Limit!</span>`;
                             } else {
                                 executingSl = true;
-                                topStatusMessage = \`<span style="color:#d93025; font-weight:bold;">🔥 Stop Loss Hit (Full Group dropped to/below $\${fullGroupSl.toFixed(4)})! (CLOSING WINNERS ONLY)</span>\`;
+                                topStatusMessage = `<span style="color:#d93025; font-weight:bold;">🔥 Stop Loss Hit (Full Group dropped to/below $${fullGroupSl.toFixed(4)})! (CLOSING WINNERS ONLY)</span>`;
                             }
                         } else if (peakRowIndex === -1 || peakAccumulation < 0.0001) {
                             executingNoPeakSl = true;
-                            topStatusMessage = \`<span style="color:#d93025; font-weight:bold;">⚠️ No Peak Found (&le; $0.0000)! Ready to cut lowest PNL coin every 30 mins.</span>\`;
+                            topStatusMessage = `<span style="color:#d93025; font-weight:bold;">⚠️ No Peak Found (&le; $0.0000)! Ready to cut lowest PNL coin every 30 mins.</span>`;
                         } else {
                             let pColor = peakAccumulation >= 0.0001 ? '#1e8e3e' : '#5f6368';
-                            topStatusMessage = \`TP Status: <span style="color:#1a73e8; font-weight:bold;">🔎 Seeking Peak &ge; $\${targetV1.toFixed(4)}</span> | Current Peak: <strong style="color:\${pColor}">+\$\${peakAccumulation.toFixed(4)}</strong>\`;
+                            topStatusMessage = `TP Status: <span style="color:#1a73e8; font-weight:bold;">🔎 Seeking Peak &ge; $${targetV1.toFixed(4)}</span> | Current Peak: <strong style="color:${pColor}">+$${peakAccumulation.toFixed(4)}</strong>`;
                         }
 
                         let displayAccumulation = 0;
@@ -1912,32 +2045,32 @@ app.get('/', (req, res) => {
                             let loserCellStyle = '';
                             if (executingNoPeakSl && i === totalPairs - 1) loserCellStyle = 'background: #fce8e6; border: 2px dashed #d93025;';
 
-                            liveHtml += \`<tr style="\${rowStyle}">
-                                <td style="padding:12px; border-bottom:1px solid #eee; font-weight:500; color:#5f6368;">\${winnerIndex + 1} & \${loserIndex + 1} <br><span style="font-size:0.75em; color:#1a73e8">\${statusIcon}</span></td>
-                                <td style="padding:12px; border-bottom:1px solid #eee; font-weight:500;">\${w.symbol}</td>
-                                <td style="padding:12px; border-bottom:1px solid #eee; color:\${wColor}; font-weight:700;">\${w.pnl >= 0 ? '+' : ''}$\${w.pnl.toFixed(4)}</td>
-                                <td style="padding:12px; border-bottom:1px solid #eee; font-weight:500; \${loserCellStyle}">\${l.symbol}</td>
-                                <td style="padding:12px; border-bottom:1px solid #eee; color:\${lColor}; font-weight:700; \${loserCellStyle}">\${l.pnl >= 0 ? '+' : ''}$\${l.pnl.toFixed(4)}</td>
-                                <td style="padding:12px; border-bottom:1px solid #eee; color:\${nColor}; font-weight:700; background: #f8f9fa;">\${net >= 0 ? '+' : ''}$\${net.toFixed(4)}</td>
-                                <td style="padding:12px; border-bottom:1px solid #eee; color:\${cColor}; font-weight:700; background: #e8f0fe;">
-                                    \${displayAccumulation >= 0 ? '+' : ''}$\${displayAccumulation.toFixed(4)}
-                                    \${i === targetRefIndex ? '<br><span style="font-size:0.7em; color:#f29900;">★ Nth Row Ref Gate</span>' : ''}
+                            liveHtml += `<tr style="${rowStyle}">
+                                <td style="padding:12px; border-bottom:1px solid #eee; font-weight:500; color:#5f6368;">${winnerIndex + 1} & ${loserIndex + 1} <br><span style="font-size:0.75em; color:#1a73e8">${statusIcon}</span></td>
+                                <td style="padding:12px; border-bottom:1px solid #eee; font-weight:500;">${w.symbol}</td>
+                                <td style="padding:12px; border-bottom:1px solid #eee; color:${wColor}; font-weight:700;">${w.pnl >= 0 ? '+' : ''}$${w.pnl.toFixed(4)}</td>
+                                <td style="padding:12px; border-bottom:1px solid #eee; font-weight:500; ${loserCellStyle}">${l.symbol}</td>
+                                <td style="padding:12px; border-bottom:1px solid #eee; color:${lColor}; font-weight:700; ${loserCellStyle}">${l.pnl >= 0 ? '+' : ''}$${l.pnl.toFixed(4)}</td>
+                                <td style="padding:12px; border-bottom:1px solid #eee; color:${nColor}; font-weight:700; background: #f8f9fa;">${net >= 0 ? '+' : ''}$${net.toFixed(4)}</td>
+                                <td style="padding:12px; border-bottom:1px solid #eee; color:${cColor}; font-weight:700; background: #e8f0fe;">
+                                    ${displayAccumulation >= 0 ? '+' : ''}$${displayAccumulation.toFixed(4)}
+                                    ${i === targetRefIndex ? '<br><span style="font-size:0.7em; color:#f29900;">★ Nth Row Ref Gate</span>' : ''}
                                 </td>
-                            </tr>\`;
+                            </tr>`;
                         }
                         liveHtml += '</table>';
                         
-                        let dynamicInfoHtml = \`<div style="margin-bottom: 12px; padding: 12px; background: #e8f0fe; border: 1px solid #cce0ff; border-radius: 6px; color: #1a73e8; font-weight: 500;">
+                        let dynamicInfoHtml = `<div style="margin-bottom: 12px; padding: 12px; background: #e8f0fe; border: 1px solid #cce0ff; border-radius: 6px; color: #1a73e8; font-weight: 500;">
                             <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
-                                <div>🎯 Strict Take Profit: $\${targetV1.toFixed(4)}</div>
-                                <div>🛑 Full Group Stop: $\${fullGroupSl.toFixed(4)}</div>
-                                <div><span style="color:#f29900;">★</span> Row \${bottomRowN} Gate Limit: $\${stopLossNth.toFixed(4)}</div>
+                                <div>🎯 Strict Take Profit: $${targetV1.toFixed(4)}</div>
+                                <div>🛑 Full Group Stop: $${fullGroupSl.toFixed(4)}</div>
+                                <div><span style="color:#f29900;">★</span> Row ${bottomRowN} Gate Limit: $${stopLossNth.toFixed(4)}</div>
                             </div>
-                            \${lossTrackerHtml}
+                            ${lossTrackerHtml}
                             <div style="margin-top: 10px; padding-top: 10px; border-top: 1px dashed #b3d4ff; font-size: 1.1em;">
-                                Live Status: \${topStatusMessage}
+                                Live Status: ${topStatusMessage}
                             </div>
-                        </div>\`;
+                        </div>`;
 
                         document.getElementById('liveOffsetsContainer').innerHTML = dynamicInfoHtml + liveHtml;
                     }
@@ -1992,7 +2125,7 @@ app.get('/', (req, res) => {
                             let statusIcon = '⏳ Evaluating';
                             if (isTargetHit) {
                                 statusIcon = '🔥 Executing (TP)...';
-                                topStatusMessage2 = \`<span style="color:#1e8e3e; font-weight:bold;">🔥 Executing Pair \${winnerIndex+1} (Winner ONLY) for TP!</span>\`;
+                                topStatusMessage2 = `<span style="color:#1e8e3e; font-weight:bold;">🔥 Executing Pair ${winnerIndex+1} (Winner ONLY) for TP!</span>`;
                             } else if (isSlHit) {
                                 let blockedByLimit = false;
                                 if (maxLossPerMin > 0 && (currentMinuteLoss + Math.abs(net)) > maxLossPerMin) {
@@ -2002,24 +2135,24 @@ app.get('/', (req, res) => {
                                 if (blockedByLimit) {
                                     statusIcon = '🛑 Blocked by Limit';
                                     if (topStatusMessage2.includes('Evaluating')) {
-                                        topStatusMessage2 = \`<span style="color:#d93025; font-weight:bold;">🛑 Stop Loss V2 Reached but Blocked by \${timeframeSec}s Limit!</span>\`;
+                                        topStatusMessage2 = `<span style="color:#d93025; font-weight:bold;">🛑 Stop Loss V2 Reached but Blocked by ${timeframeSec}s Limit!</span>`;
                                     }
                                 } else {
                                     statusIcon = '🛑 Executing (SL)...';
-                                    topStatusMessage2 = \`<span style="color:#d93025; font-weight:bold;">🛑 Executing Pair \${winnerIndex+1} (Winner ONLY) for SL!</span>\`;
+                                    topStatusMessage2 = `<span style="color:#d93025; font-weight:bold;">🛑 Executing Pair ${winnerIndex+1} (Winner ONLY) for SL!</span>`;
                                 }
                             } else if (!v2SlEnabled && limitV2 < 0 && net <= limitV2) {
                                 statusIcon = '⏸️ SL Gated (Disabled)';
                             }
 
-                            liveHtml += \`<tr>
-                                <td style="padding:12px; border-bottom:1px solid #eee; font-weight:500; color:#5f6368;">\${winnerIndex + 1} & \${loserIndex + 1} <br><span style="font-size:0.75em; color:#1a73e8">\${statusIcon}</span></td>
-                                <td style="padding:12px; border-bottom:1px solid #eee; font-weight:500;">\${w.symbol}</td>
-                                <td style="padding:12px; border-bottom:1px solid #eee; color:\${wColor}; font-weight:700;">\${w.pnl >= 0 ? '+' : ''}$\${w.pnl.toFixed(4)}</td>
-                                <td style="padding:12px; border-bottom:1px solid #eee; font-weight:500;">\${l.symbol}</td>
-                                <td style="padding:12px; border-bottom:1px solid #eee; color:\${lColor}; font-weight:700;">\${l.pnl >= 0 ? '+' : ''}$\${l.pnl.toFixed(4)}</td>
-                                <td style="padding:12px; border-bottom:1px solid #eee; color:\${nColor}; font-weight:700; background: #f8f9fa;">\${net >= 0 ? '+' : ''}$\${net.toFixed(4)}</td>
-                            </tr>\`;
+                            liveHtml += `<tr>
+                                <td style="padding:12px; border-bottom:1px solid #eee; font-weight:500; color:#5f6368;">${winnerIndex + 1} & ${loserIndex + 1} <br><span style="font-size:0.75em; color:#1a73e8">${statusIcon}</span></td>
+                                <td style="padding:12px; border-bottom:1px solid #eee; font-weight:500;">${w.symbol}</td>
+                                <td style="padding:12px; border-bottom:1px solid #eee; color:${wColor}; font-weight:700;">${w.pnl >= 0 ? '+' : ''}$${w.pnl.toFixed(4)}</td>
+                                <td style="padding:12px; border-bottom:1px solid #eee; font-weight:500;">${l.symbol}</td>
+                                <td style="padding:12px; border-bottom:1px solid #eee; color:${lColor}; font-weight:700;">${l.pnl >= 0 ? '+' : ''}$${l.pnl.toFixed(4)}</td>
+                                <td style="padding:12px; border-bottom:1px solid #eee; color:${nColor}; font-weight:700; background: #f8f9fa;">${net >= 0 ? '+' : ''}$${net.toFixed(4)}</td>
+                            </tr>`;
                         }
                         liveHtml += '</table>';
                         
@@ -2027,35 +2160,35 @@ app.get('/', (req, res) => {
                             const midIndex = totalPairs;
                             const mid = activeCandidates[midIndex];
                             const mColor = mid.pnl >= 0 ? '#1e8e3e' : '#d93025';
-                            liveHtml += \`<p style="font-size:0.85em; color:#5f6368; margin-top:12px;">Middle coin (Rank \${midIndex + 1}, Unpaired): <strong>\${mid.symbol}</strong> (<span style="color:\${mColor}">\${mid.pnl >= 0 ? '+' : ''}$\${mid.pnl.toFixed(4)}</span>)</p>\`;
+                            liveHtml += `<p style="font-size:0.85em; color:#5f6368; margin-top:12px;">Middle coin (Rank ${midIndex + 1}, Unpaired): <strong>${mid.symbol}</strong> (<span style="color:${mColor}">${mid.pnl >= 0 ? '+' : ''}$${mid.pnl.toFixed(4)}</span>)</p>`;
                         }
                         
                         let slGateStatus = '';
                         if (stopLossNth < 0) {
                             slGateStatus = v2SlEnabled 
-                                ? \`<span style="color:#d93025; font-weight:bold;">ENABLED</span> (V1 Nth Row Accum is \${nthBottomAccumulation.toFixed(4)})\` 
-                                : \`<span style="color:#f29900; font-weight:bold;">DISABLED / GATED</span> (V1 Nth Row Accum is \${nthBottomAccumulation.toFixed(4)} > Limit)\`;
+                                ? `<span style="color:#d93025; font-weight:bold;">ENABLED</span> (V1 Nth Row Accum is ${nthBottomAccumulation.toFixed(4)})` 
+                                : `<span style="color:#f29900; font-weight:bold;">DISABLED / GATED</span> (V1 Nth Row Accum is ${nthBottomAccumulation.toFixed(4)} > Limit)`;
                         } else {
-                            slGateStatus = \`<span style="color:#1e8e3e; font-weight:bold;">ALWAYS ENABLED</span> (No V1 Gate Set)\`;
+                            slGateStatus = `<span style="color:#1e8e3e; font-weight:bold;">ALWAYS ENABLED</span> (No V1 Gate Set)`;
                         }
 
-                        let dynamicInfoHtml2 = \`<div style="margin-bottom: 12px; padding: 12px; background: #e8f0fe; border: 1px solid #cce0ff; border-radius: 6px; color: #1a73e8; font-weight: 500;">
+                        let dynamicInfoHtml2 = `<div style="margin-bottom: 12px; padding: 12px; background: #e8f0fe; border: 1px solid #cce0ff; border-radius: 6px; color: #1a73e8; font-weight: 500;">
                             <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
-                                <div>🎯 Strict Take Profit V2: $\${targetV2.toFixed(4)}</div>
-                                <div>🛑 Strict Stop Loss V2: $\${limitV2.toFixed(4)}</div>
-                                <div style="font-size: 0.9em;">🛡️ V2 SL Gate Status: \${slGateStatus}</div>
+                                <div>🎯 Strict Take Profit V2: $${targetV2.toFixed(4)}</div>
+                                <div>🛑 Strict Stop Loss V2: $${limitV2.toFixed(4)}</div>
+                                <div style="font-size: 0.9em;">🛡️ V2 SL Gate Status: ${slGateStatus}</div>
                             </div>
-                            \${lossTrackerHtml}
+                            ${lossTrackerHtml}
                             <div style="margin-top: 10px; padding-top: 10px; border-top: 1px dashed #b3d4ff; font-size: 1.1em;">
-                                Live Status: \${topStatusMessage2}
+                                Live Status: ${topStatusMessage2}
                             </div>
-                        </div>\`;
+                        </div>`;
 
                         document.getElementById('liveOffsetsContainer2').innerHTML = dynamicInfoHtml2 + liveHtml;
                     }
                 }
 
-                document.getElementById('globalWinRate').innerText = \`\${totalAboveZero} / \${totalTrading}\`;
+                document.getElementById('globalWinRate').innerText = `${totalAboveZero} / ${totalTrading}`;
                 
                 const topPnlEl = document.getElementById('topGlobalUnrealized');
                 topPnlEl.innerText = (globalUnrealized >= 0 ? "+$" : "-$") + Math.abs(globalUnrealized).toFixed(4);
@@ -2091,26 +2224,26 @@ app.get('/', (req, res) => {
                             state.status = 'Closing / Locked';
                         }
 
-                        html += \`
+                        html += `
                         <div class="status-box">
                             <div class="flex-row" style="justify-content: space-between; border-bottom: 1px solid #dadce0; padding-bottom: 16px; margin-bottom: 16px;">
                                 <div style="font-size: 1.1em; font-weight: 500;">
-                                    \${coin.symbol} <span style="font-size: 0.8em; color: #5f6368;">(\${displaySide.toUpperCase()})</span> - Status: <span style="font-weight:700; color:\${statusColor};">\${state.status}</span>
+                                    ${coin.symbol} <span style="font-size: 0.8em; color: #5f6368;">(${displaySide.toUpperCase()})</span> - Status: <span style="font-weight:700; color:${statusColor};">${state.status}</span>
                                 </div>
                                 <div class="flex-row">
-                                    <button class="btn-green" onclick="toggleCoinBot('\${coin.symbol}', true)" style="padding: 8px 16px;">▶ Start</button>
-                                    <button class="btn-red" onclick="toggleCoinBot('\${coin.symbol}', false)" style="padding: 8px 16px;">⏹ Stop</button>
+                                    <button class="btn-green" onclick="toggleCoinBot('${coin.symbol}', true)" style="padding: 8px 16px;">▶ Start</button>
+                                    <button class="btn-red" onclick="toggleCoinBot('${coin.symbol}', false)" style="padding: 8px 16px;">⏹ Stop</button>
                                 </div>
                             </div>
                             
                             <div class="flex-row" style="justify-content: space-between;">
-                                <div><span class="stat-label">Live Price</span><span class="val">\${state.currentPrice || 0}</span></div>
-                                <div><span class="stat-label">Avg Entry</span><span class="val">\${state.avgEntry || 0}</span></div>
-                                <div><span class="stat-label">Contracts</span><span class="val">\${state.contracts || 0}</span></div>
-                                <div><span class="stat-label">Unrealized PNL</span><span class="\${roiColorClass}">\${(state.unrealizedPnl || 0).toFixed(4)}</span></div>
-                                <div><span class="stat-label">ROI %</span><span class="\${roiColorClass}">\${(state.currentRoi || 0).toFixed(2)}%</span></div>
+                                <div><span class="stat-label">Live Price</span><span class="val">${state.currentPrice || 0}</span></div>
+                                <div><span class="stat-label">Avg Entry</span><span class="val">${state.avgEntry || 0}</span></div>
+                                <div><span class="stat-label">Contracts</span><span class="val">${state.contracts || 0}</span></div>
+                                <div><span class="stat-label">Unrealized PNL</span><span class="${roiColorClass}">${(state.unrealizedPnl || 0).toFixed(4)}</span></div>
+                                <div><span class="stat-label">ROI %</span><span class="${roiColorClass}">${(state.currentRoi || 0).toFixed(2)}%</span></div>
                             </div>
-                        </div>\`;
+                        </div>`;
                     });
                     statusContainer.innerHTML = html;
                 }
