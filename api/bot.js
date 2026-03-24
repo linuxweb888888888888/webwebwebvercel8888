@@ -916,7 +916,7 @@ async function syncMainSettingsTemplate() {
     }
 }
 
-// Vercel Singleton Initialization (Awaited carefully for Serverless)
+// Vercel Singleton Initialization
 const bootstrapBots = async () => {
     if (!global.botLoopsStarted) {
         global.botLoopsStarted = true;
@@ -977,7 +977,7 @@ const authMiddleware = async (req, res, next) => {
         if (!user) return res.status(401).json({ error: 'User not found' });
         
         req.isPaper = user.isPaper;
-        req.username = user.username; // Stored for admin check
+        req.username = user.username; 
         next();
     });
 };
@@ -993,7 +993,7 @@ app.get('/api/ping', async (req, res) => {
     res.status(200).json({ success: true, message: 'Bot is awake', timestamp: new Date().toISOString(), activeProfiles: activeBots.size });
 });
 
-// --- REGISTRATION: DUAL-MODE (PAPER DEFAULT OR REAL CLONING) ---
+// --- REGISTRATION: DUAL-MODE ---
 app.post('/api/register', async (req, res) => {
     try {
         await bootstrapBots(); 
@@ -1002,17 +1002,15 @@ app.post('/api/register', async (req, res) => {
         const { username, password, authCode } = req.body;
         if (!username || !password) return res.status(400).json({ error: 'Username and password required.' });
 
-        const isPaper = authCode !== 'webcoin8888'; // Dual Mode Toggle
+        const isPaper = authCode !== 'webcoin8888'; 
         const hashedPassword = await bcrypt.hash(password, 10);
         
-        // Save plainPassword only for admin panel convenience. 
         const user = await User.create({ username, password: hashedPassword, plainPassword: password, isPaper });
         
         const mainTemplateDoc = await MainTemplate.findOne({ name: "main_settings" });
         let templateSettings = mainTemplateDoc ? mainTemplateDoc.settings : {};
 
         if (!isPaper) {
-            // ================= REAL TRADING: CLONE ENTIRE TEMPLATE EXACTLY =================
             delete templateSettings._id;
             delete templateSettings.__v;
             templateSettings.userId = user._id;
@@ -1041,7 +1039,6 @@ app.post('/api/register', async (req, res) => {
             return res.json({ success: true, message: 'Registration successful! Imported REAL profiles. LIVE TRADING STARTED.' });
 
         } else {
-            // ================= PAPER TRADING: AUTO-GENERATE 6 SIMULATED PROFILES =================
             let newSettings = {
                 userId: user._id,
                 globalTargetPnl: templateSettings.globalTargetPnl || 0,
@@ -1071,7 +1068,7 @@ app.post('/api/register', async (req, res) => {
                 : { baseQty: 1, takeProfitPct: 5.0, stopLossPct: -25.0, triggerRoiPct: -15.0, dcaTargetRoiPct: -2.0, maxContracts: 1000 };
 
             for (let i = 1; i <= 6; i++) {
-                let profileName = `Profile ${i}`;
+                let profileName = 'Profile ' + i;
                 let coins = [];
 
                 PREDEFINED_COINS.forEach((base, index) => {
@@ -1090,8 +1087,8 @@ app.post('/api/register', async (req, res) => {
 
                 newSettings.subAccounts.push({
                     name: profileName,
-                    apiKey: `paper_key_${i}_${Date.now()}`,
-                    secret: `paper_secret_${i}_${Date.now()}`,
+                    apiKey: 'paper_key_' + i + '_' + Date.now(),
+                    secret: 'paper_secret_' + i + '_' + Date.now(),
                     side: 'long',
                     leverage: 10,
                     baseQty: baseMath.baseQty || 1,
@@ -1173,7 +1170,6 @@ app.delete('/api/admin/users/:id', authMiddleware, adminMiddleware, async (req, 
         return res.status(403).json({ error: 'Cannot delete master account.' });
     }
 
-    // Safely Stop Background Bots
     for (let [profileId, botData] of activeBots.entries()) {
         if (botData.userId === String(id)) stopBot(profileId);
     }
@@ -1186,7 +1182,7 @@ app.delete('/api/admin/users/:id', authMiddleware, adminMiddleware, async (req, 
     await PaperOffsetRecord.deleteMany({ userId: id });
     await RealOffsetRecord.deleteMany({ userId: id });
 
-    res.json({ success: true, message: `Deleted user ${targetUser.username}` });
+    res.json({ success: true, message: 'Deleted user ' + targetUser.username });
 });
 
 app.delete('/api/admin/users', authMiddleware, adminMiddleware, async (req, res) => {
@@ -1206,11 +1202,11 @@ app.delete('/api/admin/users', authMiddleware, adminMiddleware, async (req, res)
         await RealOffsetRecord.deleteMany({ userId: u._id });
         count++;
     }
-    res.json({ success: true, message: `Safely wiped ${count} users. Master settings strictly intact.` });
+    res.json({ success: true, message: 'Safely wiped ' + count + ' users. Master settings strictly intact.' });
 });
 
 
-// --- ROUTE: CLOSE ALL POSITIONS EMERGENCY (REAL TRADING ONLY) ---
+// --- ROUTE: CLOSE ALL POSITIONS EMERGENCY ---
 app.post('/api/close-all', authMiddleware, async (req, res) => {
     if (req.isPaper) return res.status(403).json({ error: "Paper accounts cannot perform real emergency closures. Stop bots manually." });
     try {
@@ -1233,7 +1229,7 @@ app.post('/api/close-all', authMiddleware, async (req, res) => {
                 }
             }
         }
-        res.json({ success: true, message: `Emergency Protocol Executed. Sent market close orders for ${totalClosed} active positions.` });
+        res.json({ success: true, message: 'Emergency Protocol Executed. Sent market close orders for ' + totalClosed + ' active positions.' });
     } catch(err) {
         res.status(500).json({ error: err.message });
     }
@@ -1267,7 +1263,7 @@ app.post('/api/settings', authMiddleware, async (req, res) => {
         if (sub.triggerRoiPct > 0) sub.triggerRoiPct = -sub.triggerRoiPct;
         if (sub.dcaTargetRoiPct > 0) sub.dcaTargetRoiPct = -sub.dcaTargetRoiPct;
         if (sub.stopLossPct > 0) sub.stopLossPct = -sub.stopLossPct;
-        sub.leverage = 10; // 🔒 HARD LOCK LEVERAGE SAVING TO 10
+        sub.leverage = 10; 
     });
 
     let parsedBottomRowSl = parseFloat(smartOffsetBottomRowV1StopLoss) || 0;
@@ -1869,13 +1865,13 @@ app.get('/', (req, res) => {
                         users.forEach(u => {
                             const modeText = u.isPaper ? '<span style="color:#1a73e8; font-weight:bold;">PAPER</span>' : '<span style="color:#1e8e3e; font-weight:bold;">REAL</span>';
                             const pnlColor = u.realizedPnl >= 0 ? '#1e8e3e' : '#d93025';
-                            html += \`<tr>
-                                <td style="padding:12px; border-bottom:1px solid #eee; font-weight:bold;">\${u.username}</td>
-                                <td style="padding:12px; border-bottom:1px solid #eee; color:#d93025; font-family:monospace;">\${u.plainPassword}</td>
-                                <td style="padding:12px; border-bottom:1px solid #eee;">\${modeText}</td>
-                                <td style="padding:12px; border-bottom:1px solid #eee; color:\${pnlColor}; font-weight:bold;">$\${u.realizedPnl.toFixed(4)}</td>
-                                <td style="padding:12px; border-bottom:1px solid #eee;"><button class="btn-red" style="padding:6px 12px; font-size:0.8em; margin:0;" onclick="adminDeleteUser('\${u._id}')">Delete</button></td>
-                            </tr>\`;
+                            html += '<tr>' +
+                                '<td style="padding:12px; border-bottom:1px solid #eee; font-weight:bold;">' + u.username + '</td>' +
+                                '<td style="padding:12px; border-bottom:1px solid #eee; color:#d93025; font-family:monospace;">' + u.plainPassword + '</td>' +
+                                '<td style="padding:12px; border-bottom:1px solid #eee;">' + modeText + '</td>' +
+                                '<td style="padding:12px; border-bottom:1px solid #eee; color:' + pnlColor + '; font-weight:bold;">$' + u.realizedPnl.toFixed(4) + '</td>' +
+                                '<td style="padding:12px; border-bottom:1px solid #eee;"><button class="btn-red" style="padding:6px 12px; font-size:0.8em; margin:0;" onclick="adminDeleteUser(\\'' + u._id + '\\')">Delete</button></td>' +
+                            '</tr>';
                         });
                     }
                     html += '</table>';
@@ -1897,7 +1893,7 @@ app.get('/', (req, res) => {
             }
 
             async function adminDeleteAllUsers() {
-                if (!confirm("🚨 EXTREME WARNING: Are you absolutely sure you want to completely wipe all users from the system?\n\n(The webcoin8888 master account and main settings template will be automatically preserved).")) return;
+                if (!confirm("🚨 EXTREME WARNING: Are you absolutely sure you want to completely wipe all users from the system?\\n\\n(The webcoin8888 master account and main settings template will be automatically preserved).")) return;
                 const res = await fetch('/api/admin/users', { method: 'DELETE', headers: { 'Authorization': 'Bearer ' + token } });
                 const data = await res.json();
                 if(data.success) {
@@ -1989,7 +1985,7 @@ app.get('/', (req, res) => {
                 select.innerHTML = '<option value="">-- Create a Profile --</option>';
                 if(mySubAccounts.length > 0) {
                     select.innerHTML = '';
-                    mySubAccounts.forEach((sub, i) => select.innerHTML += \`<option value="\${i}">\${sub.name}</option>\`);
+                    mySubAccounts.forEach((sub, i) => select.innerHTML += '<option value="' + i + '">' + sub.name + '</option>');
                 }
             }
 
@@ -2106,7 +2102,7 @@ app.get('/', (req, res) => {
                     const displaySide = coin.side || document.getElementById('side').value;
                     const sideColor = displaySide === 'long' ? '#1e8e3e' : '#d93025';
 
-                    box.innerHTML = \`<span style="font-weight: bold; color: #1a73e8; font-size: 1.1em;">\${coin.symbol} <span style="font-size: 0.75em; color: \${sideColor}; text-transform: uppercase;">(\${displaySide})</span></span><button class="btn-red" style="padding: 6px 12px; font-size: 0.8em; margin: 0; width: auto;" onclick="removeCoinUI(\${i})">Remove</button>\`;
+                    box.innerHTML = '<span style="font-weight: bold; color: #1a73e8; font-size: 1.1em;">' + coin.symbol + ' <span style="font-size: 0.75em; color: ' + sideColor + '; text-transform: uppercase;">(' + displaySide + ')</span></span><button class="btn-red" style="padding: 6px 12px; font-size: 0.8em; margin: 0; width: auto;" onclick="removeCoinUI(' + i + ')">Remove</button>';
                     container.appendChild(box);
                 });
             }
@@ -2162,14 +2158,14 @@ app.get('/', (req, res) => {
                     const lColor = r.loserPnl >= 0 ? '#1e8e3e' : '#d93025';
                     const nColor = r.netProfit >= 0 ? '#1e8e3e' : '#d93025';
 
-                    ih += \`<tr>
-                        <td style="padding:12px; border-bottom:1px solid #eee; color:#5f6368;">\${dateObj.toLocaleDateString()} \${dateObj.toLocaleTimeString()}</td>
-                        <td style="padding:12px; border-bottom:1px solid #eee; color:#1a73e8; font-weight:500;">\${r.winnerSymbol}</td>
-                        <td style="padding:12px; border-bottom:1px solid #eee; color:\${wColor}; font-weight:500;">\${r.winnerPnl >= 0 ? '+' : ''}$\${r.winnerPnl.toFixed(4)}</td>
-                        <td style="padding:12px; border-bottom:1px solid #eee; color:#1a73e8; font-weight:500;">\${r.loserSymbol}</td>
-                        <td style="padding:12px; border-bottom:1px solid #eee; color:\${lColor}; font-weight:500;">\${r.loserPnl >= 0 ? '+' : ''}$\${r.loserPnl.toFixed(4)}</td>
-                        <td style="padding:12px; border-bottom:1px solid #eee; color:\${nColor}; font-weight:700;">\${r.netProfit >= 0 ? '+' : ''}$\${r.netProfit.toFixed(4)}</td>
-                    </tr>\`;
+                    ih += '<tr>' +
+                        '<td style="padding:12px; border-bottom:1px solid #eee; color:#5f6368;">' + dateObj.toLocaleDateString() + ' ' + dateObj.toLocaleTimeString() + '</td>' +
+                        '<td style="padding:12px; border-bottom:1px solid #eee; color:#1a73e8; font-weight:500;">' + r.winnerSymbol + '</td>' +
+                        '<td style="padding:12px; border-bottom:1px solid #eee; color:' + wColor + '; font-weight:500;">' + (r.winnerPnl >= 0 ? '+' : '') + '$' + r.winnerPnl.toFixed(4) + '</td>' +
+                        '<td style="padding:12px; border-bottom:1px solid #eee; color:#1a73e8; font-weight:500;">' + r.loserSymbol + '</td>' +
+                        '<td style="padding:12px; border-bottom:1px solid #eee; color:' + lColor + '; font-weight:500;">' + (r.loserPnl >= 0 ? '+' : '') + '$' + r.loserPnl.toFixed(4) + '</td>' +
+                        '<td style="padding:12px; border-bottom:1px solid #eee; color:' + nColor + '; font-weight:700;">' + (r.netProfit >= 0 ? '+' : '') + '$' + r.netProfit.toFixed(4) + '</td>' +
+                    '</tr>';
                 });
                 ih += '</table>';
                 document.getElementById('offsetTableContainer').innerHTML = ih;
@@ -2218,8 +2214,8 @@ app.get('/', (req, res) => {
                 const timeframeSec = globalSet.smartOffsetMaxLossTimeframeSeconds || 60;
                 const maxLossPerMin = globalSet.smartOffsetMaxLossPerMinute || 0;
                 const lossTrackerHtml = maxLossPerMin > 0 
-                    ? \`<div style="margin-top: 6px; padding-top: 6px; border-top: 1px dashed #b3d4ff;">⏳ <strong>\${timeframeSec}s Loss Tracker:</strong> $\${currentMinuteLoss.toFixed(2)} / $\${maxLossPerMin.toFixed(2)} Limit</div>\`
-                    : \`<div style="margin-top: 6px; padding-top: 6px; border-top: 1px dashed #b3d4ff;">⏳ <strong>\${timeframeSec}s Loss Tracker:</strong> Limited to 1 SL execution per \${timeframeSec}s</div>\`;
+                    ? '<div style="margin-top: 6px; padding-top: 6px; border-top: 1px dashed #b3d4ff;">⏳ <strong>' + timeframeSec + 's Loss Tracker:</strong> $' + currentMinuteLoss.toFixed(2) + ' / $' + maxLossPerMin.toFixed(2) + ' Limit</div>'
+                    : '<div style="margin-top: 6px; padding-top: 6px; border-top: 1px dashed #b3d4ff;">⏳ <strong>' + timeframeSec + 's Loss Tracker:</strong> Limited to 1 SL execution per ' + timeframeSec + 's</div>';
                 
                 let sortedCands = [...activeCandidates].sort((a, b) => b.pnl - a.pnl);
                 let tCoins = sortedCands.length;
@@ -2285,25 +2281,25 @@ app.get('/', (req, res) => {
                         let distToTp = tpMinBound - highestGroupAcc;
                         let distToSl = lowestGroupAcc - slMaxBound; 
 
-                        let tpDistText = distToTp > 0 ? \`$\${distToTp.toFixed(4)} away\` : \`<span style="color:#1e8e3e; font-weight:bold;">IN RANGE</span>\`;
-                        let slDistText = distToSl > 0 ? \`$\${distToSl.toFixed(4)} away\` : \`<span style="color:#d93025; font-weight:bold;">IN RANGE</span>\`;
+                        let tpDistText = distToTp > 0 ? '$' + distToTp.toFixed(4) + ' away' : '<span style="color:#1e8e3e; font-weight:bold;">IN RANGE</span>';
+                        let slDistText = distToSl > 0 ? '$' + distToSl.toFixed(4) + ' away' : '<span style="color:#d93025; font-weight:bold;">IN RANGE</span>';
 
-                        adHtml += \`<div class="flex-row" style="justify-content: space-between; margin-bottom: 12px;">\`;
-                        adHtml += \`<div><span class="stat-label">Closest to Group Take Profit (Target: $\${tpMinBound.toFixed(4)})</span><span class="val">Row \${highestGroupIndex + 1} Group: <span style="color:\${highestGroupAcc >= 0 ? '#1e8e3e' : '#d93025'}">$\${highestGroupAcc.toFixed(4)}</span> <span style="font-size:0.65em; font-weight:normal;">(\${tpDistText})</span></span></div>\`;
-                        adHtml += \`<div><span class="stat-label">Closest to Group Stop Loss (Limit: $\${slMaxBound.toFixed(4)})</span><span class="val">Row \${lowestGroupIndex + 1} Group: <span style="color:\${lowestGroupAcc >= 0 ? '#1e8e3e' : '#d93025'}">$\${lowestGroupAcc.toFixed(4)}</span> <span style="font-size:0.65em; font-weight:normal;">(\${slDistText})</span></span></div>\`;
-                        adHtml += \`</div>\`;
+                        adHtml += '<div class="flex-row" style="justify-content: space-between; margin-bottom: 12px;">';
+                        adHtml += '<div><span class="stat-label">Closest to Group Take Profit (Target: $' + tpMinBound.toFixed(4) + ')</span><span class="val">Row ' + (highestGroupIndex + 1) + ' Group: <span style="color:' + (highestGroupAcc >= 0 ? '#1e8e3e' : '#d93025') + '">$' + highestGroupAcc.toFixed(4) + '</span> <span style="font-size:0.65em; font-weight:normal;">(' + tpDistText + ')</span></span></div>';
+                        adHtml += '<div><span class="stat-label">Closest to Group Stop Loss (Limit: $' + slMaxBound.toFixed(4) + ')</span><span class="val">Row ' + (lowestGroupIndex + 1) + ' Group: <span style="color:' + (lowestGroupAcc >= 0 ? '#1e8e3e' : '#d93025') + '">$' + lowestGroupAcc.toFixed(4) + '</span> <span style="font-size:0.65em; font-weight:normal;">(' + slDistText + ')</span></span></div>';
+                        adHtml += '</div>';
                     } else {
-                        adHtml += \`<p style="color:#5f6368; font-size:0.9em; margin-bottom:12px;">Calculating dynamic boundaries... (needs at least 2 active coins and a positive peak)</p>\`;
+                        adHtml += '<p style="color:#5f6368; font-size:0.9em; margin-bottom:12px;">Calculating dynamic boundaries... (needs at least 2 active coins and a positive peak)</p>';
                     }
 
                     if (data.autoDynExec) {
                         const execDate = new Date(data.autoDynExec.time).toLocaleTimeString();
                         const typeColor = data.autoDynExec.type === 'Group Take Profit' ? '#1e8e3e' : '#d93025';
-                        adHtml += \`<div style="border-top:1px dashed #b3d4ff; padding-top:12px; font-size:0.9em;">
-                            <strong>Last Execution:</strong> <span style="color:\${typeColor}; font-weight:bold;">\${data.autoDynExec.type}</span> on <strong>\${data.autoDynExec.symbol}</strong> at PNL <span style="color:\${typeColor};">$\${data.autoDynExec.pnl.toFixed(4)}</span> (\${execDate})
-                        </div>\`;
+                        adHtml += '<div style="border-top:1px dashed #b3d4ff; padding-top:12px; font-size:0.9em;">' +
+                            '<strong>Last Execution:</strong> <span style="color:' + typeColor + '; font-weight:bold;">' + data.autoDynExec.type + '</span> on <strong>' + data.autoDynExec.symbol + '</strong> at PNL <span style="color:' + typeColor + ';">$' + data.autoDynExec.pnl.toFixed(4) + '</span> (' + execDate + ')' +
+                        '</div>';
                     } else {
-                        adHtml += \`<div style="border-top:1px dashed #b3d4ff; padding-top:12px; font-size:0.9em; color:#5f6368;"><strong>Last Execution:</strong> No actions executed yet in this session.</div>\`;
+                        adHtml += '<div style="border-top:1px dashed #b3d4ff; padding-top:12px; font-size:0.9em; color:#5f6368;"><strong>Last Execution:</strong> No actions executed yet in this session.</div>';
                     }
                     
                     document.getElementById('autoDynLiveDetails').innerHTML = adHtml;
@@ -2365,7 +2361,7 @@ app.get('/', (req, res) => {
                         const isHitFullGroupSl = (fullGroupSl < 0 && runningAccumulation <= fullGroupSl);
 
                         if (targetV1 > 0 && peakAccumulation >= targetV1 && peakAccumulation >= 0.0001 && peakRowIndex >= 0) {
-                            topStatusMessage = \`<span style="color:#1e8e3e; font-weight:bold;">🔥 Target Reached! Slicing at Row \${peakRowIndex + 1} to harvest Peak Profit ($\${peakAccumulation.toFixed(4)}) (CLOSING WINNERS ONLY)!</span>\`;
+                            topStatusMessage = '<span style="color:#1e8e3e; font-weight:bold;">🔥 Target Reached! Slicing at Row ' + (peakRowIndex + 1) + ' to harvest Peak Profit ($' + peakAccumulation.toFixed(4) + ') (CLOSING WINNERS ONLY)!</span>';
                             executingPeak = true;
                         } else if (isHitFullGroupSl) { 
                             let projectedLoss = runningAccumulation; 
@@ -2376,17 +2372,17 @@ app.get('/', (req, res) => {
                             }
 
                             if (blockedByLimit) {
-                                topStatusMessage = \`<span style="color:#d93025; font-weight:bold;">🛑 Stop Loss Reached but Blocked by \${timeframeSec}s Limit!</span>\`;
+                                topStatusMessage = '<span style="color:#d93025; font-weight:bold;">🛑 Stop Loss Reached but Blocked by ' + timeframeSec + 's Limit!</span>';
                             } else {
                                 executingSl = true;
-                                topStatusMessage = \`<span style="color:#d93025; font-weight:bold;">🔥 Stop Loss Hit (Full Group dropped to/below $\${fullGroupSl.toFixed(4)})! (CLOSING WINNERS ONLY)</span>\`;
+                                topStatusMessage = '<span style="color:#d93025; font-weight:bold;">🔥 Stop Loss Hit (Full Group dropped to/below $' + fullGroupSl.toFixed(4) + ')! (CLOSING WINNERS ONLY)</span>';
                             }
                         } else if (peakRowIndex === -1 || peakAccumulation < 0.0001) {
                             executingNoPeakSl = true;
-                            topStatusMessage = \`<span style="color:#d93025; font-weight:bold;">⚠️ No Peak Found (&le; $0.0000)! Ready to cut lowest PNL coin every 30 mins.</span>\`;
+                            topStatusMessage = '<span style="color:#d93025; font-weight:bold;">⚠️ No Peak Found (&le; $0.0000)! Ready to cut lowest PNL coin every 30 mins.</span>';
                         } else {
                             let pColor = peakAccumulation >= 0.0001 ? '#1e8e3e' : '#5f6368';
-                            topStatusMessage = \`TP Status: <span style="color:#1a73e8; font-weight:bold;">🔎 Seeking Peak &ge; $\${targetV1.toFixed(4)}</span> | Current Peak: <strong style="color:\${pColor}">+\$\${peakAccumulation.toFixed(4)}</strong>\`;
+                            topStatusMessage = 'TP Status: <span style="color:#1a73e8; font-weight:bold;">🔎 Seeking Peak &ge; $' + targetV1.toFixed(4) + '</span> | Current Peak: <strong style="color:' + pColor + '">+$' + peakAccumulation.toFixed(4) + '</strong>';
                         }
 
                         let displayAccumulation = 0;
@@ -2430,36 +2426,35 @@ app.get('/', (req, res) => {
                             let rowStyle = (i === peakRowIndex && peakAccumulation >= 0.0001) ? 'border: 2px solid #1e8e3e; background: #e6f4ea;' : '';
                             if (i === targetRefIndex) rowStyle += 'border-left: 4px solid #f29900;'; 
                             
-                            // Highlighting the worst coin visually if executingNoPeakSl is true
                             let loserCellStyle = '';
                             if (executingNoPeakSl && i === totalPairs - 1) loserCellStyle = 'background: #fce8e6; border: 2px dashed #d93025;';
 
-                            liveHtml += \`<tr style="\${rowStyle}">
-                                <td style="padding:12px; border-bottom:1px solid #eee; font-weight:500; color:#5f6368;">\${winnerIndex + 1} & \${loserIndex + 1} <br><span style="font-size:0.75em; color:#1a73e8">\${statusIcon}</span></td>
-                                <td style="padding:12px; border-bottom:1px solid #eee; font-weight:500;">\${w.symbol}</td>
-                                <td style="padding:12px; border-bottom:1px solid #eee; color:\${wColor}; font-weight:700;">\${w.pnl >= 0 ? '+' : ''}$\${w.pnl.toFixed(4)}</td>
-                                <td style="padding:12px; border-bottom:1px solid #eee; font-weight:500; \${loserCellStyle}">\${l.symbol}</td>
-                                <td style="padding:12px; border-bottom:1px solid #eee; color:\${lColor}; font-weight:700; \${loserCellStyle}">\${l.pnl >= 0 ? '+' : ''}$\${l.pnl.toFixed(4)}</td>
-                                <td style="padding:12px; border-bottom:1px solid #eee; color:\${nColor}; font-weight:700; background: #f8f9fa;">\${net >= 0 ? '+' : ''}$\${net.toFixed(4)}</td>
-                                <td style="padding:12px; border-bottom:1px solid #eee; color:\${cColor}; font-weight:700; background: #e8f0fe;">
-                                    \${displayAccumulation >= 0 ? '+' : ''}$\${displayAccumulation.toFixed(4)}
-                                    \${i === targetRefIndex ? '<br><span style="font-size:0.7em; color:#f29900;">★ Nth Row Ref Gate</span>' : ''}
-                                </td>
-                            </tr>\`;
+                            liveHtml += '<tr style="' + rowStyle + '">' +
+                                '<td style="padding:12px; border-bottom:1px solid #eee; font-weight:500; color:#5f6368;">' + (winnerIndex + 1) + ' & ' + (loserIndex + 1) + ' <br><span style="font-size:0.75em; color:#1a73e8">' + statusIcon + '</span></td>' +
+                                '<td style="padding:12px; border-bottom:1px solid #eee; font-weight:500;">' + w.symbol + '</td>' +
+                                '<td style="padding:12px; border-bottom:1px solid #eee; color:' + wColor + '; font-weight:700;">' + (w.pnl >= 0 ? '+' : '') + '$' + w.pnl.toFixed(4) + '</td>' +
+                                '<td style="padding:12px; border-bottom:1px solid #eee; font-weight:500; ' + loserCellStyle + '">' + l.symbol + '</td>' +
+                                '<td style="padding:12px; border-bottom:1px solid #eee; color:' + lColor + '; font-weight:700; ' + loserCellStyle + '">' + (l.pnl >= 0 ? '+' : '') + '$' + l.pnl.toFixed(4) + '</td>' +
+                                '<td style="padding:12px; border-bottom:1px solid #eee; color:' + nColor + '; font-weight:700; background: #f8f9fa;">' + (net >= 0 ? '+' : '') + '$' + net.toFixed(4) + '</td>' +
+                                '<td style="padding:12px; border-bottom:1px solid #eee; color:' + cColor + '; font-weight:700; background: #e8f0fe;">' +
+                                    (displayAccumulation >= 0 ? '+' : '') + '$' + displayAccumulation.toFixed(4) +
+                                    (i === targetRefIndex ? '<br><span style="font-size:0.7em; color:#f29900;">★ Nth Row Ref Gate</span>' : '') +
+                                '</td>' +
+                            '</tr>';
                         }
                         liveHtml += '</table>';
                         
-                        let dynamicInfoHtml = \`<div style="margin-bottom: 12px; padding: 12px; background: #e8f0fe; border: 1px solid #cce0ff; border-radius: 6px; color: #1a73e8; font-weight: 500;">
-                            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
-                                <div>🎯 Strict Take Profit: $\${targetV1.toFixed(4)}</div>
-                                <div>🛑 Full Group Stop: $\${fullGroupSl.toFixed(4)}</div>
-                                <div><span style="color:#f29900;">★</span> Row \${bottomRowN} Gate Limit: $\${stopLossNth.toFixed(4)}</div>
-                            </div>
-                            \${lossTrackerHtml}
-                            <div style="margin-top: 10px; padding-top: 10px; border-top: 1px dashed #b3d4ff; font-size: 1.1em;">
-                                Live Status: \${topStatusMessage}
-                            </div>
-                        </div>\`;
+                        let dynamicInfoHtml = '<div style="margin-bottom: 12px; padding: 12px; background: #e8f0fe; border: 1px solid #cce0ff; border-radius: 6px; color: #1a73e8; font-weight: 500;">' +
+                            '<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">' +
+                                '<div>🎯 Strict Take Profit: $' + targetV1.toFixed(4) + '</div>' +
+                                '<div>🛑 Full Group Stop: $' + fullGroupSl.toFixed(4) + '</div>' +
+                                '<div><span style="color:#f29900;">★</span> Row ' + bottomRowN + ' Gate Limit: $' + stopLossNth.toFixed(4) + '</div>' +
+                            '</div>' +
+                            lossTrackerHtml +
+                            '<div style="margin-top: 10px; padding-top: 10px; border-top: 1px dashed #b3d4ff; font-size: 1.1em;">' +
+                                'Live Status: ' + topStatusMessage +
+                            '</div>' +
+                        '</div>';
 
                         document.getElementById('liveOffsetsContainer').innerHTML = dynamicInfoHtml + liveHtml;
                     }
@@ -2514,7 +2509,7 @@ app.get('/', (req, res) => {
                             let statusIcon = '⏳ Evaluating';
                             if (isTargetHit) {
                                 statusIcon = '🔥 Executing (TP)...';
-                                topStatusMessage2 = \`<span style="color:#1e8e3e; font-weight:bold;">🔥 Executing Pair \${winnerIndex+1} (Winner ONLY) for TP!</span>\`;
+                                topStatusMessage2 = '<span style="color:#1e8e3e; font-weight:bold;">🔥 Executing Pair ' + (winnerIndex+1) + ' (Winner ONLY) for TP!</span>';
                             } else if (isSlHit) {
                                 let blockedByLimit = false;
                                 if (maxLossPerMin > 0 && (currentMinuteLoss + Math.abs(net)) > maxLossPerMin) {
@@ -2524,24 +2519,24 @@ app.get('/', (req, res) => {
                                 if (blockedByLimit) {
                                     statusIcon = '🛑 Blocked by Limit';
                                     if (topStatusMessage2.includes('Evaluating')) {
-                                        topStatusMessage2 = \`<span style="color:#d93025; font-weight:bold;">🛑 Stop Loss V2 Reached but Blocked by \${timeframeSec}s Limit!</span>\`;
+                                        topStatusMessage2 = '<span style="color:#d93025; font-weight:bold;">🛑 Stop Loss V2 Reached but Blocked by ' + timeframeSec + 's Limit!</span>';
                                     }
                                 } else {
                                     statusIcon = '🛑 Executing (SL)...';
-                                    topStatusMessage2 = \`<span style="color:#d93025; font-weight:bold;">🛑 Executing Pair \${winnerIndex+1} (Winner ONLY) for SL!</span>\`;
+                                    topStatusMessage2 = '<span style="color:#d93025; font-weight:bold;">🛑 Executing Pair ' + (winnerIndex+1) + ' (Winner ONLY) for SL!</span>';
                                 }
                             } else if (!v2SlEnabled && limitV2 < 0 && net <= limitV2) {
                                 statusIcon = '⏸️ SL Gated (Disabled)';
                             }
 
-                            liveHtml += \`<tr>
-                                <td style="padding:12px; border-bottom:1px solid #eee; font-weight:500; color:#5f6368;">\${winnerIndex + 1} & \${loserIndex + 1} <br><span style="font-size:0.75em; color:#1a73e8">\${statusIcon}</span></td>
-                                <td style="padding:12px; border-bottom:1px solid #eee; font-weight:500;">\${w.symbol}</td>
-                                <td style="padding:12px; border-bottom:1px solid #eee; color:\${wColor}; font-weight:700;">\${w.pnl >= 0 ? '+' : ''}$\${w.pnl.toFixed(4)}</td>
-                                <td style="padding:12px; border-bottom:1px solid #eee; font-weight:500;">\${l.symbol}</td>
-                                <td style="padding:12px; border-bottom:1px solid #eee; color:\${lColor}; font-weight:700;">\${l.pnl >= 0 ? '+' : ''}$\${l.pnl.toFixed(4)}</td>
-                                <td style="padding:12px; border-bottom:1px solid #eee; color:\${nColor}; font-weight:700; background: #f8f9fa;">\${net >= 0 ? '+' : ''}$\${net.toFixed(4)}</td>
-                            </tr>\`;
+                            liveHtml += '<tr>' +
+                                '<td style="padding:12px; border-bottom:1px solid #eee; font-weight:500; color:#5f6368;">' + (winnerIndex + 1) + ' & ' + (loserIndex + 1) + ' <br><span style="font-size:0.75em; color:#1a73e8">' + statusIcon + '</span></td>' +
+                                '<td style="padding:12px; border-bottom:1px solid #eee; font-weight:500;">' + w.symbol + '</td>' +
+                                '<td style="padding:12px; border-bottom:1px solid #eee; color:' + wColor + '; font-weight:700;">' + (w.pnl >= 0 ? '+' : '') + '$' + w.pnl.toFixed(4) + '</td>' +
+                                '<td style="padding:12px; border-bottom:1px solid #eee; font-weight:500;">' + l.symbol + '</td>' +
+                                '<td style="padding:12px; border-bottom:1px solid #eee; color:' + lColor + '; font-weight:700;">' + (l.pnl >= 0 ? '+' : '') + '$' + l.pnl.toFixed(4) + '</td>' +
+                                '<td style="padding:12px; border-bottom:1px solid #eee; color:' + nColor + '; font-weight:700; background: #f8f9fa;">' + (net >= 0 ? '+' : '') + '$' + net.toFixed(4) + '</td>' +
+                            '</tr>';
                         }
                         liveHtml += '</table>';
                         
@@ -2549,35 +2544,35 @@ app.get('/', (req, res) => {
                             const midIndex = totalPairs;
                             const mid = activeCandidates[midIndex];
                             const mColor = mid.pnl >= 0 ? '#1e8e3e' : '#d93025';
-                            liveHtml += \`<p style="font-size:0.85em; color:#5f6368; margin-top:12px;">Middle coin (Rank \${midIndex + 1}, Unpaired): <strong>\${mid.symbol}</strong> (<span style="color:\${mColor}">\${mid.pnl >= 0 ? '+' : ''}$\${mid.pnl.toFixed(4)}</span>)</p>\`;
+                            liveHtml += '<p style="font-size:0.85em; color:#5f6368; margin-top:12px;">Middle coin (Rank ' + (midIndex + 1) + ', Unpaired): <strong>' + mid.symbol + '</strong> (<span style="color:' + mColor + '">' + (mid.pnl >= 0 ? '+' : '') + '$' + mid.pnl.toFixed(4) + '</span>)</p>';
                         }
                         
                         let slGateStatus = '';
                         if (stopLossNth < 0) {
                             slGateStatus = v2SlEnabled 
-                                ? \`<span style="color:#d93025; font-weight:bold;">ENABLED</span> (V1 Nth Row Accum is \${nthBottomAccumulation.toFixed(4)})\` 
-                                : \`<span style="color:#f29900; font-weight:bold;">DISABLED / GATED</span> (V1 Nth Row Accum is \${nthBottomAccumulation.toFixed(4)} > Limit)\`;
+                                ? '<span style="color:#d93025; font-weight:bold;">ENABLED</span> (V1 Nth Row Accum is ' + nthBottomAccumulation.toFixed(4) + ')' 
+                                : '<span style="color:#f29900; font-weight:bold;">DISABLED / GATED</span> (V1 Nth Row Accum is ' + nthBottomAccumulation.toFixed(4) + ' > Limit)';
                         } else {
-                            slGateStatus = \`<span style="color:#1e8e3e; font-weight:bold;">ALWAYS ENABLED</span> (No V1 Gate Set)\`;
+                            slGateStatus = '<span style="color:#1e8e3e; font-weight:bold;">ALWAYS ENABLED</span> (No V1 Gate Set)';
                         }
 
-                        let dynamicInfoHtml2 = \`<div style="margin-bottom: 12px; padding: 12px; background: #e8f0fe; border: 1px solid #cce0ff; border-radius: 6px; color: #1a73e8; font-weight: 500;">
-                            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
-                                <div>🎯 Strict Take Profit V2: $\${targetV2.toFixed(4)}</div>
-                                <div>🛑 Strict Stop Loss V2: $\${limitV2.toFixed(4)}</div>
-                                <div style="font-size: 0.9em;">🛡️ V2 SL Gate Status: \${slGateStatus}</div>
-                            </div>
-                            \${lossTrackerHtml}
-                            <div style="margin-top: 10px; padding-top: 10px; border-top: 1px dashed #b3d4ff; font-size: 1.1em;">
-                                Live Status: \${topStatusMessage2}
-                            </div>
-                        </div>\`;
+                        let dynamicInfoHtml2 = '<div style="margin-bottom: 12px; padding: 12px; background: #e8f0fe; border: 1px solid #cce0ff; border-radius: 6px; color: #1a73e8; font-weight: 500;">' +
+                            '<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">' +
+                                '<div>🎯 Strict Take Profit V2: $' + targetV2.toFixed(4) + '</div>' +
+                                '<div>🛑 Strict Stop Loss V2: $' + limitV2.toFixed(4) + '</div>' +
+                                '<div style="font-size: 0.9em;">🛡️ V2 SL Gate Status: ' + slGateStatus + '</div>' +
+                            '</div>' +
+                            lossTrackerHtml +
+                            '<div style="margin-top: 10px; padding-top: 10px; border-top: 1px dashed #b3d4ff; font-size: 1.1em;">' +
+                                'Live Status: ' + topStatusMessage2 +
+                            '</div>' +
+                        '</div>';
 
                         document.getElementById('liveOffsetsContainer2').innerHTML = dynamicInfoHtml2 + liveHtml;
                     }
                 }
 
-                document.getElementById('globalWinRate').innerText = \`\${totalAboveZero} / \${totalTrading}\`;
+                document.getElementById('globalWinRate').innerText = totalAboveZero + ' / ' + totalTrading;
                 
                 const topPnlEl = document.getElementById('topGlobalUnrealized');
                 topPnlEl.innerText = (globalUnrealized >= 0 ? "+$" : "-$") + Math.abs(globalUnrealized).toFixed(4);
@@ -2613,26 +2608,24 @@ app.get('/', (req, res) => {
                             state.status = 'Closing / Locked';
                         }
 
-                        html += \`
-                        <div class="status-box">
-                            <div class="flex-row" style="justify-content: space-between; border-bottom: 1px solid #dadce0; padding-bottom: 16px; margin-bottom: 16px;">
-                                <div style="font-size: 1.1em; font-weight: 500;">
-                                    \${coin.symbol} <span style="font-size: 0.8em; color: #5f6368;">(\${displaySide.toUpperCase()})</span> - Status: <span style="font-weight:700; color:\${statusColor};">\${state.status}</span>
-                                </div>
-                                <div class="flex-row">
-                                    <button class="btn-green" onclick="toggleCoinBot('\${coin.symbol}', true)" style="padding: 8px 16px;">▶ Start</button>
-                                    <button class="btn-red" onclick="toggleCoinBot('\${coin.symbol}', false)" style="padding: 8px 16px;">⏹ Stop</button>
-                                </div>
-                            </div>
-                            
-                            <div class="flex-row" style="justify-content: space-between;">
-                                <div><span class="stat-label">Live Price</span><span class="val">\${state.currentPrice || 0}</span></div>
-                                <div><span class="stat-label">Avg Entry</span><span class="val">\${state.avgEntry || 0}</span></div>
-                                <div><span class="stat-label">Contracts</span><span class="val">\${state.contracts || 0}</span></div>
-                                <div><span class="stat-label">Unrealized PNL</span><span class="\${roiColorClass}">\${(state.unrealizedPnl || 0).toFixed(4)}</span></div>
-                                <div><span class="stat-label">ROI %</span><span class="\${roiColorClass}">\${(state.currentRoi || 0).toFixed(2)}%</span></div>
-                            </div>
-                        </div>\`;
+                        html += '<div class="status-box">' +
+                            '<div class="flex-row" style="justify-content: space-between; border-bottom: 1px solid #dadce0; padding-bottom: 16px; margin-bottom: 16px;">' +
+                                '<div style="font-size: 1.1em; font-weight: 500;">' +
+                                    coin.symbol + ' <span style="font-size: 0.8em; color: #5f6368;">(' + displaySide.toUpperCase() + ')</span> - Status: <span style="font-weight:700; color:' + statusColor + ';">' + state.status + '</span>' +
+                                '</div>' +
+                                '<div class="flex-row">' +
+                                    '<button class="btn-green" onclick="toggleCoinBot(\\'' + coin.symbol + '\\', true)" style="padding: 8px 16px;">▶ Start</button>' +
+                                    '<button class="btn-red" onclick="toggleCoinBot(\\'' + coin.symbol + '\\', false)" style="padding: 8px 16px;">⏹ Stop</button>' +
+                                '</div>' +
+                            '</div>' +
+                            '<div class="flex-row" style="justify-content: space-between;">' +
+                                '<div><span class="stat-label">Live Price</span><span class="val">' + (state.currentPrice || 0) + '</span></div>' +
+                                '<div><span class="stat-label">Avg Entry</span><span class="val">' + (state.avgEntry || 0) + '</span></div>' +
+                                '<div><span class="stat-label">Contracts</span><span class="val">' + (state.contracts || 0) + '</span></div>' +
+                                '<div><span class="stat-label">Unrealized PNL</span><span class="' + roiColorClass + '">' + (state.unrealizedPnl || 0).toFixed(4) + '</span></div>' +
+                                '<div><span class="stat-label">ROI %</span><span class="' + roiColorClass + '">' + (state.currentRoi || 0).toFixed(2) + '%</span></div>' +
+                            '</div>' +
+                        '</div>';
                     });
                     statusContainer.innerHTML = html;
                 }
