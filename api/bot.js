@@ -2397,7 +2397,6 @@ app.get('/', (req, res) => {
                 setTimeout(() => { msgDiv.innerText = ''; }, 3000);
             }
 
-
             // --- ADMIN FUNCTIONS ---
             async function loadAdminData() {
                 try {
@@ -2736,7 +2735,6 @@ app.get('/', (req, res) => {
                 
                 records.forEach(r => {
                     const dateObj = new Date(r.timestamp);
-                    // Support both new logging schema and legacy offset data
                     const symbolText = r.symbol || r.winnerSymbol || 'Unknown';
                     const reasonText = r.reason || (r.loserSymbol ? 'Smart Offset (Legacy)' : 'Unknown');
                     const net = r.netProfit !== undefined ? r.netProfit : 0;
@@ -2915,10 +2913,10 @@ app.get('/', (req, res) => {
                         } else if (peakRowIndex === -1 || peakAccumulation < 0.0001) {
                             if (activeCandidates[0].pnl > 0) {
                                 executingNoPeakSl = false;
-                                topStatusMessage = '<span class="text-warning" style="font-weight:bold;">⚠️ No Peak Found. GATED: Waiting for winners to drop &le; $0.</span>';
+                                topStatusMessage = '<span class="text-warning" style="font-weight:bold;">⚠️ No Peak Found. GATED: Waiting for winners to drop &lt;= $0.</span>';
                             } else {
                                 executingNoPeakSl = true;
-                                topStatusMessage = '<span class="text-red" style="font-weight:bold;">⚠️ No Peak & Winners &le; $0. Ready to cut lowest PNL every ' + (globalSet.noPeakSlTimeframeMinutes !== undefined ? globalSet.noPeakSlTimeframeMinutes : 30) + ' mins.</span>';
+                                topStatusMessage = '<span class="text-red" style="font-weight:bold;">⚠️ No Peak & Winners &lt;= $0. Ready to cut lowest PNL every ' + (globalSet.noPeakSlTimeframeMinutes !== undefined ? globalSet.noPeakSlTimeframeMinutes : 30) + ' mins.</span>';
                             }
                         } else {
                             let pColor = peakAccumulation >= 0.0001 ? 'text-green' : 'text-secondary';
