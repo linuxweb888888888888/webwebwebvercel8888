@@ -103,12 +103,18 @@ const SettingsSchema = new mongoose.Schema({
     autoDynamicLastExecution: { type: Object, default: null }
 });
 
+// UNIVERSAL HISTORY SCHEMA
 const OffsetRecordSchema = new mongoose.Schema({
     userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
-    winnerSymbol: { type: String, required: true },
-    winnerPnl: { type: Number, required: true },
-    loserSymbol: { type: String, required: true },
-    loserPnl: { type: Number, required: true },
+    symbol: { type: String }, // NEW: The coin or group being closed
+    reason: { type: String }, // NEW: The reason (e.g., Take Profit, Stop Loss, Smart Offset V1)
+    
+    // Legacy fields (kept so old database records don't crash the app)
+    winnerSymbol: { type: String },
+    winnerPnl: { type: Number },
+    loserSymbol: { type: String },
+    loserPnl: { type: Number },
+    
     netProfit: { type: Number, required: true },
     timestamp: { type: Date, default: Date.now }
 });
@@ -316,6 +322,16 @@ async function startBot(userId, subAccount, isPaper) {
                         cState.lockUntil = Date.now() + 5000;
                         currentSettings.realizedPnl = (currentSettings.realizedPnl || 0) + cState.unrealizedPnl;
                         
+                        // --- NEW: LOG CLOSURE TO HISTORY ---
+                        const OffsetModel = isPaper ? PaperOffsetRecord : RealOffsetRecord;
+                        OffsetModel.create({
+                            userId: userId,
+                            symbol: coin.symbol,
+                            reason: isTakeProfit ? 'Take Profit' : 'Stop Loss',
+                            netProfit: cState.unrealizedPnl
+                        }).catch(()=>{});
+                        // -----------------------------------
+
                         if (isPaper) {
                             cState.contracts = 0; cState.unrealizedPnl = 0; cState.currentRoi = 0; cState.avgEntry = 0;
                         }
@@ -475,6 +491,16 @@ const executeOneMinuteCloser = async () => {
                     
                     const autoDynData = { time: Date.now(), type: executionType, symbol: `Group up to Row ${i + 1} (WINNERS ONLY)`, pnl: runningAccumulation };
                     await SettingsModel.updateOne({ userId: dbUserId }, { $set: { autoDynamicLastExecution: autoDynData } }).catch(console.error);
+
+                    // --- NEW: LOG CLOSURE TO HISTORY ---
+                    const OffsetModel = userSetting.isPaper ? PaperOffsetRecord : RealOffsetRecord;
+                    OffsetModel.create({
+                        userId: dbUserId,
+                        symbol: `Group of ${i + 1} Coins`,
+                        reason: executionType,
+                        netProfit: runningAccumulation
+                    }).catch(()=>{});
+                    // -----------------------------------
 
                     logForProfile(activeCandidates[0].profileId, `⏳ 1-Min Group Closer: Group Accumulation $${runningAccumulation.toFixed(4)} matches boundary. Closing ${i + 1} WINNERS ONLY. [${userSetting.isPaper ? 'PAPER' : 'REAL'}]`);
 
@@ -732,14 +758,14 @@ const executeGlobalProfitMonitor = async () => {
                             }
                         }
 
+                        // --- NEW: LOG CLOSURE TO HISTORY ---
                         OffsetModel.create({
                             userId: dbUserId, 
-                            winnerSymbol: isNoPeakSl ? 'Skipped' : `Peak of ${finalPairsToClose.length} Winners`, 
-                            winnerPnl: isNoPeakSl ? 0 : totalWinnerPnl,
-                            loserSymbol: isNoPeakSl ? finalPairsToClose[0].symbol : `Ignored Loser Trades`, 
-                            loserPnl: isNoPeakSl ? finalNetProfit : 0, 
+                            symbol: isNoPeakSl ? finalPairsToClose[0].symbol : `Peak of ${finalPairsToClose.length} Winners`, 
+                            reason: isNoPeakSl ? 'Lowest PNL Cut (30m)' : 'Smart Offset V1',
                             netProfit: finalNetProfit
                         }).catch(()=>{});
+                        // -----------------------------------
 
                         offsetExecuted = true;
                         if (finalNetProfit < 0 && smartOffsetMaxLossPerMinute > 0) {
@@ -807,7 +833,14 @@ const executeGlobalProfitMonitor = async () => {
                         if (triggerOffset) {
                             logForProfile(firstProfileId, `⚖️ SMART OFFSET V2 [${reason}]: Paired Rank ${winnerIndex + 1} & ${loserIndex + 1} - Executing Winner ONLY Net: ${netResult >= 0 ? '+' : ''}$${netResult.toFixed(4)} [${userSetting.isPaper ? 'PAPER' : 'REAL'}]`);
                             
-                            OffsetModel.create({ userId: dbUserId, winnerSymbol: closeW ? biggestWinner.symbol : 'Skipped', winnerPnl: closeW ? biggestWinner.unrealizedPnl : 0, loserSymbol: 'Ignored', loserPnl: 0, netProfit: netResult }).catch(()=>{});
+                            // --- NEW: LOG CLOSURE TO HISTORY ---
+                            OffsetModel.create({ 
+                                userId: dbUserId, 
+                                symbol: closeW ? biggestWinner.symbol : 'Skipped', 
+                                reason: reason.includes("TAKE PROFIT") ? 'Smart Offset V2 (TP)' : 'Smart Offset V2 (SL)', 
+                                netProfit: netResult 
+                            }).catch(()=>{});
+                            // -----------------------------------
 
                             if (closeW) {
                                 try {
@@ -863,6 +896,15 @@ const executeGlobalProfitMonitor = async () => {
                         
                         currentGlobalPeak = 0;
                         dbUpdates.currentGlobalPeak = 0;
+
+                        // --- NEW: LOG CLOSURE TO HISTORY ---
+                        OffsetModel.create({
+                            userId: dbUserId,
+                            symbol: 'All Winning Coins',
+                            reason: 'Global Target Hit',
+                            netProfit: globalUnrealized
+                        }).catch(()=>{});
+                        // -----------------------------------
                         
                         for (let pos of activeCandidates) {
                             if (pos.unrealizedPnl <= 0) continue; 
@@ -1001,7 +1043,6 @@ app.get('/api/ping', async (req, res) => {
     res.status(200).json({ success: true, message: 'Bot is awake', timestamp: new Date().toISOString(), activeProfiles: activeBots.size });
 });
 
-// --- MISSING API ROUTE ADDED TO FIX IMPORTED PROFILES ---
 app.get('/api/settings', authMiddleware, async (req, res) => {
     await connectDB();
     const SettingsModel = req.isPaper ? PaperSettings : RealSettings;
@@ -1279,6 +1320,7 @@ app.post('/api/close-all', authMiddleware, async (req, res) => {
     if (req.isPaper) return res.status(403).json({ error: "Paper accounts cannot perform real emergency closures. Stop bots manually." });
     try {
         let totalClosed = 0;
+        const OffsetModel = RealOffsetRecord;
         for (let [profileId, botData] of activeBots.entries()) {
             if (botData.userId !== req.userId.toString()) continue;
             
@@ -1291,9 +1333,20 @@ app.post('/api/close-all', authMiddleware, async (req, res) => {
                     await botData.exchange.createOrder(pos.symbol, 'market', closeSide, pos.contracts, undefined, { offset: 'close' }).catch(console.error);
                     totalClosed++;
                     
+                    let closedPnl = 0;
                     if (botData.state.coinStates[pos.symbol]) {
+                        closedPnl = parseFloat(botData.state.coinStates[pos.symbol].unrealizedPnl) || 0;
                         botData.state.coinStates[pos.symbol].lockUntil = Date.now() + 5000;
                     }
+                    
+                    // --- NEW: LOG CLOSURE TO HISTORY ---
+                    OffsetModel.create({
+                        userId: req.userId,
+                        symbol: pos.symbol,
+                        reason: 'Emergency Panic Close',
+                        netProfit: closedPnl
+                    }).catch(()=>{});
+                    // -----------------------------------
                 }
             }
         }
@@ -1749,7 +1802,7 @@ app.get('/', (req, res) => {
                         <div id="liveOffsetsContainer">Waiting for live data...</div>
                     </div>
                     <div class="md-card">
-                        <h2 class="md-card-header text-green"><span class="material-symbols-outlined">history</span> Executed Smart Offsets (V1) History</h2>
+                        <h2 class="md-card-header text-green"><span class="material-symbols-outlined">history</span> Executed Trade History</h2>
                         <div id="offsetTableContainer">Loading historical offset data...</div>
                     </div>
                 </div>
@@ -1777,7 +1830,7 @@ app.get('/', (req, res) => {
                         <div id="liveOffsetsContainer2">Waiting for live data...</div>
                     </div>
                     <div class="md-card">
-                        <h2 class="md-card-header text-green"><span class="material-symbols-outlined">history</span> Executed Smart Offsets (V2) History</h2>
+                        <h2 class="md-card-header text-green"><span class="material-symbols-outlined">history</span> Executed Trade History</h2>
                         <div id="offsetTableContainer2">Loading historical offset data...</div>
                     </div>
                 </div>
@@ -2601,28 +2654,29 @@ app.get('/', (req, res) => {
                 const records = await res.json();
                 
                 if (records.length === 0) {
-                    const noData = '<p class="text-secondary">No smart offsets executed yet.</p>';
+                    const noData = '<p class="text-secondary">No trades executed yet.</p>';
                     document.getElementById('offsetTableContainer').innerHTML = noData;
                     document.getElementById('offsetTableContainer2').innerHTML = noData;
                     return;
                 }
 
                 let ih = '<table class="md-table">';
-                ih += '<tr><th>Date/Time</th><th>Winner Coin</th><th>Winner PNL</th><th>Loser Coin</th><th>Loser PNL</th><th>Net Profit</th></tr>';
+                ih += '<tr><th>Date/Time</th><th>Symbol / Event</th><th>Action / Reason</th><th>Net Profit</th></tr>';
                 
                 records.forEach(r => {
                     const dateObj = new Date(r.timestamp);
-                    const wColor = r.winnerPnl >= 0 ? 'text-green' : 'text-red';
-                    const lColor = r.loserPnl >= 0 ? 'text-green' : 'text-red';
-                    const nColor = r.netProfit >= 0 ? 'text-green' : 'text-red';
+                    // Support both new logging schema and legacy offset data
+                    const symbolText = r.symbol || r.winnerSymbol || 'Unknown';
+                    const reasonText = r.reason || (r.loserSymbol ? 'Smart Offset (Legacy)' : 'Unknown');
+                    const net = r.netProfit !== undefined ? r.netProfit : 0;
+                    
+                    const nColor = net >= 0 ? 'text-green' : 'text-red';
 
                     ih += '<tr>' +
                         '<td class="text-secondary">' + dateObj.toLocaleDateString() + ' ' + dateObj.toLocaleTimeString() + '</td>' +
-                        '<td class="text-blue" style="font-weight:500;">' + r.winnerSymbol + '</td>' +
-                        '<td class="' + wColor + '" style="font-weight:500;">' + (r.winnerPnl >= 0 ? '+' : '') + '$' + r.winnerPnl.toFixed(4) + '</td>' +
-                        '<td class="text-blue" style="font-weight:500;">' + r.loserSymbol + '</td>' +
-                        '<td class="' + lColor + '" style="font-weight:500;">' + (r.loserPnl >= 0 ? '+' : '') + '$' + r.loserPnl.toFixed(4) + '</td>' +
-                        '<td class="' + nColor + '" style="font-weight:700;">' + (r.netProfit >= 0 ? '+' : '') + '$' + r.netProfit.toFixed(4) + '</td>' +
+                        '<td class="text-blue" style="font-weight:500;">' + symbolText + '</td>' +
+                        '<td style="font-weight:500;">' + reasonText + '</td>' +
+                        '<td class="' + nColor + '" style="font-weight:700;">' + (net >= 0 ? '+' : '') + '$' + net.toFixed(4) + '</td>' +
                     '</tr>';
                 });
                 ih += '</table>';
@@ -2674,7 +2728,6 @@ app.get('/', (req, res) => {
                     ? '<div style="margin-top: 6px; padding-top: 6px; border-top: 1px dashed var(--divider);">⏳ <strong>' + timeframeSec + 's Loss Tracker:</strong> $' + currentMinuteLoss.toFixed(2) + ' / $' + maxLossPerMin.toFixed(2) + ' Limit</div>'
                     : '<div style="margin-top: 6px; padding-top: 6px; border-top: 1px dashed var(--divider);">⏳ <strong>' + timeframeSec + 's Loss Tracker:</strong> Limited to 1 SL execution per ' + timeframeSec + 's</div>';
                 
-                // --- FIX: Sort candidates and define totalCoins/totalPairs exactly here to prevent ReferenceError crash ---
                 activeCandidates.sort((a, b) => b.pnl - a.pnl);
                 const totalCoins = activeCandidates.length;
                 const totalPairs = Math.floor(totalCoins / 2);
