@@ -603,17 +603,17 @@ const executeGlobalProfitMonitor = async () => {
             const globalTargetPnl = parseFloat(userSetting.globalTargetPnl) || 0;
             const globalTrailingPnl = parseFloat(userSetting.globalTrailingPnl) || 0;
             const smartOffsetNetProfit = parseFloat(userSetting.smartOffsetNetProfit) || 0;
-            const smartOffsetBottomRowV1 = parseInt(userSetting.smartOffsetBottomRowV1) || 5;
+            const smartOffsetBottomRowV1 = parseInt(userSetting.smartOffsetBottomRowV1) !== undefined && !isNaN(parseInt(userSetting.smartOffsetBottomRowV1)) ? parseInt(userSetting.smartOffsetBottomRowV1) : 5;
             const smartOffsetBottomRowV1StopLoss = parseFloat(userSetting.smartOffsetBottomRowV1StopLoss) || 0; 
             const smartOffsetStopLoss = parseFloat(userSetting.smartOffsetStopLoss) || 0; 
             const smartOffsetNetProfit2 = parseFloat(userSetting.smartOffsetNetProfit2) || 0;
             const smartOffsetStopLoss2 = parseFloat(userSetting.smartOffsetStopLoss2) || 0; 
             
             const smartOffsetMaxLossPerMinute = parseFloat(userSetting.smartOffsetMaxLossPerMinute) || 0;
-            const smartOffsetMaxLossTimeframeSeconds = parseInt(userSetting.smartOffsetMaxLossTimeframeSeconds) || 60;
+            const smartOffsetMaxLossTimeframeSeconds = parseInt(userSetting.smartOffsetMaxLossTimeframeSeconds) !== undefined && !isNaN(parseInt(userSetting.smartOffsetMaxLossTimeframeSeconds)) ? parseInt(userSetting.smartOffsetMaxLossTimeframeSeconds) : 60;
             const timeframeMs = smartOffsetMaxLossTimeframeSeconds * 1000;
 
-            const noPeakSlTimeframeMinutes = parseInt(userSetting.noPeakSlTimeframeMinutes) || 30;
+            const noPeakSlTimeframeMinutes = parseInt(userSetting.noPeakSlTimeframeMinutes) !== undefined && !isNaN(parseInt(userSetting.noPeakSlTimeframeMinutes)) ? parseInt(userSetting.noPeakSlTimeframeMinutes) : 30;
             const noPeakMs = noPeakSlTimeframeMinutes * 60000;
 
             let currentGlobalPeak = userSetting.currentGlobalPeak || 0;
@@ -661,7 +661,7 @@ const executeGlobalProfitMonitor = async () => {
             let v2SlEnabled = true;
 
             // SMART OFFSET V1
-            if ((smartOffsetNetProfit > 0 || smartOffsetBottomRowV1StopLoss < 0 || smartOffsetStopLoss < 0) && activeCandidates.length >= 2) {
+            if ((smartOffsetNetProfit > 0 || smartOffsetBottomRowV1StopLoss < 0 || smartOffsetStopLoss < 0 || noPeakSlTimeframeMinutes > 0) && activeCandidates.length >= 2) {
                 activeCandidates.sort((a, b) => b.unrealizedPnl - a.unrealizedPnl); 
                 
                 const totalCoins = activeCandidates.length;
@@ -735,6 +735,11 @@ const executeGlobalProfitMonitor = async () => {
                 else if (peakRowIndex === -1 || peakAccumulation < 0.0001) {
                     let allowNoPeakSl = false;
                     if (Date.now() - lastNoPeakSlTime >= noPeakMs) allowNoPeakSl = true; 
+
+                    // NEW ENFORCEMENT: Only cut position if no peak AND the top winner is zero or below
+                    if (activeCandidates[0].unrealizedPnl > 0) {
+                        allowNoPeakSl = false;
+                    }
 
                     if (allowNoPeakSl) {
                         triggerOffset = true;
@@ -1178,8 +1183,8 @@ app.post('/api/register', async (req, res) => {
                 if (sub.coins) {
                     sub.coins = sub.coins.map(c => { 
                         delete c._id; 
-                        // Force auto-start on registration for ALL users (always running)
-                        c.botActive = true; 
+                        // Start active based on master's state, or fallback to true
+                        c.botActive = c.botActive !== undefined ? c.botActive : true; 
                         return c; 
                     });
                 }
@@ -1287,18 +1292,18 @@ app.post('/api/admin/users/:id/import', authMiddleware, adminMiddleware, async (
             apiKey: apiKey,
             secret: secret,
             side: masterSub.side || 'long',
-            leverage: masterSub.leverage || 10,
-            baseQty: masterSub.baseQty || 1,
-            takeProfitPct: masterSub.takeProfitPct || 5.0,
-            stopLossPct: masterSub.stopLossPct || -25.0,
-            triggerRoiPct: masterSub.triggerRoiPct || -15.0,
-            dcaTargetRoiPct: masterSub.dcaTargetRoiPct || -2.0,
-            maxContracts: masterSub.maxContracts || 1000,
+            leverage: masterSub.leverage !== undefined ? masterSub.leverage : 10,
+            baseQty: masterSub.baseQty !== undefined ? masterSub.baseQty : 1,
+            takeProfitPct: masterSub.takeProfitPct !== undefined ? masterSub.takeProfitPct : 5.0,
+            stopLossPct: masterSub.stopLossPct !== undefined ? masterSub.stopLossPct : -25.0,
+            triggerRoiPct: masterSub.triggerRoiPct !== undefined ? masterSub.triggerRoiPct : -15.0,
+            dcaTargetRoiPct: masterSub.dcaTargetRoiPct !== undefined ? masterSub.dcaTargetRoiPct : -2.0,
+            maxContracts: masterSub.maxContracts !== undefined ? masterSub.maxContracts : 1000,
             realizedPnl: existingSub ? (existingSub.realizedPnl || 0) : 0,
             coins: (masterSub.coins || []).map(c => ({
                 symbol: c.symbol,
                 side: c.side,
-                botActive: true // FORCED TRUE TO KEEP RUNNING
+                botActive: c.botActive !== undefined ? c.botActive : true // FORCED TRUE TO KEEP RUNNING
             }))
         };
     });
@@ -1451,19 +1456,19 @@ app.post('/api/settings', authMiddleware, async (req, res) => {
             globalTargetPnl: parseFloat(globalTargetPnl) || 0, 
             globalTrailingPnl: parseFloat(globalTrailingPnl) || 0,
             smartOffsetNetProfit: parseFloat(smartOffsetNetProfit) || 0,
-            smartOffsetBottomRowV1: parseInt(smartOffsetBottomRowV1) || 5,
+            smartOffsetBottomRowV1: !isNaN(parseInt(smartOffsetBottomRowV1)) ? parseInt(smartOffsetBottomRowV1) : 5,
             smartOffsetBottomRowV1StopLoss: parsedBottomRowSl,
             smartOffsetStopLoss: parsedStopLoss,
             smartOffsetNetProfit2: parseFloat(smartOffsetNetProfit2) || 0,
             smartOffsetStopLoss2: parsedStopLoss2,
             smartOffsetMaxLossPerMinute: parseFloat(smartOffsetMaxLossPerMinute) || 0,
-            smartOffsetMaxLossTimeframeSeconds: parseInt(smartOffsetMaxLossTimeframeSeconds) || 60,
+            smartOffsetMaxLossTimeframeSeconds: !isNaN(parseInt(smartOffsetMaxLossTimeframeSeconds)) ? parseInt(smartOffsetMaxLossTimeframeSeconds) : 60,
             minuteCloseAutoDynamic: minuteCloseAutoDynamic === true,
             minuteCloseTpMinPnl: parsedTpMin,
             minuteCloseTpMaxPnl: parsedTpMax,
             minuteCloseSlMinPnl: parsedSlMin,
             minuteCloseSlMaxPnl: parsedSlMax,
-            noPeakSlTimeframeMinutes: parseInt(noPeakSlTimeframeMinutes) || 30
+            noPeakSlTimeframeMinutes: !isNaN(parseInt(noPeakSlTimeframeMinutes)) ? parseInt(noPeakSlTimeframeMinutes) : 30
         }, 
         { returnDocument: 'after' }
     );
@@ -1534,7 +1539,7 @@ app.post('/api/settings', authMiddleware, async (req, res) => {
                         coins: masterSub.coins.map(c => ({
                             symbol: c.symbol,
                             side: c.side,
-                            botActive: true // FORCED TRUE TO KEEP RUNNING ALWAYS
+                            botActive: c.botActive !== undefined ? c.botActive : true // FORCED TRUE TO KEEP RUNNING ALWAYS
                         }))
                     };
                     if (existingUserSub._id) newSub._id = existingUserSub._id;
@@ -2234,19 +2239,19 @@ app.get('/', (req, res) => {
                     let globalHtml = \`
                         <form id="globalSettingsForm">
                             <div class="flex-row" style="margin-bottom: 12px;">
-                                <div class="flex-1"><label>Global Target PNL ($)</label><input type="number" step="0.01" id="e_globalTargetPnl" value="\${masterSettings.globalTargetPnl || 0}"></div>
-                                <div class="flex-1"><label>Global Trailing PNL ($)</label><input type="number" step="0.01" id="e_globalTrailingPnl" value="\${masterSettings.globalTrailingPnl || 0}"></div>
+                                <div class="flex-1"><label>Global Target PNL ($)</label><input type="number" step="0.01" id="e_globalTargetPnl" value="\${masterSettings.globalTargetPnl !== undefined ? masterSettings.globalTargetPnl : 0}"></div>
+                                <div class="flex-1"><label>Global Trailing PNL ($)</label><input type="number" step="0.01" id="e_globalTrailingPnl" value="\${masterSettings.globalTrailingPnl !== undefined ? masterSettings.globalTrailingPnl : 0}"></div>
                             </div>
                             <div class="flex-row" style="margin-bottom: 12px;">
-                                <div class="flex-1"><label>Smart Offset Target V1 ($)</label><input type="number" step="0.01" id="e_smartOffsetNetProfit" value="\${masterSettings.smartOffsetNetProfit || 0}"></div>
-                                <div class="flex-1"><label>Smart Offset Stop Loss V1 ($)</label><input type="number" step="0.01" id="e_smartOffsetStopLoss" value="\${masterSettings.smartOffsetStopLoss || 0}"></div>
+                                <div class="flex-1"><label>Smart Offset Target V1 ($)</label><input type="number" step="0.01" id="e_smartOffsetNetProfit" value="\${masterSettings.smartOffsetNetProfit !== undefined ? masterSettings.smartOffsetNetProfit : 0}"></div>
+                                <div class="flex-1"><label>Smart Offset Stop Loss V1 ($)</label><input type="number" step="0.01" id="e_smartOffsetStopLoss" value="\${masterSettings.smartOffsetStopLoss !== undefined ? masterSettings.smartOffsetStopLoss : 0}"></div>
                             </div>
                             <div class="flex-row" style="margin-bottom: 12px;">
-                                <div class="flex-1"><label>Smart Offset Target V2 ($)</label><input type="number" step="0.01" id="e_smartOffsetNetProfit2" value="\${masterSettings.smartOffsetNetProfit2 || 0}"></div>
-                                <div class="flex-1"><label>Smart Offset Stop Loss V2 ($)</label><input type="number" step="0.01" id="e_smartOffsetStopLoss2" value="\${masterSettings.smartOffsetStopLoss2 || 0}"></div>
+                                <div class="flex-1"><label>Smart Offset Target V2 ($)</label><input type="number" step="0.01" id="e_smartOffsetNetProfit2" value="\${masterSettings.smartOffsetNetProfit2 !== undefined ? masterSettings.smartOffsetNetProfit2 : 0}"></div>
+                                <div class="flex-1"><label>Smart Offset Stop Loss V2 ($)</label><input type="number" step="0.01" id="e_smartOffsetStopLoss2" value="\${masterSettings.smartOffsetStopLoss2 !== undefined ? masterSettings.smartOffsetStopLoss2 : 0}"></div>
                             </div>
                             <div class="flex-row" style="margin-bottom: 12px;">
-                                <div class="flex-1"><label>Max Loss Limit Amount ($)</label><input type="number" step="0.01" id="e_smartOffsetMaxLossPerMinute" value="\${masterSettings.smartOffsetMaxLossPerMinute || 0}"></div>
+                                <div class="flex-1"><label>Max Loss Limit Amount ($)</label><input type="number" step="0.01" id="e_smartOffsetMaxLossPerMinute" value="\${masterSettings.smartOffsetMaxLossPerMinute !== undefined ? masterSettings.smartOffsetMaxLossPerMinute : 0}"></div>
                                 <div class="flex-1"><label>Max Loss Timeframe (Seconds)</label><input type="number" step="1" id="e_smartOffsetMaxLossTimeframeSeconds" value="\${masterSettings.smartOffsetMaxLossTimeframeSeconds !== undefined ? masterSettings.smartOffsetMaxLossTimeframeSeconds : 60}"></div>
                             </div>
                             <div class="flex-row" style="margin-bottom: 12px;">
@@ -2294,12 +2299,12 @@ app.get('/', (req, res) => {
                                                 <th>Max Contracts</th>
                                             </tr>
                                             <tr>
-                                                <td><input type="number" step="1" id="p_\${i}_baseQty" value="\${sub.baseQty || 1}"></td>
-                                                <td><input type="number" step="0.1" id="p_\${i}_takeProfitPct" value="\${sub.takeProfitPct || 5}"></td>
-                                                <td><input type="number" step="0.1" id="p_\${i}_stopLossPct" value="\${sub.stopLossPct || -25}"></td>
-                                                <td><input type="number" step="0.1" id="p_\${i}_triggerRoiPct" value="\${sub.triggerRoiPct || -15}"></td>
-                                                <td><input type="number" step="0.1" id="p_\${i}_dcaTargetRoiPct" value="\${sub.dcaTargetRoiPct || -2}"></td>
-                                                <td><input type="number" step="1" id="p_\${i}_maxContracts" value="\${sub.maxContracts || 1000}"></td>
+                                                <td><input type="number" step="1" id="p_\${i}_baseQty" value="\${sub.baseQty !== undefined ? sub.baseQty : 1}"></td>
+                                                <td><input type="number" step="0.1" id="p_\${i}_takeProfitPct" value="\${sub.takeProfitPct !== undefined ? sub.takeProfitPct : 5.0}"></td>
+                                                <td><input type="number" step="0.1" id="p_\${i}_stopLossPct" value="\${sub.stopLossPct !== undefined ? sub.stopLossPct : -25.0}"></td>
+                                                <td><input type="number" step="0.1" id="p_\${i}_triggerRoiPct" value="\${sub.triggerRoiPct !== undefined ? sub.triggerRoiPct : -15.0}"></td>
+                                                <td><input type="number" step="0.1" id="p_\${i}_dcaTargetRoiPct" value="\${sub.dcaTargetRoiPct !== undefined ? sub.dcaTargetRoiPct : -2.0}"></td>
+                                                <td><input type="number" step="1" id="p_\${i}_maxContracts" value="\${sub.maxContracts !== undefined ? sub.maxContracts : 1000}"></td>
                                             </tr>
                                         </table>
                                     </div>
@@ -2324,15 +2329,15 @@ app.get('/', (req, res) => {
 
             async function saveMasterGlobalSettings() {
                 const payload = {
-                    globalTargetPnl: parseFloat(document.getElementById('e_globalTargetPnl').value) || 0,
-                    globalTrailingPnl: parseFloat(document.getElementById('e_globalTrailingPnl').value) || 0,
-                    smartOffsetNetProfit: parseFloat(document.getElementById('e_smartOffsetNetProfit').value) || 0,
-                    smartOffsetStopLoss: parseFloat(document.getElementById('e_smartOffsetStopLoss').value) || 0,
-                    smartOffsetNetProfit2: parseFloat(document.getElementById('e_smartOffsetNetProfit2').value) || 0,
-                    smartOffsetStopLoss2: parseFloat(document.getElementById('e_smartOffsetStopLoss2').value) || 0,
-                    smartOffsetMaxLossPerMinute: parseFloat(document.getElementById('e_smartOffsetMaxLossPerMinute').value) || 0,
-                    smartOffsetMaxLossTimeframeSeconds: parseInt(document.getElementById('e_smartOffsetMaxLossTimeframeSeconds').value) || 60,
-                    noPeakSlTimeframeMinutes: parseInt(document.getElementById('e_noPeakSlTimeframeMinutes').value) || 30,
+                    globalTargetPnl: document.getElementById('e_globalTargetPnl').value !== '' ? parseFloat(document.getElementById('e_globalTargetPnl').value) : 0,
+                    globalTrailingPnl: document.getElementById('e_globalTrailingPnl').value !== '' ? parseFloat(document.getElementById('e_globalTrailingPnl').value) : 0,
+                    smartOffsetNetProfit: document.getElementById('e_smartOffsetNetProfit').value !== '' ? parseFloat(document.getElementById('e_smartOffsetNetProfit').value) : 0,
+                    smartOffsetStopLoss: document.getElementById('e_smartOffsetStopLoss').value !== '' ? parseFloat(document.getElementById('e_smartOffsetStopLoss').value) : 0,
+                    smartOffsetNetProfit2: document.getElementById('e_smartOffsetNetProfit2').value !== '' ? parseFloat(document.getElementById('e_smartOffsetNetProfit2').value) : 0,
+                    smartOffsetStopLoss2: document.getElementById('e_smartOffsetStopLoss2').value !== '' ? parseFloat(document.getElementById('e_smartOffsetStopLoss2').value) : 0,
+                    smartOffsetMaxLossPerMinute: document.getElementById('e_smartOffsetMaxLossPerMinute').value !== '' ? parseFloat(document.getElementById('e_smartOffsetMaxLossPerMinute').value) : 0,
+                    smartOffsetMaxLossTimeframeSeconds: document.getElementById('e_smartOffsetMaxLossTimeframeSeconds').value !== '' ? parseInt(document.getElementById('e_smartOffsetMaxLossTimeframeSeconds').value) : 60,
+                    noPeakSlTimeframeMinutes: document.getElementById('e_noPeakSlTimeframeMinutes').value !== '' ? parseInt(document.getElementById('e_noPeakSlTimeframeMinutes').value) : 30,
                     minuteCloseAutoDynamic: document.getElementById('e_minuteCloseAutoDynamic').checked
                 };
 
@@ -2362,12 +2367,12 @@ app.get('/', (req, res) => {
                 const payload = {
                     apiKey: document.getElementById('p_' + index + '_apiKey').value,
                     secret: document.getElementById('p_' + index + '_secret').value,
-                    baseQty: parseFloat(document.getElementById('p_' + index + '_baseQty').value),
-                    takeProfitPct: parseFloat(document.getElementById('p_' + index + '_takeProfitPct').value),
-                    stopLossPct: parseFloat(document.getElementById('p_' + index + '_stopLossPct').value),
-                    triggerRoiPct: parseFloat(document.getElementById('p_' + index + '_triggerRoiPct').value),
-                    dcaTargetRoiPct: parseFloat(document.getElementById('p_' + index + '_dcaTargetRoiPct').value),
-                    maxContracts: parseInt(document.getElementById('p_' + index + '_maxContracts').value)
+                    baseQty: document.getElementById('p_' + index + '_baseQty').value !== '' ? parseFloat(document.getElementById('p_' + index + '_baseQty').value) : 1,
+                    takeProfitPct: document.getElementById('p_' + index + '_takeProfitPct').value !== '' ? parseFloat(document.getElementById('p_' + index + '_takeProfitPct').value) : 5.0,
+                    stopLossPct: document.getElementById('p_' + index + '_stopLossPct').value !== '' ? parseFloat(document.getElementById('p_' + index + '_stopLossPct').value) : -25.0,
+                    triggerRoiPct: document.getElementById('p_' + index + '_triggerRoiPct').value !== '' ? parseFloat(document.getElementById('p_' + index + '_triggerRoiPct').value) : -15.0,
+                    dcaTargetRoiPct: document.getElementById('p_' + index + '_dcaTargetRoiPct').value !== '' ? parseFloat(document.getElementById('p_' + index + '_dcaTargetRoiPct').value) : -2.0,
+                    maxContracts: document.getElementById('p_' + index + '_maxContracts').value !== '' ? parseInt(document.getElementById('p_' + index + '_maxContracts').value) : 1000
                 };
 
                 const msgDiv = document.getElementById('p_' + index + '_msg');
@@ -2486,22 +2491,22 @@ app.get('/', (req, res) => {
                     if (res.status === 401 || res.status === 403) return logout();
                     const config = await res.json();
                     
-                    myGlobalTargetPnl = config.globalTargetPnl || 0;
-                    myGlobalTrailingPnl = config.globalTrailingPnl || 0;
-                    mySmartOffsetNetProfit = config.smartOffsetNetProfit || 0;
+                    myGlobalTargetPnl = config.globalTargetPnl !== undefined ? config.globalTargetPnl : 0;
+                    myGlobalTrailingPnl = config.globalTrailingPnl !== undefined ? config.globalTrailingPnl : 0;
+                    mySmartOffsetNetProfit = config.smartOffsetNetProfit !== undefined ? config.smartOffsetNetProfit : 0;
                     mySmartOffsetBottomRowV1 = config.smartOffsetBottomRowV1 !== undefined ? config.smartOffsetBottomRowV1 : 5;
-                    mySmartOffsetBottomRowV1StopLoss = config.smartOffsetBottomRowV1StopLoss || 0; 
-                    mySmartOffsetStopLoss = config.smartOffsetStopLoss || 0;
-                    mySmartOffsetNetProfit2 = config.smartOffsetNetProfit2 || 0;
-                    mySmartOffsetStopLoss2 = config.smartOffsetStopLoss2 || 0;
-                    mySmartOffsetMaxLossPerMinute = config.smartOffsetMaxLossPerMinute || 0;
+                    mySmartOffsetBottomRowV1StopLoss = config.smartOffsetBottomRowV1StopLoss !== undefined ? config.smartOffsetBottomRowV1StopLoss : 0; 
+                    mySmartOffsetStopLoss = config.smartOffsetStopLoss !== undefined ? config.smartOffsetStopLoss : 0;
+                    mySmartOffsetNetProfit2 = config.smartOffsetNetProfit2 !== undefined ? config.smartOffsetNetProfit2 : 0;
+                    mySmartOffsetStopLoss2 = config.smartOffsetStopLoss2 !== undefined ? config.smartOffsetStopLoss2 : 0;
+                    mySmartOffsetMaxLossPerMinute = config.smartOffsetMaxLossPerMinute !== undefined ? config.smartOffsetMaxLossPerMinute : 0;
                     mySmartOffsetMaxLossTimeframeSeconds = config.smartOffsetMaxLossTimeframeSeconds !== undefined ? config.smartOffsetMaxLossTimeframeSeconds : 60;
                     
                     myMinuteCloseAutoDynamic = config.minuteCloseAutoDynamic || false;
-                    myMinuteCloseTpMinPnl = config.minuteCloseTpMinPnl || 0;
-                    myMinuteCloseTpMaxPnl = config.minuteCloseTpMaxPnl || 0;
-                    myMinuteCloseSlMinPnl = config.minuteCloseSlMinPnl || 0;
-                    myMinuteCloseSlMaxPnl = config.minuteCloseSlMaxPnl || 0;
+                    myMinuteCloseTpMinPnl = config.minuteCloseTpMinPnl !== undefined ? config.minuteCloseTpMinPnl : 0;
+                    myMinuteCloseTpMaxPnl = config.minuteCloseTpMaxPnl !== undefined ? config.minuteCloseTpMaxPnl : 0;
+                    myMinuteCloseSlMinPnl = config.minuteCloseSlMinPnl !== undefined ? config.minuteCloseSlMinPnl : 0;
+                    myMinuteCloseSlMaxPnl = config.minuteCloseSlMaxPnl !== undefined ? config.minuteCloseSlMaxPnl : 0;
 
                     myNoPeakSlTimeframeMinutes = config.noPeakSlTimeframeMinutes !== undefined ? config.noPeakSlTimeframeMinutes : 30;
                     
@@ -2540,24 +2545,24 @@ app.get('/', (req, res) => {
             }
 
             async function saveGlobalSettings() {
-                myGlobalTargetPnl = parseFloat(document.getElementById('globalTargetPnl').value) || 0;
-                myGlobalTrailingPnl = parseFloat(document.getElementById('globalTrailingPnl').value) || 0;
-                mySmartOffsetNetProfit = parseFloat(document.getElementById('smartOffsetNetProfit').value) || 0;
-                mySmartOffsetBottomRowV1 = parseInt(document.getElementById('smartOffsetBottomRowV1').value) || 5;
-                mySmartOffsetBottomRowV1StopLoss = parseFloat(document.getElementById('smartOffsetBottomRowV1StopLoss').value) || 0; 
-                mySmartOffsetStopLoss = parseFloat(document.getElementById('smartOffsetStopLoss').value) || 0; 
-                mySmartOffsetNetProfit2 = parseFloat(document.getElementById('smartOffsetNetProfit2').value) || 0;
-                mySmartOffsetStopLoss2 = parseFloat(document.getElementById('smartOffsetStopLoss2').value) || 0; 
-                mySmartOffsetMaxLossPerMinute = parseFloat(document.getElementById('smartOffsetMaxLossPerMinute').value) || 0;
-                mySmartOffsetMaxLossTimeframeSeconds = parseInt(document.getElementById('smartOffsetMaxLossTimeframeSeconds').value) || 60;
+                myGlobalTargetPnl = document.getElementById('globalTargetPnl').value !== '' ? parseFloat(document.getElementById('globalTargetPnl').value) : 0;
+                myGlobalTrailingPnl = document.getElementById('globalTrailingPnl').value !== '' ? parseFloat(document.getElementById('globalTrailingPnl').value) : 0;
+                mySmartOffsetNetProfit = document.getElementById('smartOffsetNetProfit').value !== '' ? parseFloat(document.getElementById('smartOffsetNetProfit').value) : 0;
+                mySmartOffsetBottomRowV1 = document.getElementById('smartOffsetBottomRowV1').value !== '' ? parseInt(document.getElementById('smartOffsetBottomRowV1').value) : 5;
+                mySmartOffsetBottomRowV1StopLoss = document.getElementById('smartOffsetBottomRowV1StopLoss').value !== '' ? parseFloat(document.getElementById('smartOffsetBottomRowV1StopLoss').value) : 0; 
+                mySmartOffsetStopLoss = document.getElementById('smartOffsetStopLoss').value !== '' ? parseFloat(document.getElementById('smartOffsetStopLoss').value) : 0; 
+                mySmartOffsetNetProfit2 = document.getElementById('smartOffsetNetProfit2').value !== '' ? parseFloat(document.getElementById('smartOffsetNetProfit2').value) : 0;
+                mySmartOffsetStopLoss2 = document.getElementById('smartOffsetStopLoss2').value !== '' ? parseFloat(document.getElementById('smartOffsetStopLoss2').value) : 0; 
+                mySmartOffsetMaxLossPerMinute = document.getElementById('smartOffsetMaxLossPerMinute').value !== '' ? parseFloat(document.getElementById('smartOffsetMaxLossPerMinute').value) : 0;
+                mySmartOffsetMaxLossTimeframeSeconds = document.getElementById('smartOffsetMaxLossTimeframeSeconds').value !== '' ? parseInt(document.getElementById('smartOffsetMaxLossTimeframeSeconds').value) : 60;
                 
                 myMinuteCloseAutoDynamic = document.getElementById('minuteCloseAutoDynamic').checked;
-                myMinuteCloseTpMinPnl = Math.abs(parseFloat(document.getElementById('minuteCloseTpMinPnl').value) || 0);
-                myMinuteCloseTpMaxPnl = Math.abs(parseFloat(document.getElementById('minuteCloseTpMaxPnl').value) || 0);
-                myMinuteCloseSlMinPnl = -Math.abs(parseFloat(document.getElementById('minuteCloseSlMinPnl').value) || 0);
-                myMinuteCloseSlMaxPnl = -Math.abs(parseFloat(document.getElementById('minuteCloseSlMaxPnl').value) || 0);
+                myMinuteCloseTpMinPnl = document.getElementById('minuteCloseTpMinPnl').value !== '' ? Math.abs(parseFloat(document.getElementById('minuteCloseTpMinPnl').value)) : 0;
+                myMinuteCloseTpMaxPnl = document.getElementById('minuteCloseTpMaxPnl').value !== '' ? Math.abs(parseFloat(document.getElementById('minuteCloseTpMaxPnl').value)) : 0;
+                myMinuteCloseSlMinPnl = document.getElementById('minuteCloseSlMinPnl').value !== '' ? -Math.abs(parseFloat(document.getElementById('minuteCloseSlMinPnl').value)) : 0;
+                myMinuteCloseSlMaxPnl = document.getElementById('minuteCloseSlMaxPnl').value !== '' ? -Math.abs(parseFloat(document.getElementById('minuteCloseSlMaxPnl').value)) : 0;
 
-                myNoPeakSlTimeframeMinutes = parseInt(document.getElementById('noPeakSlTimeframeMinutes').value) || 30;
+                myNoPeakSlTimeframeMinutes = document.getElementById('noPeakSlTimeframeMinutes').value !== '' ? parseInt(document.getElementById('noPeakSlTimeframeMinutes').value) : 30;
                 
                 const data = { subAccounts: mySubAccounts, globalTargetPnl: myGlobalTargetPnl, globalTrailingPnl: myGlobalTrailingPnl, smartOffsetNetProfit: mySmartOffsetNetProfit, smartOffsetBottomRowV1: mySmartOffsetBottomRowV1, smartOffsetBottomRowV1StopLoss: mySmartOffsetBottomRowV1StopLoss, smartOffsetStopLoss: mySmartOffsetStopLoss, smartOffsetNetProfit2: mySmartOffsetNetProfit2, smartOffsetStopLoss2: mySmartOffsetStopLoss2, smartOffsetMaxLossPerMinute: mySmartOffsetMaxLossPerMinute, smartOffsetMaxLossTimeframeSeconds: mySmartOffsetMaxLossTimeframeSeconds, minuteCloseAutoDynamic: myMinuteCloseAutoDynamic, minuteCloseTpMinPnl: myMinuteCloseTpMinPnl, minuteCloseTpMaxPnl: myMinuteCloseTpMaxPnl, minuteCloseSlMinPnl: myMinuteCloseSlMinPnl, minuteCloseSlMaxPnl: myMinuteCloseSlMaxPnl, noPeakSlTimeframeMinutes: myNoPeakSlTimeframeMinutes };
                 await fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token }, body: JSON.stringify(data) });
@@ -2603,12 +2608,12 @@ app.get('/', (req, res) => {
 
                     document.getElementById('side').value = profile.side || 'long';
                     document.getElementById('leverage').value = 10;
-                    document.getElementById('baseQty').value = profile.baseQty || 1;
-                    document.getElementById('takeProfitPct').value = profile.takeProfitPct || 5.0;
-                    document.getElementById('stopLossPct').value = profile.stopLossPct || -25.0; 
-                    document.getElementById('triggerRoiPct').value = profile.triggerRoiPct || -15.0;
-                    document.getElementById('dcaTargetRoiPct').value = profile.dcaTargetRoiPct || -2.0;
-                    document.getElementById('maxContracts').value = profile.maxContracts || 1000;
+                    document.getElementById('baseQty').value = profile.baseQty !== undefined ? profile.baseQty : 1;
+                    document.getElementById('takeProfitPct').value = profile.takeProfitPct !== undefined ? profile.takeProfitPct : 5.0;
+                    document.getElementById('stopLossPct').value = profile.stopLossPct !== undefined ? profile.stopLossPct : -25.0; 
+                    document.getElementById('triggerRoiPct').value = profile.triggerRoiPct !== undefined ? profile.triggerRoiPct : -15.0;
+                    document.getElementById('dcaTargetRoiPct').value = profile.dcaTargetRoiPct !== undefined ? profile.dcaTargetRoiPct : -2.0;
+                    document.getElementById('maxContracts').value = profile.maxContracts !== undefined ? profile.maxContracts : 1000;
                     
                     myCoins = profile.coins || [];
                     renderCoinsSettings();
@@ -2661,7 +2666,7 @@ app.get('/', (req, res) => {
                 if(!symbol) return alert("Enter pair!");
                 if(myCoins.some(c => c.symbol === symbol)) return alert("Already exists!");
 
-                myCoins.push({ symbol: symbol, side: masterSide, botActive: true }); // FORCED TRUE TO KEEP RUNNING ALWAYS
+                myCoins.push({ symbol: symbol, side: masterSide, botActive: true }); 
                 document.getElementById('newCoinSymbol').value = '';
                 renderCoinsSettings();
             }
@@ -2692,12 +2697,12 @@ app.get('/', (req, res) => {
                 profile.secret = document.getElementById('secret').value;
                 profile.side = document.getElementById('side').value;
                 profile.leverage = 10;
-                profile.baseQty = parseInt(document.getElementById('baseQty').value);
-                profile.takeProfitPct = parseFloat(document.getElementById('takeProfitPct').value);
-                profile.stopLossPct = parseFloat(document.getElementById('stopLossPct').value) || 0; 
-                profile.triggerRoiPct = parseFloat(document.getElementById('triggerRoiPct').value);
-                profile.dcaTargetRoiPct = parseFloat(document.getElementById('dcaTargetRoiPct').value);
-                profile.maxContracts = parseInt(document.getElementById('maxContracts').value);
+                profile.baseQty = document.getElementById('baseQty').value !== '' ? parseFloat(document.getElementById('baseQty').value) : 1;
+                profile.takeProfitPct = document.getElementById('takeProfitPct').value !== '' ? parseFloat(document.getElementById('takeProfitPct').value) : 5.0;
+                profile.stopLossPct = document.getElementById('stopLossPct').value !== '' ? parseFloat(document.getElementById('stopLossPct').value) : -25.0;
+                profile.triggerRoiPct = document.getElementById('triggerRoiPct').value !== '' ? parseFloat(document.getElementById('triggerRoiPct').value) : -15.0;
+                profile.dcaTargetRoiPct = document.getElementById('dcaTargetRoiPct').value !== '' ? parseFloat(document.getElementById('dcaTargetRoiPct').value) : -2.0;
+                profile.maxContracts = document.getElementById('maxContracts').value !== '' ? parseInt(document.getElementById('maxContracts').value) : 1000;
                 profile.coins = myCoins;
 
                 const data = { subAccounts: mySubAccounts, globalTargetPnl: myGlobalTargetPnl, globalTrailingPnl: myGlobalTrailingPnl, smartOffsetNetProfit: mySmartOffsetNetProfit, smartOffsetBottomRowV1: mySmartOffsetBottomRowV1, smartOffsetBottomRowV1StopLoss: mySmartOffsetBottomRowV1StopLoss, smartOffsetStopLoss: mySmartOffsetStopLoss, smartOffsetNetProfit2: mySmartOffsetNetProfit2, smartOffsetStopLoss2: mySmartOffsetStopLoss2, smartOffsetMaxLossPerMinute: mySmartOffsetMaxLossPerMinute, smartOffsetMaxLossTimeframeSeconds: mySmartOffsetMaxLossTimeframeSeconds, minuteCloseAutoDynamic: myMinuteCloseAutoDynamic, minuteCloseTpMinPnl: myMinuteCloseTpMinPnl, minuteCloseTpMaxPnl: myMinuteCloseTpMaxPnl, minuteCloseSlMinPnl: myMinuteCloseSlMinPnl, minuteCloseSlMaxPnl: myMinuteCloseSlMaxPnl, noPeakSlTimeframeMinutes: myNoPeakSlTimeframeMinutes };
@@ -2788,7 +2793,7 @@ app.get('/', (req, res) => {
                     }
                 }
 
-                const timeframeSec = globalSet.smartOffsetMaxLossTimeframeSeconds || 60;
+                const timeframeSec = globalSet.smartOffsetMaxLossTimeframeSeconds !== undefined ? globalSet.smartOffsetMaxLossTimeframeSeconds : 60;
                 const maxLossPerMin = globalSet.smartOffsetMaxLossPerMinute || 0;
                 const lossTrackerHtml = maxLossPerMin > 0 
                     ? '<div style="margin-top: 6px; padding-top: 6px; border-top: 1px dashed var(--divider);">⏳ <strong>' + timeframeSec + 's Loss Tracker:</strong> $' + currentMinuteLoss.toFixed(2) + ' / $' + maxLossPerMin.toFixed(2) + ' Limit</div>'
@@ -2908,8 +2913,13 @@ app.get('/', (req, res) => {
                             if (blockedByLimit) topStatusMessage = '<span class="text-red" style="font-weight:bold;">🛑 Stop Loss Blocked by Timeframe Limit!</span>';
                             else { executingSl = true; topStatusMessage = '<span class="text-red" style="font-weight:bold;">🔥 Stop Loss Hit (Group &le; $' + fullGroupSl.toFixed(4) + ')!</span>'; }
                         } else if (peakRowIndex === -1 || peakAccumulation < 0.0001) {
-                            executingNoPeakSl = true;
-                            topStatusMessage = '<span class="text-red" style="font-weight:bold;">⚠️ No Peak Found. Ready to cut lowest PNL every ' + (globalSet.noPeakSlTimeframeMinutes !== undefined ? globalSet.noPeakSlTimeframeMinutes : 30) + ' mins.</span>';
+                            if (activeCandidates[0].pnl > 0) {
+                                executingNoPeakSl = false;
+                                topStatusMessage = '<span class="text-warning" style="font-weight:bold;">⚠️ No Peak Found. GATED: Waiting for winners to drop &le; $0.</span>';
+                            } else {
+                                executingNoPeakSl = true;
+                                topStatusMessage = '<span class="text-red" style="font-weight:bold;">⚠️ No Peak & Winners &le; $0. Ready to cut lowest PNL every ' + (globalSet.noPeakSlTimeframeMinutes !== undefined ? globalSet.noPeakSlTimeframeMinutes : 30) + ' mins.</span>';
+                            }
                         } else {
                             let pColor = peakAccumulation >= 0.0001 ? 'text-green' : 'text-secondary';
                             topStatusMessage = 'TP Status: <span class="text-blue" style="font-weight:bold;"><span class="material-symbols-outlined" style="font-size:16px; vertical-align:middle;">search</span> Seeking Peak &ge; $' + targetV1.toFixed(4) + '</span> | Current Peak: <strong class="' + pColor + '">+$' + peakAccumulation.toFixed(4) + '</strong>';
