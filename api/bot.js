@@ -263,27 +263,53 @@ async function startBot(userId, subAccount, isPaper) {
                     cState.currentPrice = ticker.last;
                     cState.activeSide = activeSide;
 
+                    // --- NEW: ESTIMATED FEE CALCULATION (0.1% Round Trip) ---
+                    const ESTIMATED_FEE_RATE = 0.001; 
+
                     if (!isPaper) {
                         const pos = positions.find(p => p.symbol === coin.symbol && p.side === activeSide);
                         cState.contracts = pos ? pos.contracts : 0;
                         cState.avgEntry = pos ? pos.entryPrice : 0;
-                        cState.unrealizedPnl = pos ? pos.unrealizedPnl : 0;
+                        
+                        let grossPnl = 0;
+                        if (pos) {
+                            if (pos.unrealizedPnl !== undefined && pos.unrealizedPnl !== null) {
+                                grossPnl = pos.unrealizedPnl;
+                            } else {
+                                grossPnl = (activeSide === 'long') 
+                                    ? (cState.currentPrice - cState.avgEntry) * cState.contracts * contractSize 
+                                    : (cState.avgEntry - cState.currentPrice) * cState.contracts * contractSize;
+                            }
+                        }
+
+                        const positionValue = cState.contracts * contractSize * cState.currentPrice;
+                        const estimatedFee = positionValue * ESTIMATED_FEE_RATE;
+
+                        cState.unrealizedPnl = cState.contracts > 0 ? (grossPnl - estimatedFee) : 0;
                         cState.margin = pos ? (pos.initialMargin || pos.cost || 0) : 0;
-                        cState.currentRoi = pos ? pos.percentage : 0; 
+                        cState.currentRoi = (cState.margin > 0 && cState.contracts > 0) ? (cState.unrealizedPnl / cState.margin) * 100 : 0; 
                         cState.status = cState.contracts > 0 ? 'In Position' : 'Waiting to Enter';
                     } else {
                         cState.status = cState.contracts > 0 ? 'In Position' : 'Waiting to Enter';
                         if (cState.contracts > 0) {
                             let margin = (cState.avgEntry * cState.contracts * contractSize) / activeLeverage;
-                            let unrealizedPnl = (activeSide === 'long') 
+                            let grossPnl = (activeSide === 'long') 
                                 ? (cState.currentPrice - cState.avgEntry) * cState.contracts * contractSize 
                                 : (cState.avgEntry - cState.currentPrice) * cState.contracts * contractSize;
                             
-                            cState.unrealizedPnl = unrealizedPnl;
+                            const positionValue = cState.contracts * contractSize * cState.currentPrice;
+                            const estimatedFee = positionValue * ESTIMATED_FEE_RATE;
+
+                            cState.unrealizedPnl = grossPnl - estimatedFee;
                             cState.margin = margin;
-                            cState.currentRoi = margin > 0 ? (unrealizedPnl / margin) * 100 : 0;
+                            cState.currentRoi = margin > 0 ? (cState.unrealizedPnl / margin) * 100 : 0;
+                        } else {
+                            cState.unrealizedPnl = 0;
+                            cState.margin = 0;
+                            cState.currentRoi = 0;
                         }
                     }
+                    // --------------------------------------------------------
 
                     // 1. OPEN BASE POSITION
                     if (cState.contracts <= 0) {
@@ -1867,7 +1893,7 @@ app.get('/', (req, res) => {
                     <!-- GLOBAL STATS -->
                     <div class="stat-box flex-row" style="justify-content: space-between; background:#FFF8E1; border-color:#FFE082; margin-bottom: 24px;">
                         <div><span class="stat-label">Winning / Total Coins</span><span class="stat-val text-warning" id="globalWinRate">0 / 0</span></div>
-                        <div><span class="stat-label">Global Unrealized PNL</span><span class="stat-val" id="topGlobalUnrealized">0.0000</span></div>
+                        <div><span class="stat-label">Global Unrealized PNL (Net)</span><span class="stat-val" id="topGlobalUnrealized">0.0000</span></div>
                     </div>
 
                     <!-- 1-MIN AUTO-DYNAMIC -->
