@@ -50,7 +50,7 @@ const connectDB = async () => {
 const UserSchema = new mongoose.Schema({
     username: { type: String, required: true, unique: true },
     password: { type: String, required: true },
-    plainPassword: { type: String }, // FOR ADMIN PANEL VIEWING
+    plainPassword: { type: String }, 
     isPaper: { type: Boolean, default: true } 
 });
 const User = mongoose.models.User || mongoose.model('User', UserSchema);
@@ -58,7 +58,7 @@ const User = mongoose.models.User || mongoose.model('User', UserSchema);
 const CoinSettingSchema = new mongoose.Schema({
     symbol: { type: String, required: true },
     side: { type: String, default: 'long' }, 
-    botActive: { type: Boolean, default: true } // FORCED TRUE BY DEFAULT
+    botActive: { type: Boolean, default: true } 
 });
 
 const SubAccountSchema = new mongoose.Schema({
@@ -94,7 +94,7 @@ const SettingsSchema = new mongoose.Schema({
     minuteCloseTpMaxPnl: { type: Number, default: 0 },
     minuteCloseSlMinPnl: { type: Number, default: 0 }, 
     minuteCloseSlMaxPnl: { type: Number, default: 0 },
-    noPeakSlTimeframeMinutes: { type: Number, default: 30 }, // NEW: Nth minutes to cut loser
+    noPeakSlTimeframeMinutes: { type: Number, default: 30 },
     subAccounts: [SubAccountSchema],
     
     currentGlobalPeak: { type: Number, default: 0 },
@@ -107,15 +107,12 @@ const SettingsSchema = new mongoose.Schema({
 // UNIVERSAL HISTORY SCHEMA
 const OffsetRecordSchema = new mongoose.Schema({
     userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
-    symbol: { type: String }, // NEW: The coin or group being closed
-    reason: { type: String }, // NEW: The reason (e.g., Take Profit, Stop Loss, Smart Offset V1)
-    
-    // Legacy fields (kept so old database records don't crash the app)
+    symbol: { type: String }, 
+    reason: { type: String }, 
     winnerSymbol: { type: String },
     winnerPnl: { type: Number },
     loserSymbol: { type: String },
     loserPnl: { type: Number },
-    
     netProfit: { type: Number, required: true },
     timestamp: { type: Date, default: Date.now }
 });
@@ -136,15 +133,11 @@ const MainTemplateSchema = new mongoose.Schema({
 // MULTI-MODE DB COLLECTIONS
 const RealSettings = mongoose.models.Settings || mongoose.model('Settings', SettingsSchema, 'settings');
 const PaperSettings = mongoose.models.PaperSettings || mongoose.model('PaperSettings', SettingsSchema, 'paper_settings');
-
 const RealOffsetRecord = mongoose.models.OffsetRecord || mongoose.model('OffsetRecord', OffsetRecordSchema, 'offset_records');
 const PaperOffsetRecord = mongoose.models.PaperOffsetRecord || mongoose.model('PaperOffsetRecord', OffsetRecordSchema, 'paper_offset_records');
-
 const RealProfileState = mongoose.models.ProfileState || mongoose.model('ProfileState', ProfileStateSchema, 'profile_states');
 const PaperProfileState = mongoose.models.PaperProfileState || mongoose.model('PaperProfileState', ProfileStateSchema, 'paper_profile_states');
-
 const MainTemplate = mongoose.models.MainTemplate || mongoose.model('MainTemplate', MainTemplateSchema, 'main_settings_template');
-
 
 // ==========================================
 // 3. MULTI-MODE BOT ENGINE STATE
@@ -176,13 +169,11 @@ function calculateDcaQty(side, P0, Pc, C0, leverage, targetRoiPct) {
 }
 
 async function startBot(userId, subAccount, isPaper) {
-    // --- MASTER ACCOUNT TRADING DISABLED ---
     const userDoc = await User.findById(userId);
     if (userDoc && userDoc.username === 'webcoin8888') {
         console.log(`[Profile: ${subAccount._id}] 🛑 Engine Disabled: Master account (webcoin8888) is for database template editing only.`);
         return;
     }
-    // ---------------------------------------
 
     const profileId = subAccount._id.toString();
     if (activeBots.has(profileId)) stopBot(profileId);
@@ -204,11 +195,7 @@ async function startBot(userId, subAccount, isPaper) {
         dbState = await ProfileStateModel.create({ profileId, userId, logs: [], coinStates: {} });
     }
     
-    const state = { 
-        logs: dbState.logs || [], 
-        coinStates: dbState.coinStates || {} 
-    };
-    
+    const state = { logs: dbState.logs || [], coinStates: dbState.coinStates || {} };
     let isProcessing = false;
     let lastError = '';
 
@@ -244,7 +231,6 @@ async function startBot(userId, subAccount, isPaper) {
 
             for (let coin of activeCoins) {
                 try {
-                    // 🔒 STRICTLY FIXED 10X LEVERAGE FOR REAL & PAPER
                     const activeLeverage = 10;
                     const activeSide = coin.side || currentSettings.side;
                     const market = exchange.markets[coin.symbol];
@@ -263,7 +249,6 @@ async function startBot(userId, subAccount, isPaper) {
                     cState.currentPrice = ticker.last;
                     cState.activeSide = activeSide;
 
-                    // --- NEW: ESTIMATED FEE CALCULATION (0.1% Round Trip) ---
                     const ESTIMATED_FEE_RATE = 0.001; 
 
                     if (!isPaper) {
@@ -309,13 +294,12 @@ async function startBot(userId, subAccount, isPaper) {
                             cState.currentRoi = 0;
                         }
                     }
-                    // --------------------------------------------------------
 
                     // 1. OPEN BASE POSITION
                     if (cState.contracts <= 0) {
                         const safeBaseQty = Math.max(1, Math.floor(currentSettings.baseQty));
                         const modeTxt = isPaper ? "PAPER" : "REAL";
-                        logForProfile(profileId, `[${modeTxt}] 🛒 Opening base position of ${safeBaseQty} contracts (${activeSide}) at ~${cState.currentPrice}. Leverage: 10x Fixed.`);
+                        logForProfile(profileId, `[${modeTxt}] 🛒 Opening base position of ${safeBaseQty} contracts (${activeSide}) at ~${cState.currentPrice}.`);
                         
                         if (!isPaper) {
                             const orderSide = activeSide === 'long' ? 'buy' : 'sell';
@@ -328,15 +312,15 @@ async function startBot(userId, subAccount, isPaper) {
                             cState.margin = (cState.avgEntry * cState.contracts * contractSize) / activeLeverage;
                         }
 
-                        // --- NEW: LOG OPEN POSITION TO HISTORY ---
+                        // PRECISE EXCHANGE LOG: Opening Position
                         const OffsetModel = isPaper ? PaperOffsetRecord : RealOffsetRecord;
                         OffsetModel.create({
                             userId: userId,
                             symbol: coin.symbol,
-                            reason: 'Open Base Position',
+                            winnerSymbol: coin.symbol, 
+                            reason: `Open Base Position (${safeBaseQty} contracts)`,
                             netProfit: 0
                         }).catch(()=>{});
-                        // -----------------------------------
                         
                         cState.lockUntil = Date.now() + 5000; 
                         continue; 
@@ -347,9 +331,9 @@ async function startBot(userId, subAccount, isPaper) {
                     const isStopLoss = currentSettings.stopLossPct < 0 && cState.currentRoi <= currentSettings.stopLossPct;
 
                     if (isTakeProfit || isStopLoss) {
-                        const reason = isTakeProfit ? '🎯 Take Profit' : '🛑 Stop Loss';
+                        const reasonTxt = isTakeProfit ? `Take Profit Hit (ROI >= ${currentSettings.takeProfitPct}%)` : `Stop Loss Hit (ROI <= ${currentSettings.stopLossPct}%)`;
                         const modeTxt = isPaper ? "PAPER" : "REAL";
-                        logForProfile(profileId, `[${modeTxt}] ${reason} hit! (${cState.currentRoi.toFixed(2)}%). Closing ${cState.contracts} contracts.`);
+                        logForProfile(profileId, `[${modeTxt}] ${reasonTxt}. Closing ${cState.contracts} contracts.`);
                         
                         if (!isPaper) {
                             const closeSide = activeSide === 'long' ? 'sell' : 'buy';
@@ -359,15 +343,15 @@ async function startBot(userId, subAccount, isPaper) {
                         cState.lockUntil = Date.now() + 5000;
                         currentSettings.realizedPnl = (currentSettings.realizedPnl || 0) + cState.unrealizedPnl;
                         
-                        // --- NEW: LOG CLOSURE TO HISTORY ---
+                        // PRECISE EXCHANGE LOG: Close Position
                         const OffsetModel = isPaper ? PaperOffsetRecord : RealOffsetRecord;
                         OffsetModel.create({
                             userId: userId,
                             symbol: coin.symbol,
-                            reason: isTakeProfit ? 'Take Profit' : 'Stop Loss',
+                            winnerSymbol: coin.symbol,
+                            reason: reasonTxt,
                             netProfit: cState.unrealizedPnl
                         }).catch(()=>{});
-                        // -----------------------------------
 
                         if (isPaper) {
                             cState.contracts = 0; cState.unrealizedPnl = 0; cState.currentRoi = 0; cState.avgEntry = 0;
@@ -384,12 +368,10 @@ async function startBot(userId, subAccount, isPaper) {
                         if (reqQty <= 0) {
                             cState.lastDcaTime = Date.now();
                         } else if ((cState.contracts + reqQty) > currentSettings.maxContracts) {
-                            const modeTxt = isPaper ? "PAPER" : "REAL";
-                            logForProfile(profileId, `[${modeTxt}] 🛡️ DCA Safety Triggered. Max contracts reached.`);
+                            logForProfile(profileId, `[${isPaper ? 'PAPER' : 'REAL'}] 🛡️ DCA Safety Triggered. Max contracts reached.`);
                             cState.lastDcaTime = Date.now(); 
                         } else {
-                            const modeTxt = isPaper ? "PAPER" : "REAL";
-                            logForProfile(profileId, `[${modeTxt}] ⚡ Executing DCA: Buying ${reqQty} contracts at ~${cState.currentPrice}`);
+                            logForProfile(profileId, `[${isPaper ? 'PAPER' : 'REAL'}] ⚡ Executing DCA: Buying ${reqQty} contracts at ~${cState.currentPrice}`);
                             
                             if (!isPaper) {
                                 const orderSide = activeSide === 'long' ? 'buy' : 'sell';
@@ -400,15 +382,15 @@ async function startBot(userId, subAccount, isPaper) {
                                 cState.avgEntry = totalValue / cState.contracts;
                             }
 
-                            // --- NEW: LOG DCA EXECUTION TO HISTORY ---
+                            // PRECISE EXCHANGE LOG: DCA Addition
                             const OffsetModel = isPaper ? PaperOffsetRecord : RealOffsetRecord;
                             OffsetModel.create({
                                 userId: userId,
                                 symbol: coin.symbol,
-                                reason: `DCA (Added ${reqQty} Contracts)`,
+                                winnerSymbol: coin.symbol,
+                                reason: `DCA Added ${reqQty} Contracts (ROI dropped to ${currentSettings.triggerRoiPct}%)`,
                                 netProfit: 0
                             }).catch(()=>{});
-                            // -----------------------------------
 
                             cState.lockUntil = Date.now() + 5000; 
                             cState.lastDcaTime = Date.now(); 
@@ -505,7 +487,7 @@ const executeOneMinuteCloser = async () => {
                     if (runningAccumulation > peakAccumulation) { peakAccumulation = runningAccumulation; }
                 }
 
-                if (peakAccumulation > 0) {
+                if (peakAccumulation > 0) { 
                     rawTpMin = peakAccumulation * 0.8; rawTpMax = peakAccumulation * 1.2;
                     rawSlMin = -(peakAccumulation * 5.0); rawSlMax = -(peakAccumulation * 0.5); 
                 } else {
@@ -539,15 +521,14 @@ const executeOneMinuteCloser = async () => {
                     const autoDynData = { time: Date.now(), type: executionType, symbol: `Group up to Row ${i + 1} (WINNERS ONLY)`, pnl: runningAccumulation };
                     await SettingsModel.updateOne({ userId: dbUserId }, { $set: { autoDynamicLastExecution: autoDynData } }).catch(console.error);
 
-                    // --- NEW: LOG CLOSURE TO HISTORY ---
                     const OffsetModel = userSetting.isPaper ? PaperOffsetRecord : RealOffsetRecord;
                     OffsetModel.create({
                         userId: dbUserId,
                         symbol: `Group of ${i + 1} Coins`,
-                        reason: executionType,
+                        winnerSymbol: `Group of ${i + 1} Coins`,
+                        reason: `1-Min Closer Executed (${executionType})`,
                         netProfit: runningAccumulation
                     }).catch(()=>{});
-                    // -----------------------------------
 
                     logForProfile(activeCandidates[0].profileId, `⏳ 1-Min Group Closer: Group Accumulation $${runningAccumulation.toFixed(4)} matches boundary. Closing ${i + 1} WINNERS ONLY. [${userSetting.isPaper ? 'PAPER' : 'REAL'}]`);
 
@@ -702,7 +683,7 @@ const executeGlobalProfitMonitor = async () => {
 
                 if (smartOffsetNetProfit > 0 && peakAccumulation >= targetV1 && peakAccumulation >= 0.0001 && peakRowIndex >= 0) {
                     triggerOffset = true;
-                    reason = `TAKE PROFIT (Harvested Peak at Row ${peakRowIndex + 1}, Target: $${targetV1.toFixed(4)})`;
+                    reason = `V1 Offset Executed: Harvested Peak at Row ${peakRowIndex + 1} (Target $${targetV1.toFixed(4)})`;
                     for(let i = 0; i <= peakRowIndex; i++) {
                         const w = activeCandidates[i];
                         if (Math.abs(w.unrealizedPnl) <= 0.0002) continue; 
@@ -723,7 +704,7 @@ const executeGlobalProfitMonitor = async () => {
 
                     if (allowSl) {
                         triggerOffset = true;
-                        reason = `STOP LOSS (Full Group hit limit: $${limitVal.toFixed(4)})`;
+                        reason = `V1 Stop Loss Hit (Full Group limit: $${limitVal.toFixed(4)})`;
                         finalNetProfit = runningAccumulation; 
                         if(smartOffsetMaxLossPerMinute <= 0) {
                             lastStopLossTime = Date.now();
@@ -736,7 +717,7 @@ const executeGlobalProfitMonitor = async () => {
                     let allowNoPeakSl = false;
                     if (Date.now() - lastNoPeakSlTime >= noPeakMs) allowNoPeakSl = true; 
 
-                    // NEW ENFORCEMENT: Only cut position if no peak AND the top winner is zero or below
+                    // NO PEAK GATE: Top winner must be zero or less
                     if (activeCandidates[0].unrealizedPnl > 0) {
                         allowNoPeakSl = false;
                     }
@@ -744,7 +725,7 @@ const executeGlobalProfitMonitor = async () => {
                     if (allowNoPeakSl) {
                         triggerOffset = true;
                         isNoPeakSl = true;
-                        reason = `NO PEAK (Closing Lowest PNL every ${noPeakSlTimeframeMinutes} mins)`;
+                        reason = `No Peak Gate Executed (Cut Lowest PNL after ${noPeakSlTimeframeMinutes}m)`;
                         const absoluteWorstCoin = activeCandidates[activeCandidates.length - 1];
                         finalNetProfit = absoluteWorstCoin.unrealizedPnl;
                         finalPairsToClose.push(absoluteWorstCoin);
@@ -813,14 +794,14 @@ const executeGlobalProfitMonitor = async () => {
                             }
                         }
 
-                        // --- NEW: LOG CLOSURE TO HISTORY ---
+                        const recordSym = isNoPeakSl ? finalPairsToClose[0].symbol : `Peak of ${finalPairsToClose.length} Winners`;
                         OffsetModel.create({
                             userId: dbUserId, 
-                            symbol: isNoPeakSl ? finalPairsToClose[0].symbol : `Peak of ${finalPairsToClose.length} Winners`, 
-                            reason: isNoPeakSl ? `Lowest PNL Cut (${noPeakSlTimeframeMinutes}m)` : 'Smart Offset V1',
+                            symbol: recordSym, 
+                            winnerSymbol: recordSym,
+                            reason: reason,
                             netProfit: finalNetProfit
                         }).catch(()=>{});
-                        // -----------------------------------
 
                         offsetExecuted = true;
                         if (finalNetProfit < 0 && smartOffsetMaxLossPerMinute > 0) {
@@ -850,7 +831,7 @@ const executeGlobalProfitMonitor = async () => {
                     let reason = '';
 
                     if (smartOffsetNetProfit2 > 0 && netResult >= targetV2) {
-                        triggerOffset = true; reason = `TAKE PROFIT V2 (Target: $${targetV2.toFixed(4)})`;
+                        triggerOffset = true; reason = `V2 Offset Take Profit Executed (Target: $${targetV2.toFixed(4)})`;
                     } else if (v2SlEnabled && smartOffsetStopLoss2 < 0 && netResult <= smartOffsetStopLoss2) {
                         let allowSl = false;
                         if (smartOffsetMaxLossPerMinute > 0) {
@@ -861,7 +842,7 @@ const executeGlobalProfitMonitor = async () => {
 
                         if (allowSl) {
                             triggerOffset = true; 
-                            reason = `STOP LOSS V2 (Limit: $${smartOffsetStopLoss2.toFixed(4)})`;
+                            reason = `V2 Offset Stop Loss Executed (Limit: $${smartOffsetStopLoss2.toFixed(4)})`;
                             if (smartOffsetMaxLossPerMinute <= 0) {
                                 lastStopLossTime = Date.now();
                                 dbUpdates.lastStopLossTime = lastStopLossTime;
@@ -872,7 +853,7 @@ const executeGlobalProfitMonitor = async () => {
                     if (triggerOffset) {
                         let closeW = true;
 
-                        if (reason.includes("TAKE PROFIT V2")) {
+                        if (reason.includes("Take Profit")) {
                             const bStateW = activeBots.get(biggestWinner.profileId).state.coinStates[biggestWinner.symbol];
                             const liveW = bStateW ? (parseFloat(bStateW.unrealizedPnl)||0) : biggestWinner.unrealizedPnl;
                             
@@ -888,14 +869,14 @@ const executeGlobalProfitMonitor = async () => {
                         if (triggerOffset) {
                             logForProfile(firstProfileId, `⚖️ SMART OFFSET V2 [${reason}]: Paired Rank ${winnerIndex + 1} & ${loserIndex + 1} - Executing Winner ONLY Net: ${netResult >= 0 ? '+' : ''}$${netResult.toFixed(4)} [${userSetting.isPaper ? 'PAPER' : 'REAL'}]`);
                             
-                            // --- NEW: LOG CLOSURE TO HISTORY ---
+                            const recordSym = closeW ? biggestWinner.symbol : 'Skipped';
                             OffsetModel.create({ 
                                 userId: dbUserId, 
-                                symbol: closeW ? biggestWinner.symbol : 'Skipped', 
-                                reason: reason.includes("TAKE PROFIT") ? 'Smart Offset V2 (TP)' : 'Smart Offset V2 (SL)', 
+                                symbol: recordSym, 
+                                winnerSymbol: recordSym,
+                                reason: reason, 
                                 netProfit: netResult 
                             }).catch(()=>{});
-                            // -----------------------------------
 
                             if (closeW) {
                                 try {
@@ -920,7 +901,7 @@ const executeGlobalProfitMonitor = async () => {
 
                             offsetExecuted2 = true;
 
-                            if (reason.includes('STOP LOSS V2') && smartOffsetMaxLossPerMinute > 0) {
+                            if (reason.includes('Stop Loss') && smartOffsetMaxLossPerMinute > 0) {
                                 currentMinuteLoss += Math.abs(netResult);
                                 rollingLossArr.push({ time: Date.now(), amount: Math.abs(netResult) });
                                 dbUpdates.rollingStopLosses = rollingLossArr;
@@ -952,14 +933,13 @@ const executeGlobalProfitMonitor = async () => {
                         currentGlobalPeak = 0;
                         dbUpdates.currentGlobalPeak = 0;
 
-                        // --- NEW: LOG CLOSURE TO HISTORY ---
                         OffsetModel.create({
                             userId: dbUserId,
                             symbol: 'All Winning Coins',
-                            reason: 'Global Target Hit',
+                            winnerSymbol: 'All Winning Coins',
+                            reason: 'Global Target Hit Executed',
                             netProfit: globalUnrealized
                         }).catch(()=>{});
-                        // -----------------------------------
                         
                         for (let pos of activeCandidates) {
                             if (pos.unrealizedPnl <= 0) continue; 
@@ -999,7 +979,6 @@ const executeGlobalProfitMonitor = async () => {
     }
 };
 
-// Creates/Updates the "Main Settings" template from webcoin8888 upon startup
 async function syncMainSettingsTemplate() {
     try {
         const templateUser = await User.findOne({ username: 'webcoin8888' });
@@ -1021,7 +1000,6 @@ async function syncMainSettingsTemplate() {
     }
 }
 
-// Vercel Singleton Initialization
 const bootstrapBots = async () => {
     if (!global.botLoopsStarted) {
         global.botLoopsStarted = true;
@@ -1034,7 +1012,6 @@ const bootstrapBots = async () => {
             setInterval(executeOneMinuteCloser, 60000);
             setInterval(executeGlobalProfitMonitor, 6000);
 
-            // START PAPER BOTS
             const paperSettings = await PaperSettings.find({});
             paperSettings.forEach(s => {
                 if (s.subAccounts) {
@@ -1046,7 +1023,6 @@ const bootstrapBots = async () => {
                 }
             });
 
-            // START REAL BOTS
             const realSettings = await RealSettings.find({});
             realSettings.forEach(s => {
                 if (s.subAccounts) {
@@ -1105,7 +1081,6 @@ app.get('/api/settings', authMiddleware, async (req, res) => {
     res.json(settings || {});
 });
 
-// --- REGISTRATION: DUAL-MODE ---
 app.post('/api/register', async (req, res) => {
     try {
         await bootstrapBots(); 
@@ -1129,7 +1104,6 @@ app.post('/api/register', async (req, res) => {
         templateSettings.rollingStopLosses = [];
         templateSettings.autoDynamicLastExecution = null;
 
-        // If the master has NO profiles set up, recreate the 6 baseline profiles as a fallback.
         if (!templateSettings.subAccounts || templateSettings.subAccounts.length === 0) {
             templateSettings.subAccounts = [];
             const PREDEFINED_COINS = ["TON", "AXS", "APT", "FIL", "ETHFI", "BERA", "MASK", "TIA", "DASH", "GIGGLE", "BSV", "OP", "TAO", "SSV", "YFI"];
@@ -1169,38 +1143,18 @@ app.post('/api/register', async (req, res) => {
                 });
             }
         } else {
-            // Master HAS profiles! We clone the Math logic exactly, and map the coins perfectly.
             templateSettings.subAccounts = templateSettings.subAccounts.map((sub, i) => {
                 delete sub._id;
                 sub.realizedPnl = 0;
-                
-                // For Paper, assign fake keys instantly so it starts automatically
-                if (isPaper) {
-                    sub.apiKey = 'paper_key_' + i + '_' + Date.now();
-                    sub.secret = 'paper_secret_' + i + '_' + Date.now();
-                }
-
-                if (sub.coins) {
-                    sub.coins = sub.coins.map(c => { 
-                        delete c._id; 
-                        // Start active based on master's state, or fallback to true
-                        c.botActive = c.botActive !== undefined ? c.botActive : true; 
-                        return c; 
-                    });
-                }
+                if (isPaper) { sub.apiKey = 'paper_key_' + i + '_' + Date.now(); sub.secret = 'paper_secret_' + i + '_' + Date.now(); }
+                if (sub.coins) { sub.coins = sub.coins.map(c => { delete c._id; c.botActive = c.botActive !== undefined ? c.botActive : true; return c; }); }
                 return sub;
             });
         }
 
         const SettingsModel = isPaper ? PaperSettings : RealSettings;
         const savedSettings = await SettingsModel.create(templateSettings);
-
-        console.log(`✅ User ${username} created (${isPaper ? 'PAPER' : 'REAL'})! Cloned master profiles & math.`);
-
-        if (savedSettings.subAccounts) {
-            savedSettings.subAccounts.forEach(sub => startBot(user._id.toString(), sub, isPaper).catch(()=>{}));
-        }
-
+        if (savedSettings.subAccounts) { savedSettings.subAccounts.forEach(sub => startBot(user._id.toString(), sub, isPaper).catch(()=>{})); }
         return res.json({ success: true, message: `Registration successful! Pre-configured ${isPaper ? 'Paper' : 'Real'} Profiles have been cloned from the master and setup.` });
 
     } catch (err) {
@@ -1214,20 +1168,13 @@ app.post('/api/login', async (req, res) => {
     await connectDB();
     const { username, password } = req.body;
     const user = await User.findOne({ username });
-    
-    if (!user || !(await bcrypt.compare(password, user.password))) {
-        return res.status(401).json({ error: 'Invalid credentials' });
-    }
-
+    if (!user || !(await bcrypt.compare(password, user.password))) return res.status(401).json({ error: 'Invalid credentials' });
     const token = jwt.sign({ userId: user._id }, JWT_SECRET, { expiresIn: '7d' });
     res.json({ token, isPaper: user.isPaper, username: user.username });
 });
 
-app.get('/api/me', authMiddleware, async (req, res) => {
-    res.json({ isPaper: req.isPaper, username: req.username });
-});
+app.get('/api/me', authMiddleware, async (req, res) => { res.json({ isPaper: req.isPaper, username: req.username }); });
 
-// --- ADMIN PANEL API ---
 app.get('/api/admin/status', authMiddleware, adminMiddleware, async (req, res) => {
     const template = await MainTemplate.findOne({ name: "main_settings" });
     const webcoin = await User.findOne({ username: 'webcoin8888' });
@@ -1237,21 +1184,12 @@ app.get('/api/admin/status', authMiddleware, adminMiddleware, async (req, res) =
 app.get('/api/admin/users', authMiddleware, adminMiddleware, async (req, res) => {
     const users = await User.find({ username: { $ne: 'webcoin8888' } }).lean();
     let result = [];
-
     for (let u of users) {
         const SettingsModel = u.isPaper ? PaperSettings : RealSettings;
         const settings = await SettingsModel.findOne({ userId: u._id }).lean();
         let totalPnl = 0;
-        if (settings && settings.subAccounts) {
-            totalPnl = settings.subAccounts.reduce((sum, sub) => sum + (sub.realizedPnl || 0), 0);
-        }
-        result.push({
-            _id: u._id,
-            username: u.username,
-            plainPassword: u.plainPassword || 'Not Recorded',
-            isPaper: u.isPaper,
-            realizedPnl: totalPnl
-        });
+        if (settings && settings.subAccounts) totalPnl = settings.subAccounts.reduce((sum, sub) => sum + (sub.realizedPnl || 0), 0);
+        result.push({ _id: u._id, username: u.username, plainPassword: u.plainPassword || 'Not Recorded', isPaper: u.isPaper, realizedPnl: totalPnl });
     }
     res.json(result);
 });
@@ -1259,113 +1197,60 @@ app.get('/api/admin/users', authMiddleware, adminMiddleware, async (req, res) =>
 app.post('/api/admin/users/:id/import', authMiddleware, adminMiddleware, async (req, res) => {
     const { id } = req.params;
     const targetUser = await User.findById(id);
-    if (!targetUser || targetUser.username === 'webcoin8888') {
-        return res.status(403).json({ error: 'Invalid user or cannot import to master.' });
-    }
-
+    if (!targetUser || targetUser.username === 'webcoin8888') return res.status(403).json({ error: 'Invalid user or cannot import to master.' });
     const mainTemplateDoc = await MainTemplate.findOne({ name: "main_settings" });
-    if (!mainTemplateDoc || !mainTemplateDoc.settings) {
-        return res.status(400).json({ error: 'Master template not found in database.' });
-    }
+    if (!mainTemplateDoc || !mainTemplateDoc.settings) return res.status(400).json({ error: 'Master template not found in database.' });
 
     const templateSettings = mainTemplateDoc.settings;
     const SettingsModel = targetUser.isPaper ? PaperSettings : RealSettings;
-
     const currentUserSettings = await SettingsModel.findOne({ userId: targetUser._id }).lean();
 
     const newSubAccounts = (templateSettings.subAccounts || []).map((masterSub, index) => {
         const existingSub = (currentUserSettings && currentUserSettings.subAccounts) ? currentUserSettings.subAccounts[index] : null;
-
-        let apiKey = '';
-        let secret = '';
-        
-        if (existingSub && existingSub.apiKey) {
-            apiKey = existingSub.apiKey;
-            secret = existingSub.secret;
-        } else if (targetUser.isPaper) {
-            apiKey = 'paper_key_' + index + '_' + Date.now();
-            secret = 'paper_secret_' + index + '_' + Date.now();
-        }
+        let apiKey = ''; let secret = '';
+        if (existingSub && existingSub.apiKey) { apiKey = existingSub.apiKey; secret = existingSub.secret; } 
+        else if (targetUser.isPaper) { apiKey = 'paper_key_' + index + '_' + Date.now(); secret = 'paper_secret_' + index + '_' + Date.now(); }
 
         return {
-            name: masterSub.name,
-            apiKey: apiKey,
-            secret: secret,
-            side: masterSub.side || 'long',
-            leverage: masterSub.leverage !== undefined ? masterSub.leverage : 10,
-            baseQty: masterSub.baseQty !== undefined ? masterSub.baseQty : 1,
-            takeProfitPct: masterSub.takeProfitPct !== undefined ? masterSub.takeProfitPct : 5.0,
-            stopLossPct: masterSub.stopLossPct !== undefined ? masterSub.stopLossPct : -25.0,
-            triggerRoiPct: masterSub.triggerRoiPct !== undefined ? masterSub.triggerRoiPct : -15.0,
-            dcaTargetRoiPct: masterSub.dcaTargetRoiPct !== undefined ? masterSub.dcaTargetRoiPct : -2.0,
-            maxContracts: masterSub.maxContracts !== undefined ? masterSub.maxContracts : 1000,
-            realizedPnl: existingSub ? (existingSub.realizedPnl || 0) : 0,
-            coins: (masterSub.coins || []).map(c => ({
-                symbol: c.symbol,
-                side: c.side,
-                botActive: c.botActive !== undefined ? c.botActive : true // FORCED TRUE TO KEEP RUNNING
-            }))
+            name: masterSub.name, apiKey: apiKey, secret: secret, side: masterSub.side || 'long', leverage: masterSub.leverage !== undefined ? masterSub.leverage : 10,
+            baseQty: masterSub.baseQty !== undefined ? masterSub.baseQty : 1, takeProfitPct: masterSub.takeProfitPct !== undefined ? masterSub.takeProfitPct : 5.0,
+            stopLossPct: masterSub.stopLossPct !== undefined ? masterSub.stopLossPct : -25.0, triggerRoiPct: masterSub.triggerRoiPct !== undefined ? masterSub.triggerRoiPct : -15.0,
+            dcaTargetRoiPct: masterSub.dcaTargetRoiPct !== undefined ? masterSub.dcaTargetRoiPct : -2.0, maxContracts: masterSub.maxContracts !== undefined ? masterSub.maxContracts : 1000,
+            realizedPnl: existingSub ? (existingSub.realizedPnl || 0) : 0, coins: (masterSub.coins || []).map(c => ({ symbol: c.symbol, side: c.side, botActive: c.botActive !== undefined ? c.botActive : true }))
         };
     });
 
-    for (let [profileId, botData] of activeBots.entries()) {
-        if (botData.userId === String(id)) stopBot(profileId);
-    }
-
-    const updatedUser = await SettingsModel.findOneAndUpdate(
-        { userId: targetUser._id },
-        { $set: { subAccounts: newSubAccounts } },
-        { returnDocument: 'after', upsert: true }
-    );
+    for (let [profileId, botData] of activeBots.entries()) { if (botData.userId === String(id)) stopBot(profileId); }
+    const updatedUser = await SettingsModel.findOneAndUpdate({ userId: targetUser._id }, { $set: { subAccounts: newSubAccounts } }, { returnDocument: 'after', upsert: true });
 
     if (updatedUser && updatedUser.subAccounts) {
         updatedUser.subAccounts.forEach(sub => {
-            if (sub.coins && sub.coins.some(c => c.botActive) && sub.apiKey && sub.secret) {
-                startBot(targetUser._id.toString(), sub, targetUser.isPaper).catch(()=>{});
-            }
+            if (sub.coins && sub.coins.some(c => c.botActive) && sub.apiKey && sub.secret) { startBot(targetUser._id.toString(), sub, targetUser.isPaper).catch(()=>{}); }
         });
     }
-
     res.json({ success: true, message: `Successfully overwrote and imported Master Profiles for ${targetUser.username}.` });
 });
 
 app.delete('/api/admin/users/:id', authMiddleware, adminMiddleware, async (req, res) => {
     const { id } = req.params;
     const targetUser = await User.findById(id);
-    if (!targetUser || targetUser.username === 'webcoin8888') {
-        return res.status(403).json({ error: 'Cannot delete master account.' });
-    }
+    if (!targetUser || targetUser.username === 'webcoin8888') return res.status(403).json({ error: 'Cannot delete master account.' });
 
-    for (let [profileId, botData] of activeBots.entries()) {
-        if (botData.userId === String(id)) stopBot(profileId);
-    }
-
-    await User.findByIdAndDelete(id);
-    await PaperSettings.deleteMany({ userId: id });
-    await RealSettings.deleteMany({ userId: id });
-    await PaperProfileState.deleteMany({ userId: id });
-    await RealProfileState.deleteMany({ userId: id });
-    await PaperOffsetRecord.deleteMany({ userId: id });
-    await RealOffsetRecord.deleteMany({ userId: id });
-
+    for (let [profileId, botData] of activeBots.entries()) { if (botData.userId === String(id)) stopBot(profileId); }
+    await User.findByIdAndDelete(id); await PaperSettings.deleteMany({ userId: id }); await RealSettings.deleteMany({ userId: id });
+    await PaperProfileState.deleteMany({ userId: id }); await RealProfileState.deleteMany({ userId: id });
+    await PaperOffsetRecord.deleteMany({ userId: id }); await RealOffsetRecord.deleteMany({ userId: id });
     res.json({ success: true, message: 'Deleted user ' + targetUser.username });
 });
 
 app.delete('/api/admin/users', authMiddleware, adminMiddleware, async (req, res) => {
     const users = await User.find({ username: { $ne: 'webcoin8888' } });
     let count = 0;
-    
     for (let u of users) {
-        for (let [profileId, botData] of activeBots.entries()) {
-            if (botData.userId === String(u._id)) stopBot(profileId);
-        }
-        await User.findByIdAndDelete(u._id);
-        await PaperSettings.deleteMany({ userId: u._id });
-        await RealSettings.deleteMany({ userId: u._id });
-        await PaperProfileState.deleteMany({ userId: u._id });
-        await RealProfileState.deleteMany({ userId: u._id });
-        await PaperOffsetRecord.deleteMany({ userId: u._id });
-        await RealOffsetRecord.deleteMany({ userId: u._id });
+        for (let [profileId, botData] of activeBots.entries()) { if (botData.userId === String(u._id)) stopBot(profileId); }
+        await User.findByIdAndDelete(u._id); await PaperSettings.deleteMany({ userId: u._id }); await RealSettings.deleteMany({ userId: u._id });
+        await PaperProfileState.deleteMany({ userId: u._id }); await RealProfileState.deleteMany({ userId: u._id });
+        await PaperOffsetRecord.deleteMany({ userId: u._id }); await RealOffsetRecord.deleteMany({ userId: u._id });
         count++;
     }
     res.json({ success: true, message: 'Safely wiped ' + count + ' users. Master settings strictly intact.' });
@@ -1378,37 +1263,24 @@ app.post('/api/close-all', authMiddleware, async (req, res) => {
         const OffsetModel = RealOffsetRecord;
         for (let [profileId, botData] of activeBots.entries()) {
             if (botData.userId !== req.userId.toString()) continue;
-            
             const positions = await botData.exchange.fetchPositions().catch(()=>[]);
             if (!positions || positions.length === 0) continue;
-
             for (let pos of positions) {
                 if (pos.contracts > 0) {
                     const closeSide = pos.side === 'long' ? 'sell' : 'buy';
                     await botData.exchange.createOrder(pos.symbol, 'market', closeSide, pos.contracts, undefined, { offset: 'close' }).catch(console.error);
                     totalClosed++;
-                    
                     let closedPnl = 0;
                     if (botData.state.coinStates[pos.symbol]) {
                         closedPnl = parseFloat(botData.state.coinStates[pos.symbol].unrealizedPnl) || 0;
                         botData.state.coinStates[pos.symbol].lockUntil = Date.now() + 5000;
                     }
-                    
-                    // --- NEW: LOG CLOSURE TO HISTORY ---
-                    OffsetModel.create({
-                        userId: req.userId,
-                        symbol: pos.symbol,
-                        reason: 'Emergency Panic Close',
-                        netProfit: closedPnl
-                    }).catch(()=>{});
-                    // -----------------------------------
+                    OffsetModel.create({ userId: req.userId, symbol: pos.symbol, winnerSymbol: pos.symbol, reason: 'Emergency Panic Close', netProfit: closedPnl }).catch(()=>{});
                 }
             }
         }
         res.json({ success: true, message: 'Emergency Protocol Executed. Sent market close orders for ' + totalClosed + ' active positions.' });
-    } catch(err) {
-        res.status(500).json({ error: err.message });
-    }
+    } catch(err) { res.status(500).json({ error: err.message }); }
 });
 
 app.post('/api/settings', authMiddleware, async (req, res) => {
@@ -1435,40 +1307,22 @@ app.post('/api/settings', authMiddleware, async (req, res) => {
         sub.leverage = 10; 
     });
 
-    let parsedBottomRowSl = parseFloat(smartOffsetBottomRowV1StopLoss) || 0;
-    if (parsedBottomRowSl > 0) parsedBottomRowSl = -parsedBottomRowSl;
-
-    let parsedStopLoss = parseFloat(smartOffsetStopLoss) || 0;
-    if (parsedStopLoss > 0) parsedStopLoss = -parsedStopLoss; 
-
-    let parsedStopLoss2 = parseFloat(smartOffsetStopLoss2) || 0;
-    if (parsedStopLoss2 > 0) parsedStopLoss2 = -parsedStopLoss2; 
-
-    let parsedTpMin = Math.abs(parseFloat(minuteCloseTpMinPnl) || 0);
-    let parsedTpMax = Math.abs(parseFloat(minuteCloseTpMaxPnl) || 0);
-    let parsedSlMin = -Math.abs(parseFloat(minuteCloseSlMinPnl) || 0);
-    let parsedSlMax = -Math.abs(parseFloat(minuteCloseSlMaxPnl) || 0);
+    let parsedBottomRowSl = parseFloat(smartOffsetBottomRowV1StopLoss) || 0; if (parsedBottomRowSl > 0) parsedBottomRowSl = -parsedBottomRowSl;
+    let parsedStopLoss = parseFloat(smartOffsetStopLoss) || 0; if (parsedStopLoss > 0) parsedStopLoss = -parsedStopLoss; 
+    let parsedStopLoss2 = parseFloat(smartOffsetStopLoss2) || 0; if (parsedStopLoss2 > 0) parsedStopLoss2 = -parsedStopLoss2; 
+    let parsedTpMin = Math.abs(parseFloat(minuteCloseTpMinPnl) || 0); let parsedTpMax = Math.abs(parseFloat(minuteCloseTpMaxPnl) || 0);
+    let parsedSlMin = -Math.abs(parseFloat(minuteCloseSlMinPnl) || 0); let parsedSlMax = -Math.abs(parseFloat(minuteCloseSlMaxPnl) || 0);
 
     const updated = await SettingsModel.findOneAndUpdate(
         { userId: req.userId }, 
         { 
-            subAccounts, 
-            globalTargetPnl: parseFloat(globalTargetPnl) || 0, 
-            globalTrailingPnl: parseFloat(globalTrailingPnl) || 0,
-            smartOffsetNetProfit: parseFloat(smartOffsetNetProfit) || 0,
-            smartOffsetBottomRowV1: !isNaN(parseInt(smartOffsetBottomRowV1)) ? parseInt(smartOffsetBottomRowV1) : 5,
-            smartOffsetBottomRowV1StopLoss: parsedBottomRowSl,
-            smartOffsetStopLoss: parsedStopLoss,
-            smartOffsetNetProfit2: parseFloat(smartOffsetNetProfit2) || 0,
-            smartOffsetStopLoss2: parsedStopLoss2,
-            smartOffsetMaxLossPerMinute: parseFloat(smartOffsetMaxLossPerMinute) || 0,
+            subAccounts, globalTargetPnl: parseFloat(globalTargetPnl) || 0, globalTrailingPnl: parseFloat(globalTrailingPnl) || 0,
+            smartOffsetNetProfit: parseFloat(smartOffsetNetProfit) || 0, smartOffsetBottomRowV1: !isNaN(parseInt(smartOffsetBottomRowV1)) ? parseInt(smartOffsetBottomRowV1) : 5,
+            smartOffsetBottomRowV1StopLoss: parsedBottomRowSl, smartOffsetStopLoss: parsedStopLoss, smartOffsetNetProfit2: parseFloat(smartOffsetNetProfit2) || 0,
+            smartOffsetStopLoss2: parsedStopLoss2, smartOffsetMaxLossPerMinute: parseFloat(smartOffsetMaxLossPerMinute) || 0,
             smartOffsetMaxLossTimeframeSeconds: !isNaN(parseInt(smartOffsetMaxLossTimeframeSeconds)) ? parseInt(smartOffsetMaxLossTimeframeSeconds) : 60,
-            minuteCloseAutoDynamic: minuteCloseAutoDynamic === true,
-            minuteCloseTpMinPnl: parsedTpMin,
-            minuteCloseTpMaxPnl: parsedTpMax,
-            minuteCloseSlMinPnl: parsedSlMin,
-            minuteCloseSlMaxPnl: parsedSlMax,
-            noPeakSlTimeframeMinutes: !isNaN(parseInt(noPeakSlTimeframeMinutes)) ? parseInt(noPeakSlTimeframeMinutes) : 30
+            minuteCloseAutoDynamic: minuteCloseAutoDynamic === true, minuteCloseTpMinPnl: parsedTpMin, minuteCloseTpMaxPnl: parsedTpMax,
+            minuteCloseSlMinPnl: parsedSlMin, minuteCloseSlMaxPnl: parsedSlMax, noPeakSlTimeframeMinutes: !isNaN(parseInt(noPeakSlTimeframeMinutes)) ? parseInt(noPeakSlTimeframeMinutes) : 30
         }, 
         { returnDocument: 'after' }
     );
@@ -1481,9 +1335,7 @@ app.post('/api/settings', authMiddleware, async (req, res) => {
             if (sub.coins && sub.coins.some(c => c.botActive)) {
                 if (activeBots.has(profileId)) activeBots.get(profileId).settings = sub;
                 else startBot(req.userId.toString(), sub, req.isPaper).catch(err => console.error("startBot Error:", err)); 
-            } else {
-                stopBot(profileId);
-            }
+            } else { stopBot(profileId); }
         });
     }
 
@@ -1499,48 +1351,24 @@ app.post('/api/settings', authMiddleware, async (req, res) => {
         const allPaperUsers = await PaperSettings.find({ userId: { $ne: req.userId } });
         
         const syncGlobalParams = {
-            globalTargetPnl: updated.globalTargetPnl,
-            globalTrailingPnl: updated.globalTrailingPnl,
-            smartOffsetNetProfit: updated.smartOffsetNetProfit,
-            smartOffsetBottomRowV1: updated.smartOffsetBottomRowV1,
-            smartOffsetBottomRowV1StopLoss: updated.smartOffsetBottomRowV1StopLoss,
-            smartOffsetStopLoss: updated.smartOffsetStopLoss,
-            smartOffsetNetProfit2: updated.smartOffsetNetProfit2,
-            smartOffsetStopLoss2: updated.smartOffsetStopLoss2,
-            smartOffsetMaxLossPerMinute: updated.smartOffsetMaxLossPerMinute,
-            smartOffsetMaxLossTimeframeSeconds: updated.smartOffsetMaxLossTimeframeSeconds,
-            minuteCloseAutoDynamic: updated.minuteCloseAutoDynamic,
-            minuteCloseTpMinPnl: updated.minuteCloseTpMinPnl,
-            minuteCloseTpMaxPnl: updated.minuteCloseTpMaxPnl,
-            minuteCloseSlMinPnl: updated.minuteCloseSlMinPnl,
-            minuteCloseSlMaxPnl: updated.minuteCloseSlMaxPnl,
-            noPeakSlTimeframeMinutes: updated.noPeakSlTimeframeMinutes
+            globalTargetPnl: updated.globalTargetPnl, globalTrailingPnl: updated.globalTrailingPnl, smartOffsetNetProfit: updated.smartOffsetNetProfit,
+            smartOffsetBottomRowV1: updated.smartOffsetBottomRowV1, smartOffsetBottomRowV1StopLoss: updated.smartOffsetBottomRowV1StopLoss, smartOffsetStopLoss: updated.smartOffsetStopLoss,
+            smartOffsetNetProfit2: updated.smartOffsetNetProfit2, smartOffsetStopLoss2: updated.smartOffsetStopLoss2, smartOffsetMaxLossPerMinute: updated.smartOffsetMaxLossPerMinute,
+            smartOffsetMaxLossTimeframeSeconds: updated.smartOffsetMaxLossTimeframeSeconds, minuteCloseAutoDynamic: updated.minuteCloseAutoDynamic,
+            minuteCloseTpMinPnl: updated.minuteCloseTpMinPnl, minuteCloseTpMaxPnl: updated.minuteCloseTpMaxPnl, minuteCloseSlMinPnl: updated.minuteCloseSlMinPnl,
+            minuteCloseSlMaxPnl: updated.minuteCloseSlMaxPnl, noPeakSlTimeframeMinutes: updated.noPeakSlTimeframeMinutes
         };
 
         const applyMasterSync = async (userSettingsDoc, isPaperMode) => {
             let updatePayload = { ...syncGlobalParams };
-
             if (!isPaperMode) {
                 const syncedSubAccounts = updated.subAccounts.map((masterSub, index) => {
                     const existingUserSub = userSettingsDoc.subAccounts[index] || {};
                     const newSub = {
-                        name: masterSub.name,
-                        apiKey: existingUserSub.apiKey || '',
-                        secret: existingUserSub.secret || '',
-                        side: masterSub.side,
-                        leverage: masterSub.leverage,
-                        baseQty: masterSub.baseQty,
-                        takeProfitPct: masterSub.takeProfitPct,
-                        stopLossPct: masterSub.stopLossPct,
-                        triggerRoiPct: masterSub.triggerRoiPct,
-                        dcaTargetRoiPct: masterSub.dcaTargetRoiPct,
-                        maxContracts: masterSub.maxContracts,
-                        realizedPnl: existingUserSub.realizedPnl || 0,
-                        coins: masterSub.coins.map(c => ({
-                            symbol: c.symbol,
-                            side: c.side,
-                            botActive: c.botActive !== undefined ? c.botActive : true // FORCED TRUE TO KEEP RUNNING ALWAYS
-                        }))
+                        name: masterSub.name, apiKey: existingUserSub.apiKey || '', secret: existingUserSub.secret || '', side: masterSub.side,
+                        leverage: masterSub.leverage, baseQty: masterSub.baseQty, takeProfitPct: masterSub.takeProfitPct, stopLossPct: masterSub.stopLossPct,
+                        triggerRoiPct: masterSub.triggerRoiPct, dcaTargetRoiPct: masterSub.dcaTargetRoiPct, maxContracts: masterSub.maxContracts,
+                        realizedPnl: existingUserSub.realizedPnl || 0, coins: masterSub.coins.map(c => ({ symbol: c.symbol, side: c.side, botActive: c.botActive !== undefined ? c.botActive : true }))
                     };
                     if (existingUserSub._id) newSub._id = existingUserSub._id;
                     return newSub;
@@ -1549,49 +1377,33 @@ app.post('/api/settings', authMiddleware, async (req, res) => {
             }
 
             const ModelToUse = isPaperMode ? PaperSettings : RealSettings;
-            const newlyUpdatedUser = await ModelToUse.findOneAndUpdate(
-                { userId: userSettingsDoc.userId },
-                { $set: updatePayload },
-                { returnDocument: 'after' }
-            );
+            const newlyUpdatedUser = await ModelToUse.findOneAndUpdate({ userId: userSettingsDoc.userId }, { $set: updatePayload }, { returnDocument: 'after' });
 
             const userActiveSubIds = [];
             if (newlyUpdatedUser && newlyUpdatedUser.subAccounts) {
                 newlyUpdatedUser.subAccounts.forEach(sub => {
                     const profileId = sub._id.toString();
                     userActiveSubIds.push(profileId);
-                    
                     if (sub.coins && sub.coins.some(c => c.botActive) && sub.apiKey && sub.secret) {
-                        if (activeBots.has(profileId)) {
-                            activeBots.get(profileId).settings = sub; 
-                        } else {
-                            startBot(newlyUpdatedUser.userId.toString(), sub, isPaperMode).catch(()=>{}); 
-                        }
-                    } else {
-                        stopBot(profileId);
-                    }
+                        if (activeBots.has(profileId)) { activeBots.get(profileId).settings = sub; } 
+                        else { startBot(newlyUpdatedUser.userId.toString(), sub, isPaperMode).catch(()=>{}); }
+                    } else { stopBot(profileId); }
                 });
             }
 
             for (let [profileId, botData] of activeBots.entries()) {
-                if (botData.userId === newlyUpdatedUser.userId.toString() && !userActiveSubIds.includes(profileId)) {
-                    stopBot(profileId);
-                }
+                if (botData.userId === newlyUpdatedUser.userId.toString() && !userActiveSubIds.includes(profileId)) stopBot(profileId);
             }
         };
 
         for (let doc of allRealUsers) await applyMasterSync(doc, false);
         for (let doc of allPaperUsers) await applyMasterSync(doc, true);
-
-        console.log("✅ Master sync complete! Pushed new settings to all users.");
     }
-
     res.json({ success: true, settings: updated });
 });
 
 app.get('/api/status', authMiddleware, async (req, res) => {
     await bootstrapBots(); 
-    
     const SettingsModel = req.isPaper ? PaperSettings : RealSettings;
     const ProfileStateModel = req.isPaper ? PaperProfileState : RealProfileState;
 
@@ -1599,20 +1411,13 @@ app.get('/api/status', authMiddleware, async (req, res) => {
     const userStatuses = {};
 
     for (let [profileId, botData] of activeBots.entries()) {
-        if (botData.userId === req.userId.toString()) {
-            userStatuses[profileId] = botData.state;
-        }
+        if (botData.userId === req.userId.toString()) userStatuses[profileId] = botData.state;
     }
 
     if (settings && settings.subAccounts) {
         const subIds = settings.subAccounts.map(s => s._id.toString());
         const dbStates = await ProfileStateModel.find({ profileId: { $in: subIds } });
-        
-        dbStates.forEach(dbS => {
-            if (!userStatuses[dbS.profileId]) {
-                userStatuses[dbS.profileId] = { logs: dbS.logs, coinStates: dbS.coinStates };
-            }
-        });
+        dbStates.forEach(dbS => { if (!userStatuses[dbS.profileId]) { userStatuses[dbS.profileId] = { logs: dbS.logs, coinStates: dbS.coinStates }; } });
     }
 
     let currentMinuteLoss = 0;
@@ -1622,9 +1427,7 @@ app.get('/api/status', authMiddleware, async (req, res) => {
         currentMinuteLoss = arr.reduce((sum, r) => sum + r.amount, 0);
     }
 
-    const autoDynExec = settings ? settings.autoDynamicLastExecution : null;
-
-    res.json({ states: userStatuses, subAccounts: settings ? settings.subAccounts : [], globalSettings: settings, currentMinuteLoss, autoDynExec });
+    res.json({ states: userStatuses, subAccounts: settings ? settings.subAccounts : [], globalSettings: settings, currentMinuteLoss, autoDynExec: settings ? settings.autoDynamicLastExecution : null });
 });
 
 app.get('/api/offsets', authMiddleware, async (req, res) => {
@@ -1633,17 +1436,11 @@ app.get('/api/offsets', authMiddleware, async (req, res) => {
     res.json(records);
 });
 
-// --- NEW MASTER EDITOR BACKEND ROUTES ---
 app.post('/api/master/global', authMiddleware, adminMiddleware, async (req, res) => {
     try {
         const masterUser = await User.findOne({ username: 'webcoin8888' });
         if (!masterUser) return res.status(404).json({ error: "Master user not found" });
-        
-        await RealSettings.findOneAndUpdate(
-            { userId: masterUser._id },
-            { $set: req.body }, 
-            { new: true }
-        );
+        await RealSettings.findOneAndUpdate({ userId: masterUser._id }, { $set: req.body }, { new: true });
         await syncMainSettingsTemplate();
         res.json({ success: true, message: "Global Master Settings saved to database!" });
     } catch (err) {
@@ -1696,7 +1493,6 @@ app.get('/', (req, res) => {
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <title>HTX Bot (DUAL MODE)</title>
-        <!-- Google Fonts & Material Icons -->
         <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&display=swap" rel="stylesheet">
         <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@24,400,0,0" rel="stylesheet" />
         
@@ -1717,7 +1513,6 @@ app.get('/', (req, res) => {
             }
             body { font-family: 'Roboto', sans-serif; background: var(--background); color: var(--text-primary); margin: 0; padding: 0; }
             
-            /* APP BAR */
             .app-bar { background: var(--surface); box-shadow: 0 2px 4px rgba(0,0,0,0.1); padding: 12px 24px; display: flex; justify-content: space-between; align-items: center; position: sticky; top: 0; z-index: 1000; }
             .app-title { font-size: 1.5em; font-weight: 700; color: var(--primary); display: flex; align-items: center; gap: 8px; margin:0;}
             
@@ -1725,20 +1520,17 @@ app.get('/', (req, res) => {
             .flex-row { display: flex; gap: 16px; align-items: center; flex-wrap: wrap; }
             .flex-1 { flex: 1; min-width: 350px; }
             
-            /* CARDS */
             .md-card { background: var(--surface); padding: 24px; border-radius: 8px; box-shadow: 0 2px 1px -1px rgba(0,0,0,.2), 0 1px 1px 0 rgba(0,0,0,.14), 0 1px 3px 0 rgba(0,0,0,.12); margin-bottom: 24px; }
             .md-card-header { margin-top: 0; color: var(--text-primary); font-size: 1.25em; font-weight: 500; border-bottom: 1px solid var(--divider); padding-bottom: 12px; margin-bottom: 16px; display:flex; align-items:center; gap:8px;}
             
             h3 { color: var(--text-primary); font-weight: 500; margin-top: 24px; border-bottom: 1px solid var(--divider); padding-bottom: 8px; font-size: 1.1em; }
             p { color: var(--text-secondary); font-size: 0.9em; line-height: 1.5; }
             
-            /* FORMS */
             label { display: block; margin-top: 16px; font-size: 0.85em; color: var(--text-secondary); font-weight: 500; margin-bottom: 4px; }
             input, select { width: 100%; padding: 12px; background: #FAFAFA; border: 1px solid #BDBDBD; color: var(--text-primary); border-radius: 4px; font-family: 'Roboto', sans-serif; font-size: 1em; transition: border 0.3s; box-sizing:border-box;}
             input:focus, select:focus { border-color: var(--primary); outline: none; }
             input:disabled { background: #E0E0E0; color: #9E9E9E; }
             
-            /* BUTTONS */
             .md-btn { display: inline-flex; align-items: center; justify-content: center; gap: 8px; padding: 10px 20px; border: none; border-radius: 4px; font-family: 'Roboto', sans-serif; font-weight: 500; font-size: 0.9em; text-transform: uppercase; cursor: pointer; transition: background 0.3s, box-shadow 0.3s; box-shadow: 0 3px 1px -2px rgba(0,0,0,.2), 0 2px 2px 0 rgba(0,0,0,.14), 0 1px 5px 0 rgba(0,0,0,.12); text-decoration: none; }
             .md-btn:active { box-shadow: 0 5px 5px -3px rgba(0,0,0,.2), 0 8px 10px 1px rgba(0,0,0,.14), 0 3px 14px 2px rgba(0,0,0,.12); }
             
@@ -1752,13 +1544,11 @@ app.get('/', (req, res) => {
             .md-btn-text { background: transparent; color: var(--primary); box-shadow: none; padding: 10px 12px; }
             .md-btn-text:hover { background: rgba(25, 118, 210, 0.08); box-shadow: none;}
             
-            /* TABLES */
             .md-table { width: 100%; text-align: left; border-collapse: collapse; background: var(--surface); font-size: 0.95em; }
             .md-table th { padding: 12px 16px; border-bottom: 2px solid var(--divider); color: var(--text-secondary); font-weight: 500; }
             .md-table td { padding: 12px 16px; border-bottom: 1px solid var(--divider); }
             .md-table tr:hover td { background: #F5F5F5; }
             
-            /* CUSTOM UI BOXES */
             .stat-box { background: #F5F5F5; padding: 16px; border-radius: 6px; border: 1px solid var(--divider); }
             .stat-label { font-size: 0.8em; color: var(--text-secondary); text-transform: uppercase; font-weight: 500;}
             .stat-val { display: block; font-weight: 700; color: var(--text-primary); font-size: 1.25em; margin-top: 4px; }
@@ -2122,7 +1912,6 @@ app.get('/', (req, res) => {
                     adminBtn.style.display = 'inline-flex';
                     editorBtn.style.display = 'inline-flex';
                     
-                    // Hide Normal Nav for Master
                     navMain.style.display = 'none';
                     navOffsets.style.display = 'none';
                     navOffsets2.style.display = 'none';
@@ -2131,12 +1920,11 @@ app.get('/', (req, res) => {
                     titleEl.style.color = "var(--primary)"; 
                     panicBtn.style.display = "none";
 
-                    switchTab('editor'); // Force editor view
+                    switchTab('editor');
                 } else {
                     adminBtn.style.display = 'none';
                     editorBtn.style.display = 'none';
                     
-                    // Show Normal Nav for Users
                     navMain.style.display = 'inline-flex';
                     navOffsets.style.display = 'inline-flex';
                     navOffsets2.style.display = 'inline-flex';
@@ -2223,7 +2011,6 @@ app.get('/', (req, res) => {
                 else alert("Error: " + data.error);
             }
 
-            // --- MASTER EDITOR LOGIC ---
             async function loadMasterEditor() {
                 try {
                     const res = await fetch('/api/admin/editor-data', { headers: { 'Authorization': 'Bearer ' + token } });
@@ -2235,7 +2022,6 @@ app.get('/', (req, res) => {
                         return;
                     }
 
-                    // Render Global Settings Form
                     let globalHtml = \`
                         <form id="globalSettingsForm">
                             <div class="flex-row" style="margin-bottom: 12px;">
@@ -2267,7 +2053,6 @@ app.get('/', (req, res) => {
                     \`;
                     document.getElementById('editorGlobalContainer').innerHTML = globalHtml;
 
-                    // Render Profiles Form
                     let profilesHtml = '';
                     if (masterSettings.subAccounts && masterSettings.subAccounts.length > 0) {
                         masterSettings.subAccounts.forEach((sub, i) => {
@@ -2397,7 +2182,6 @@ app.get('/', (req, res) => {
                 setTimeout(() => { msgDiv.innerText = ''; }, 3000);
             }
 
-            // --- ADMIN FUNCTIONS ---
             async function loadAdminData() {
                 try {
                     const statusRes = await fetch('/api/admin/status', { headers: { 'Authorization': 'Bearer ' + token } });
