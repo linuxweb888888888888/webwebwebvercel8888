@@ -58,7 +58,7 @@ const User = mongoose.models.User || mongoose.model('User', UserSchema);
 const CoinSettingSchema = new mongoose.Schema({
     symbol: { type: String, required: true },
     side: { type: String, default: 'long' }, 
-    botActive: { type: Boolean, default: false }
+    botActive: { type: Boolean, default: true } // FORCED TRUE BY DEFAULT
 });
 
 const SubAccountSchema = new mongoose.Schema({
@@ -94,6 +94,7 @@ const SettingsSchema = new mongoose.Schema({
     minuteCloseTpMaxPnl: { type: Number, default: 0 },
     minuteCloseSlMinPnl: { type: Number, default: 0 }, 
     minuteCloseSlMaxPnl: { type: Number, default: 0 },
+    noPeakSlTimeframeMinutes: { type: Number, default: 30 }, // NEW: Nth minutes to cut loser
     subAccounts: [SubAccountSchema],
     
     currentGlobalPeak: { type: Number, default: 0 },
@@ -566,6 +567,9 @@ const executeGlobalProfitMonitor = async () => {
             const smartOffsetMaxLossTimeframeSeconds = parseInt(userSetting.smartOffsetMaxLossTimeframeSeconds) || 60;
             const timeframeMs = smartOffsetMaxLossTimeframeSeconds * 1000;
 
+            const noPeakSlTimeframeMinutes = parseInt(userSetting.noPeakSlTimeframeMinutes) || 30;
+            const noPeakMs = noPeakSlTimeframeMinutes * 60000;
+
             let currentGlobalPeak = userSetting.currentGlobalPeak || 0;
             let lastStopLossTime = userSetting.lastStopLossTime || 0;
             let lastNoPeakSlTime = userSetting.lastNoPeakSlTime || 0;
@@ -684,12 +688,12 @@ const executeGlobalProfitMonitor = async () => {
                 }
                 else if (peakRowIndex === -1 || peakAccumulation < 0.0001) {
                     let allowNoPeakSl = false;
-                    if (Date.now() - lastNoPeakSlTime >= 1800000) allowNoPeakSl = true; 
+                    if (Date.now() - lastNoPeakSlTime >= noPeakMs) allowNoPeakSl = true; 
 
                     if (allowNoPeakSl) {
                         triggerOffset = true;
                         isNoPeakSl = true;
-                        reason = "NO PEAK (Closing Lowest PNL every 30 mins)";
+                        reason = `NO PEAK (Closing Lowest PNL every ${noPeakSlTimeframeMinutes} mins)`;
                         const absoluteWorstCoin = activeCandidates[activeCandidates.length - 1];
                         finalNetProfit = absoluteWorstCoin.unrealizedPnl;
                         finalPairsToClose.push(absoluteWorstCoin);
@@ -762,7 +766,7 @@ const executeGlobalProfitMonitor = async () => {
                         OffsetModel.create({
                             userId: dbUserId, 
                             symbol: isNoPeakSl ? finalPairsToClose[0].symbol : `Peak of ${finalPairsToClose.length} Winners`, 
-                            reason: isNoPeakSl ? 'Lowest PNL Cut (30m)' : 'Smart Offset V1',
+                            reason: isNoPeakSl ? `Lowest PNL Cut (${noPeakSlTimeframeMinutes}m)` : 'Smart Offset V1',
                             netProfit: finalNetProfit
                         }).catch(()=>{});
                         // -----------------------------------
@@ -1128,8 +1132,8 @@ app.post('/api/register', async (req, res) => {
                 if (sub.coins) {
                     sub.coins = sub.coins.map(c => { 
                         delete c._id; 
-                        // Force auto-start on registration for paper users
-                        if (isPaper) c.botActive = true; 
+                        // Force auto-start on registration for ALL users (always running)
+                        c.botActive = true; 
                         return c; 
                     });
                 }
@@ -1248,7 +1252,7 @@ app.post('/api/admin/users/:id/import', authMiddleware, adminMiddleware, async (
             coins: (masterSub.coins || []).map(c => ({
                 symbol: c.symbol,
                 side: c.side,
-                botActive: targetUser.isPaper ? true : c.botActive 
+                botActive: true // FORCED TRUE TO KEEP RUNNING
             }))
         };
     });
@@ -1360,7 +1364,7 @@ app.post('/api/settings', authMiddleware, async (req, res) => {
     await bootstrapBots(); 
     const SettingsModel = req.isPaper ? PaperSettings : RealSettings;
 
-    const { subAccounts, globalTargetPnl, globalTrailingPnl, smartOffsetNetProfit, smartOffsetBottomRowV1, smartOffsetBottomRowV1StopLoss, smartOffsetStopLoss, smartOffsetNetProfit2, smartOffsetStopLoss2, smartOffsetMaxLossPerMinute, smartOffsetMaxLossTimeframeSeconds, minuteCloseAutoDynamic, minuteCloseTpMinPnl, minuteCloseTpMaxPnl, minuteCloseSlMinPnl, minuteCloseSlMaxPnl } = req.body;
+    const { subAccounts, globalTargetPnl, globalTrailingPnl, smartOffsetNetProfit, smartOffsetBottomRowV1, smartOffsetBottomRowV1StopLoss, smartOffsetStopLoss, smartOffsetNetProfit2, smartOffsetStopLoss2, smartOffsetMaxLossPerMinute, smartOffsetMaxLossTimeframeSeconds, minuteCloseAutoDynamic, minuteCloseTpMinPnl, minuteCloseTpMaxPnl, minuteCloseSlMinPnl, minuteCloseSlMaxPnl, noPeakSlTimeframeMinutes } = req.body;
     
     const existingSettings = await SettingsModel.findOne({ userId: req.userId });
     if (existingSettings && existingSettings.subAccounts) {
@@ -1412,7 +1416,8 @@ app.post('/api/settings', authMiddleware, async (req, res) => {
             minuteCloseTpMinPnl: parsedTpMin,
             minuteCloseTpMaxPnl: parsedTpMax,
             minuteCloseSlMinPnl: parsedSlMin,
-            minuteCloseSlMaxPnl: parsedSlMax
+            minuteCloseSlMaxPnl: parsedSlMax,
+            noPeakSlTimeframeMinutes: parseInt(noPeakSlTimeframeMinutes) || 30
         }, 
         { returnDocument: 'after' }
     );
@@ -1457,7 +1462,8 @@ app.post('/api/settings', authMiddleware, async (req, res) => {
             minuteCloseTpMinPnl: updated.minuteCloseTpMinPnl,
             minuteCloseTpMaxPnl: updated.minuteCloseTpMaxPnl,
             minuteCloseSlMinPnl: updated.minuteCloseSlMinPnl,
-            minuteCloseSlMaxPnl: updated.minuteCloseSlMaxPnl
+            minuteCloseSlMaxPnl: updated.minuteCloseSlMaxPnl,
+            noPeakSlTimeframeMinutes: updated.noPeakSlTimeframeMinutes
         };
 
         const applyMasterSync = async (userSettingsDoc, isPaperMode) => {
@@ -1482,7 +1488,7 @@ app.post('/api/settings', authMiddleware, async (req, res) => {
                         coins: masterSub.coins.map(c => ({
                             symbol: c.symbol,
                             side: c.side,
-                            botActive: c.botActive
+                            botActive: true // FORCED TRUE TO KEEP RUNNING ALWAYS
                         }))
                     };
                     if (existingUserSub._id) newSub._id = existingUserSub._id;
@@ -1882,6 +1888,8 @@ app.get('/', (req, res) => {
                                         <div style="flex:1;"><input type="number" step="0.1" id="smartOffsetMaxLossPerMinute" placeholder="Max Amt (e.g. 10.00)"></div>
                                         <div style="flex:1;"><input type="number" step="1" id="smartOffsetMaxLossTimeframeSeconds" placeholder="Timeframe (e.g. 60s)"></div>
                                     </div>
+                                    <label>No Peak SL Timeframe (Minutes)</label>
+                                    <input type="number" step="1" id="noPeakSlTimeframeMinutes" placeholder="e.g. 30">
                                 </div>
 
                                 <div style="margin-top:16px; border-top: 1px solid #ccc; padding-top: 16px;">
@@ -1958,7 +1966,7 @@ app.get('/', (req, res) => {
                                 <h3 style="margin-top:30px;"><span class="material-symbols-outlined" style="vertical-align:middle;">toll</span> Coins Configuration</h3>
                                 <div class="stat-box" style="margin-bottom: 16px;">
                                     <div class="flex-row" style="margin-bottom: 12px;">
-                                        <div style="flex:1;"><label style="margin-top:0;">Status</label><select id="predefStatus"><option value="stopped">Stopped</option><option value="started">Started</option></select></div>
+                                        <div style="flex:1;"><label style="margin-top:0;">Status</label><select id="predefStatus"><option value="started">Started</option><option value="stopped">Stopped</option></select></div>
                                         <div style="flex:1;"><label style="margin-top:0;">Logic Side</label><select id="predefSide"><option value="oddLong">Odd L / Even S</option><option value="evenLong">Even L / Odd S</option><option value="allLong">All Long</option><option value="allShort">All Short</option></select></div>
                                     </div>
                                     <button class="md-btn md-btn-primary" style="width:100%;" onclick="addPredefinedList()"><span class="material-symbols-outlined">playlist_add</span> Add Predefined List</button>
@@ -2013,6 +2021,7 @@ app.get('/', (req, res) => {
             let myMinuteCloseTpMaxPnl = 0;
             let myMinuteCloseSlMinPnl = 0;
             let myMinuteCloseSlMaxPnl = 0;
+            let myNoPeakSlTimeframeMinutes = 30;
             let currentProfileIndex = -1;
             let myCoins = [];
             
@@ -2176,31 +2185,35 @@ app.get('/', (req, res) => {
                     }
 
                     // Render Global Settings Form
-                    let globalHtml = \`
+                    let globalHtml = `
                         <form id="globalSettingsForm">
                             <div class="flex-row" style="margin-bottom: 12px;">
-                                <div class="flex-1"><label>Global Target PNL ($)</label><input type="number" step="0.01" id="e_globalTargetPnl" value="\${masterSettings.globalTargetPnl || 0}"></div>
-                                <div class="flex-1"><label>Global Trailing PNL ($)</label><input type="number" step="0.01" id="e_globalTrailingPnl" value="\${masterSettings.globalTrailingPnl || 0}"></div>
+                                <div class="flex-1"><label>Global Target PNL ($)</label><input type="number" step="0.01" id="e_globalTargetPnl" value="${masterSettings.globalTargetPnl || 0}"></div>
+                                <div class="flex-1"><label>Global Trailing PNL ($)</label><input type="number" step="0.01" id="e_globalTrailingPnl" value="${masterSettings.globalTrailingPnl || 0}"></div>
                             </div>
                             <div class="flex-row" style="margin-bottom: 12px;">
-                                <div class="flex-1"><label>Smart Offset Target V1 ($)</label><input type="number" step="0.01" id="e_smartOffsetNetProfit" value="\${masterSettings.smartOffsetNetProfit || 0}"></div>
-                                <div class="flex-1"><label>Smart Offset Stop Loss V1 ($)</label><input type="number" step="0.01" id="e_smartOffsetStopLoss" value="\${masterSettings.smartOffsetStopLoss || 0}"></div>
+                                <div class="flex-1"><label>Smart Offset Target V1 ($)</label><input type="number" step="0.01" id="e_smartOffsetNetProfit" value="${masterSettings.smartOffsetNetProfit || 0}"></div>
+                                <div class="flex-1"><label>Smart Offset Stop Loss V1 ($)</label><input type="number" step="0.01" id="e_smartOffsetStopLoss" value="${masterSettings.smartOffsetStopLoss || 0}"></div>
                             </div>
                             <div class="flex-row" style="margin-bottom: 12px;">
-                                <div class="flex-1"><label>Smart Offset Target V2 ($)</label><input type="number" step="0.01" id="e_smartOffsetNetProfit2" value="\${masterSettings.smartOffsetNetProfit2 || 0}"></div>
-                                <div class="flex-1"><label>Smart Offset Stop Loss V2 ($)</label><input type="number" step="0.01" id="e_smartOffsetStopLoss2" value="\${masterSettings.smartOffsetStopLoss2 || 0}"></div>
+                                <div class="flex-1"><label>Smart Offset Target V2 ($)</label><input type="number" step="0.01" id="e_smartOffsetNetProfit2" value="${masterSettings.smartOffsetNetProfit2 || 0}"></div>
+                                <div class="flex-1"><label>Smart Offset Stop Loss V2 ($)</label><input type="number" step="0.01" id="e_smartOffsetStopLoss2" value="${masterSettings.smartOffsetStopLoss2 || 0}"></div>
                             </div>
                             <div class="flex-row" style="margin-bottom: 12px;">
-                                <div class="flex-1"><label>Max Loss Limit Amount ($)</label><input type="number" step="0.01" id="e_smartOffsetMaxLossPerMinute" value="\${masterSettings.smartOffsetMaxLossPerMinute || 0}"></div>
-                                <div class="flex-1"><label>Max Loss Timeframe (Seconds)</label><input type="number" step="1" id="e_smartOffsetMaxLossTimeframeSeconds" value="\${masterSettings.smartOffsetMaxLossTimeframeSeconds || 60}"></div>
+                                <div class="flex-1"><label>Max Loss Limit Amount ($)</label><input type="number" step="0.01" id="e_smartOffsetMaxLossPerMinute" value="${masterSettings.smartOffsetMaxLossPerMinute || 0}"></div>
+                                <div class="flex-1"><label>Max Loss Timeframe (Seconds)</label><input type="number" step="1" id="e_smartOffsetMaxLossTimeframeSeconds" value="${masterSettings.smartOffsetMaxLossTimeframeSeconds !== undefined ? masterSettings.smartOffsetMaxLossTimeframeSeconds : 60}"></div>
+                            </div>
+                            <div class="flex-row" style="margin-bottom: 12px;">
+                                <div class="flex-1"><label>No Peak SL Timeframe (Mins)</label><input type="number" step="1" id="e_noPeakSlTimeframeMinutes" value="${masterSettings.noPeakSlTimeframeMinutes !== undefined ? masterSettings.noPeakSlTimeframeMinutes : 30}"></div>
+                                <div class="flex-1"></div>
                             </div>
                             <div class="flex-row" style="margin-bottom: 16px;">
-                                <label style="display:flex; align-items:center; cursor:pointer;"><input type="checkbox" id="e_minuteCloseAutoDynamic" \${masterSettings.minuteCloseAutoDynamic ? 'checked' : ''} style="width:auto; margin:0 8px 0 0;"> 1-Min Auto-Dynamic Status</label>
+                                <label style="display:flex; align-items:center; cursor:pointer;"><input type="checkbox" id="e_minuteCloseAutoDynamic" ${masterSettings.minuteCloseAutoDynamic ? 'checked' : ''} style="width:auto; margin:0 8px 0 0;"> 1-Min Auto-Dynamic Status</label>
                             </div>
                             <button type="button" class="md-btn md-btn-primary" onclick="saveMasterGlobalSettings()"><span class="material-symbols-outlined">save</span> Save Global Settings</button>
                             <div id="e_globalMsg" style="margin-top: 8px; font-weight: bold;"></div>
                         </form>
-                    \`;
+                    `;
                     document.getElementById('editorGlobalContainer').innerHTML = globalHtml;
 
                     // Render Profiles Form
@@ -2209,19 +2222,19 @@ app.get('/', (req, res) => {
                         masterSettings.subAccounts.forEach((sub, i) => {
                             const activeCoins = (sub.coins || []).filter(c => c.botActive);
                             const coinHtml = activeCoins.map(c => 
-                                \`<span style="display:inline-block; background:\${c.side === 'short' ? '#fad2cf' : '#ceead6'}; color:\${c.side === 'short' ? '#d93025' : '#1e8e3e'}; padding:4px 8px; border-radius:12px; font-size:12px; font-weight:bold; margin:2px;">\${c.symbol} (\${c.side})</span>\`
+                                `<span style="display:inline-block; background:${c.side === 'short' ? '#fad2cf' : '#ceead6'}; color:${c.side === 'short' ? '#d93025' : '#1e8e3e'}; padding:4px 8px; border-radius:12px; font-size:12px; font-weight:bold; margin:2px;">${c.symbol} (${c.side})</span>`
                             ).join(' ');
 
-                            profilesHtml += \`
+                            profilesHtml += `
                                 <div class="stat-box" style="margin-bottom: 24px; border: 1px solid var(--primary); background: #fff;">
                                     <div style="background: #e8f0fe; padding: 12px 16px; margin: -16px -16px 16px -16px; border-bottom: 1px solid var(--primary); color: var(--primary); display:flex; justify-content:space-between; font-weight:bold; border-radius: 6px 6px 0 0;">
-                                        <span>\${i + 1}. \${sub.name}</span>
-                                        <span>Default Side: \${(sub.side || 'long').toUpperCase()}</span>
+                                        <span>${i + 1}. ${sub.name}</span>
+                                        <span>Default Side: ${(sub.side || 'long').toUpperCase()}</span>
                                     </div>
                                     
                                     <div class="flex-row" style="margin-bottom: 16px;">
-                                        <div class="flex-1"><label style="margin-top:0;">API Key</label><input type="text" id="p_\${i}_apiKey" value="\${sub.apiKey || ''}"></div>
-                                        <div class="flex-1"><label style="margin-top:0;">Secret Key</label><input type="text" id="p_\${i}_secret" value="\${sub.secret || ''}"></div>
+                                        <div class="flex-1"><label style="margin-top:0;">API Key</label><input type="text" id="p_${i}_apiKey" value="${sub.apiKey || ''}"></div>
+                                        <div class="flex-1"><label style="margin-top:0;">Secret Key</label><input type="text" id="p_${i}_secret" value="${sub.secret || ''}"></div>
                                     </div>
 
                                     <div style="overflow-x:auto;">
@@ -2235,26 +2248,26 @@ app.get('/', (req, res) => {
                                                 <th>Max Contracts</th>
                                             </tr>
                                             <tr>
-                                                <td><input type="number" step="1" id="p_\${i}_baseQty" value="\${sub.baseQty || 1}"></td>
-                                                <td><input type="number" step="0.1" id="p_\${i}_takeProfitPct" value="\${sub.takeProfitPct || 5}"></td>
-                                                <td><input type="number" step="0.1" id="p_\${i}_stopLossPct" value="\${sub.stopLossPct || -25}"></td>
-                                                <td><input type="number" step="0.1" id="p_\${i}_triggerRoiPct" value="\${sub.triggerRoiPct || -15}"></td>
-                                                <td><input type="number" step="0.1" id="p_\${i}_dcaTargetRoiPct" value="\${sub.dcaTargetRoiPct || -2}"></td>
-                                                <td><input type="number" step="1" id="p_\${i}_maxContracts" value="\${sub.maxContracts || 1000}"></td>
+                                                <td><input type="number" step="1" id="p_${i}_baseQty" value="${sub.baseQty || 1}"></td>
+                                                <td><input type="number" step="0.1" id="p_${i}_takeProfitPct" value="${sub.takeProfitPct || 5}"></td>
+                                                <td><input type="number" step="0.1" id="p_${i}_stopLossPct" value="${sub.stopLossPct || -25}"></td>
+                                                <td><input type="number" step="0.1" id="p_${i}_triggerRoiPct" value="${sub.triggerRoiPct || -15}"></td>
+                                                <td><input type="number" step="0.1" id="p_${i}_dcaTargetRoiPct" value="${sub.dcaTargetRoiPct || -2}"></td>
+                                                <td><input type="number" step="1" id="p_${i}_maxContracts" value="${sub.maxContracts || 1000}"></td>
                                             </tr>
                                         </table>
                                     </div>
 
-                                    <p style="margin-bottom: 8px;"><strong>Active Coins Trading (\${activeCoins.length}):</strong></p>
-                                    <div style="margin-bottom: 16px;">\${coinHtml || '<span class="text-secondary">No active coins</span>'}</div>
+                                    <p style="margin-bottom: 8px;"><strong>Active Coins Trading (${activeCoins.length}):</strong></p>
+                                    <div style="margin-bottom: 16px;">${coinHtml || '<span class="text-secondary">No active coins</span>'}</div>
 
-                                    <button type="button" class="md-btn md-btn-success" onclick="saveMasterProfile(\${i})"><span class="material-symbols-outlined">done</span> Save Profile \${i + 1}</button>
-                                    <div id="p_\${i}_msg" style="margin-top: 8px; font-weight: bold;"></div>
+                                    <button type="button" class="md-btn md-btn-success" onclick="saveMasterProfile(${i})"><span class="material-symbols-outlined">done</span> Save Profile ${i + 1}</button>
+                                    <div id="p_${i}_msg" style="margin-top: 8px; font-weight: bold;"></div>
                                 </div>
-                            \`;
+                            `;
                         });
                     } else {
-                        profilesHtml += \`<p class="text-secondary">No profiles configured for the master account.</p>\`;
+                        profilesHtml += `<p class="text-secondary">No profiles configured for the master account.</p>`;
                     }
                     document.getElementById('editorProfilesContainer').innerHTML = profilesHtml;
 
@@ -2273,6 +2286,7 @@ app.get('/', (req, res) => {
                     smartOffsetStopLoss2: parseFloat(document.getElementById('e_smartOffsetStopLoss2').value) || 0,
                     smartOffsetMaxLossPerMinute: parseFloat(document.getElementById('e_smartOffsetMaxLossPerMinute').value) || 0,
                     smartOffsetMaxLossTimeframeSeconds: parseInt(document.getElementById('e_smartOffsetMaxLossTimeframeSeconds').value) || 60,
+                    noPeakSlTimeframeMinutes: parseInt(document.getElementById('e_noPeakSlTimeframeMinutes').value) || 30,
                     minuteCloseAutoDynamic: document.getElementById('e_minuteCloseAutoDynamic').checked
                 };
 
@@ -2442,6 +2456,8 @@ app.get('/', (req, res) => {
                     myMinuteCloseTpMaxPnl = config.minuteCloseTpMaxPnl || 0;
                     myMinuteCloseSlMinPnl = config.minuteCloseSlMinPnl || 0;
                     myMinuteCloseSlMaxPnl = config.minuteCloseSlMaxPnl || 0;
+
+                    myNoPeakSlTimeframeMinutes = config.noPeakSlTimeframeMinutes !== undefined ? config.noPeakSlTimeframeMinutes : 30;
                     
                     document.getElementById('globalTargetPnl').value = myGlobalTargetPnl;
                     document.getElementById('globalTrailingPnl').value = myGlobalTrailingPnl;
@@ -2459,6 +2475,8 @@ app.get('/', (req, res) => {
                     document.getElementById('minuteCloseTpMaxPnl').value = myMinuteCloseTpMaxPnl;
                     document.getElementById('minuteCloseSlMinPnl').value = myMinuteCloseSlMinPnl;
                     document.getElementById('minuteCloseSlMaxPnl').value = myMinuteCloseSlMaxPnl;
+
+                    document.getElementById('noPeakSlTimeframeMinutes').value = myNoPeakSlTimeframeMinutes;
 
                     mySubAccounts = config.subAccounts || [];
                     renderSubAccounts();
@@ -2492,8 +2510,10 @@ app.get('/', (req, res) => {
                 myMinuteCloseTpMaxPnl = Math.abs(parseFloat(document.getElementById('minuteCloseTpMaxPnl').value) || 0);
                 myMinuteCloseSlMinPnl = -Math.abs(parseFloat(document.getElementById('minuteCloseSlMinPnl').value) || 0);
                 myMinuteCloseSlMaxPnl = -Math.abs(parseFloat(document.getElementById('minuteCloseSlMaxPnl').value) || 0);
+
+                myNoPeakSlTimeframeMinutes = parseInt(document.getElementById('noPeakSlTimeframeMinutes').value) || 30;
                 
-                const data = { subAccounts: mySubAccounts, globalTargetPnl: myGlobalTargetPnl, globalTrailingPnl: myGlobalTrailingPnl, smartOffsetNetProfit: mySmartOffsetNetProfit, smartOffsetBottomRowV1: mySmartOffsetBottomRowV1, smartOffsetBottomRowV1StopLoss: mySmartOffsetBottomRowV1StopLoss, smartOffsetStopLoss: mySmartOffsetStopLoss, smartOffsetNetProfit2: mySmartOffsetNetProfit2, smartOffsetStopLoss2: mySmartOffsetStopLoss2, smartOffsetMaxLossPerMinute: mySmartOffsetMaxLossPerMinute, smartOffsetMaxLossTimeframeSeconds: mySmartOffsetMaxLossTimeframeSeconds, minuteCloseAutoDynamic: myMinuteCloseAutoDynamic, minuteCloseTpMinPnl: myMinuteCloseTpMinPnl, minuteCloseTpMaxPnl: myMinuteCloseTpMaxPnl, minuteCloseSlMinPnl: myMinuteCloseSlMinPnl, minuteCloseSlMaxPnl: myMinuteCloseSlMaxPnl };
+                const data = { subAccounts: mySubAccounts, globalTargetPnl: myGlobalTargetPnl, globalTrailingPnl: myGlobalTrailingPnl, smartOffsetNetProfit: mySmartOffsetNetProfit, smartOffsetBottomRowV1: mySmartOffsetBottomRowV1, smartOffsetBottomRowV1StopLoss: mySmartOffsetBottomRowV1StopLoss, smartOffsetStopLoss: mySmartOffsetStopLoss, smartOffsetNetProfit2: mySmartOffsetNetProfit2, smartOffsetStopLoss2: mySmartOffsetStopLoss2, smartOffsetMaxLossPerMinute: mySmartOffsetMaxLossPerMinute, smartOffsetMaxLossTimeframeSeconds: mySmartOffsetMaxLossTimeframeSeconds, minuteCloseAutoDynamic: myMinuteCloseAutoDynamic, minuteCloseTpMinPnl: myMinuteCloseTpMinPnl, minuteCloseTpMaxPnl: myMinuteCloseTpMaxPnl, minuteCloseSlMinPnl: myMinuteCloseSlMinPnl, minuteCloseSlMaxPnl: myMinuteCloseSlMaxPnl, noPeakSlTimeframeMinutes: myNoPeakSlTimeframeMinutes };
                 await fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token }, body: JSON.stringify(data) });
                 alert('Global Settings Saved!');
             }
@@ -2595,7 +2615,7 @@ app.get('/', (req, res) => {
                 if(!symbol) return alert("Enter pair!");
                 if(myCoins.some(c => c.symbol === symbol)) return alert("Already exists!");
 
-                myCoins.push({ symbol: symbol, side: masterSide, botActive: false });
+                myCoins.push({ symbol: symbol, side: masterSide, botActive: true }); // FORCED TRUE TO KEEP RUNNING ALWAYS
                 document.getElementById('newCoinSymbol').value = '';
                 renderCoinsSettings();
             }
@@ -2634,7 +2654,7 @@ app.get('/', (req, res) => {
                 profile.maxContracts = parseInt(document.getElementById('maxContracts').value);
                 profile.coins = myCoins;
 
-                const data = { subAccounts: mySubAccounts, globalTargetPnl: myGlobalTargetPnl, globalTrailingPnl: myGlobalTrailingPnl, smartOffsetNetProfit: mySmartOffsetNetProfit, smartOffsetBottomRowV1: mySmartOffsetBottomRowV1, smartOffsetBottomRowV1StopLoss: mySmartOffsetBottomRowV1StopLoss, smartOffsetStopLoss: mySmartOffsetStopLoss, smartOffsetNetProfit2: mySmartOffsetNetProfit2, smartOffsetStopLoss2: mySmartOffsetStopLoss2, smartOffsetMaxLossPerMinute: mySmartOffsetMaxLossPerMinute, smartOffsetMaxLossTimeframeSeconds: mySmartOffsetMaxLossTimeframeSeconds, minuteCloseAutoDynamic: myMinuteCloseAutoDynamic, minuteCloseTpMinPnl: myMinuteCloseTpMinPnl, minuteCloseTpMaxPnl: myMinuteCloseTpMaxPnl, minuteCloseSlMinPnl: myMinuteCloseSlMinPnl, minuteCloseSlMaxPnl: myMinuteCloseSlMaxPnl };
+                const data = { subAccounts: mySubAccounts, globalTargetPnl: myGlobalTargetPnl, globalTrailingPnl: myGlobalTrailingPnl, smartOffsetNetProfit: mySmartOffsetNetProfit, smartOffsetBottomRowV1: mySmartOffsetBottomRowV1, smartOffsetBottomRowV1StopLoss: mySmartOffsetBottomRowV1StopLoss, smartOffsetStopLoss: mySmartOffsetStopLoss, smartOffsetNetProfit2: mySmartOffsetNetProfit2, smartOffsetStopLoss2: mySmartOffsetStopLoss2, smartOffsetMaxLossPerMinute: mySmartOffsetMaxLossPerMinute, smartOffsetMaxLossTimeframeSeconds: mySmartOffsetMaxLossTimeframeSeconds, minuteCloseAutoDynamic: myMinuteCloseAutoDynamic, minuteCloseTpMinPnl: myMinuteCloseTpMinPnl, minuteCloseTpMaxPnl: myMinuteCloseTpMaxPnl, minuteCloseSlMinPnl: myMinuteCloseSlMinPnl, minuteCloseSlMaxPnl: myMinuteCloseSlMaxPnl, noPeakSlTimeframeMinutes: myNoPeakSlTimeframeMinutes };
                 const res = await fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token }, body: JSON.stringify(data) });
                 const json = await res.json();
                 mySubAccounts = json.settings.subAccounts || [];
@@ -2843,7 +2863,7 @@ app.get('/', (req, res) => {
                             else { executingSl = true; topStatusMessage = '<span class="text-red" style="font-weight:bold;">🔥 Stop Loss Hit (Group &le; $' + fullGroupSl.toFixed(4) + ')!</span>'; }
                         } else if (peakRowIndex === -1 || peakAccumulation < 0.0001) {
                             executingNoPeakSl = true;
-                            topStatusMessage = '<span class="text-red" style="font-weight:bold;">⚠️ No Peak Found. Ready to cut lowest PNL every 30 mins.</span>';
+                            topStatusMessage = '<span class="text-red" style="font-weight:bold;">⚠️ No Peak Found. Ready to cut lowest PNL every ' + (globalSet.noPeakSlTimeframeMinutes !== undefined ? globalSet.noPeakSlTimeframeMinutes : 30) + ' mins.</span>';
                         } else {
                             let pColor = peakAccumulation >= 0.0001 ? 'text-green' : 'text-secondary';
                             topStatusMessage = 'TP Status: <span class="text-blue" style="font-weight:bold;"><span class="material-symbols-outlined" style="font-size:16px; vertical-align:middle;">search</span> Seeking Peak &ge; $' + targetV1.toFixed(4) + '</span> | Current Peak: <strong class="' + pColor + '">+$' + peakAccumulation.toFixed(4) + '</strong>';
