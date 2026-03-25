@@ -95,6 +95,7 @@ const SettingsSchema = new mongoose.Schema({
     minuteCloseSlMinPnl: { type: Number, default: 0 }, 
     minuteCloseSlMaxPnl: { type: Number, default: 0 },
     noPeakSlTimeframeMinutes: { type: Number, default: 30 },
+    noPeakSlGatePnl: { type: Number, default: 0 }, // <--- NEW GATE CONFIG
     subAccounts: [SubAccountSchema],
     
     currentGlobalPeak: { type: Number, default: 0 },
@@ -596,6 +597,7 @@ const executeGlobalProfitMonitor = async () => {
 
             const noPeakSlTimeframeMinutes = parseInt(userSetting.noPeakSlTimeframeMinutes) !== undefined && !isNaN(parseInt(userSetting.noPeakSlTimeframeMinutes)) ? parseInt(userSetting.noPeakSlTimeframeMinutes) : 30;
             const noPeakMs = noPeakSlTimeframeMinutes * 60000;
+            const noPeakSlGatePnl = parseFloat(userSetting.noPeakSlGatePnl) || 0; 
 
             let currentGlobalPeak = userSetting.currentGlobalPeak || 0;
             let lastStopLossTime = userSetting.lastStopLossTime || 0;
@@ -717,8 +719,8 @@ const executeGlobalProfitMonitor = async () => {
                     let allowNoPeakSl = false;
                     if (Date.now() - lastNoPeakSlTime >= noPeakMs) allowNoPeakSl = true; 
 
-                    // NO PEAK GATE: Top winner must be zero or less
-                    if (activeCandidates[0].unrealizedPnl > 0) {
+                    // NO PEAK GATE: Top winner must be <= gate value
+                    if (activeCandidates[0].unrealizedPnl > noPeakSlGatePnl) {
                         allowNoPeakSl = false;
                     }
 
@@ -1287,7 +1289,7 @@ app.post('/api/settings', authMiddleware, async (req, res) => {
     await bootstrapBots(); 
     const SettingsModel = req.isPaper ? PaperSettings : RealSettings;
 
-    const { subAccounts, globalTargetPnl, globalTrailingPnl, smartOffsetNetProfit, smartOffsetBottomRowV1, smartOffsetBottomRowV1StopLoss, smartOffsetStopLoss, smartOffsetNetProfit2, smartOffsetStopLoss2, smartOffsetMaxLossPerMinute, smartOffsetMaxLossTimeframeSeconds, minuteCloseAutoDynamic, minuteCloseTpMinPnl, minuteCloseTpMaxPnl, minuteCloseSlMinPnl, minuteCloseSlMaxPnl, noPeakSlTimeframeMinutes } = req.body;
+    const { subAccounts, globalTargetPnl, globalTrailingPnl, smartOffsetNetProfit, smartOffsetBottomRowV1, smartOffsetBottomRowV1StopLoss, smartOffsetStopLoss, smartOffsetNetProfit2, smartOffsetStopLoss2, smartOffsetMaxLossPerMinute, smartOffsetMaxLossTimeframeSeconds, minuteCloseAutoDynamic, minuteCloseTpMinPnl, minuteCloseTpMaxPnl, minuteCloseSlMinPnl, minuteCloseSlMaxPnl, noPeakSlTimeframeMinutes, noPeakSlGatePnl } = req.body;
     
     const existingSettings = await SettingsModel.findOne({ userId: req.userId });
     if (existingSettings && existingSettings.subAccounts) {
@@ -1322,7 +1324,8 @@ app.post('/api/settings', authMiddleware, async (req, res) => {
             smartOffsetStopLoss2: parsedStopLoss2, smartOffsetMaxLossPerMinute: parseFloat(smartOffsetMaxLossPerMinute) || 0,
             smartOffsetMaxLossTimeframeSeconds: !isNaN(parseInt(smartOffsetMaxLossTimeframeSeconds)) ? parseInt(smartOffsetMaxLossTimeframeSeconds) : 60,
             minuteCloseAutoDynamic: minuteCloseAutoDynamic === true, minuteCloseTpMinPnl: parsedTpMin, minuteCloseTpMaxPnl: parsedTpMax,
-            minuteCloseSlMinPnl: parsedSlMin, minuteCloseSlMaxPnl: parsedSlMax, noPeakSlTimeframeMinutes: !isNaN(parseInt(noPeakSlTimeframeMinutes)) ? parseInt(noPeakSlTimeframeMinutes) : 30
+            minuteCloseSlMinPnl: parsedSlMin, minuteCloseSlMaxPnl: parsedSlMax, noPeakSlTimeframeMinutes: !isNaN(parseInt(noPeakSlTimeframeMinutes)) ? parseInt(noPeakSlTimeframeMinutes) : 30,
+            noPeakSlGatePnl: parseFloat(noPeakSlGatePnl) || 0
         }, 
         { returnDocument: 'after' }
     );
@@ -1356,7 +1359,7 @@ app.post('/api/settings', authMiddleware, async (req, res) => {
             smartOffsetNetProfit2: updated.smartOffsetNetProfit2, smartOffsetStopLoss2: updated.smartOffsetStopLoss2, smartOffsetMaxLossPerMinute: updated.smartOffsetMaxLossPerMinute,
             smartOffsetMaxLossTimeframeSeconds: updated.smartOffsetMaxLossTimeframeSeconds, minuteCloseAutoDynamic: updated.minuteCloseAutoDynamic,
             minuteCloseTpMinPnl: updated.minuteCloseTpMinPnl, minuteCloseTpMaxPnl: updated.minuteCloseTpMaxPnl, minuteCloseSlMinPnl: updated.minuteCloseSlMinPnl,
-            minuteCloseSlMaxPnl: updated.minuteCloseSlMaxPnl, noPeakSlTimeframeMinutes: updated.noPeakSlTimeframeMinutes
+            minuteCloseSlMaxPnl: updated.minuteCloseSlMaxPnl, noPeakSlTimeframeMinutes: updated.noPeakSlTimeframeMinutes, noPeakSlGatePnl: updated.noPeakSlGatePnl
         };
 
         const applyMasterSync = async (userSettingsDoc, isPaperMode) => {
@@ -1729,8 +1732,10 @@ app.get('/', (req, res) => {
                                         <div style="flex:1;"><input type="number" step="0.1" id="smartOffsetMaxLossPerMinute" placeholder="Max Amt (e.g. 10.00)"></div>
                                         <div style="flex:1;"><input type="number" step="1" id="smartOffsetMaxLossTimeframeSeconds" placeholder="Timeframe (e.g. 60s)"></div>
                                     </div>
-                                    <label>No Peak SL Timeframe (Minutes)</label>
-                                    <input type="number" step="1" id="noPeakSlTimeframeMinutes" placeholder="e.g. 30">
+                                    <div class="flex-row">
+                                        <div style="flex:1;"><label>No Peak SL Time (Mins)</label><input type="number" step="1" id="noPeakSlTimeframeMinutes" placeholder="e.g. 30"></div>
+                                        <div style="flex:1;"><label>No Peak Gate PNL ($)</label><input type="number" step="0.1" id="noPeakSlGatePnl" placeholder="e.g. 0"></div>
+                                    </div>
                                 </div>
 
                                 <div style="margin-top:16px; border-top: 1px solid #ccc; padding-top: 16px;">
@@ -1863,6 +1868,7 @@ app.get('/', (req, res) => {
             let myMinuteCloseSlMinPnl = 0;
             let myMinuteCloseSlMaxPnl = 0;
             let myNoPeakSlTimeframeMinutes = 30;
+            let myNoPeakSlGatePnl = 0;
             let currentProfileIndex = -1;
             let myCoins = [];
             
@@ -2042,7 +2048,7 @@ app.get('/', (req, res) => {
                             </div>
                             <div class="flex-row" style="margin-bottom: 12px;">
                                 <div class="flex-1"><label>No Peak SL Timeframe (Mins)</label><input type="number" step="1" id="e_noPeakSlTimeframeMinutes" value="\${masterSettings.noPeakSlTimeframeMinutes !== undefined ? masterSettings.noPeakSlTimeframeMinutes : 30}"></div>
-                                <div class="flex-1"></div>
+                                <div class="flex-1"><label>No Peak Gate PNL ($)</label><input type="number" step="0.01" id="e_noPeakSlGatePnl" value="\${masterSettings.noPeakSlGatePnl !== undefined ? masterSettings.noPeakSlGatePnl : 0}"></div>
                             </div>
                             <div class="flex-row" style="margin-bottom: 16px;">
                                 <label style="display:flex; align-items:center; cursor:pointer;"><input type="checkbox" id="e_minuteCloseAutoDynamic" \${masterSettings.minuteCloseAutoDynamic ? 'checked' : ''} style="width:auto; margin:0 8px 0 0;"> 1-Min Auto-Dynamic Status</label>
@@ -2123,6 +2129,7 @@ app.get('/', (req, res) => {
                     smartOffsetMaxLossPerMinute: document.getElementById('e_smartOffsetMaxLossPerMinute').value !== '' ? parseFloat(document.getElementById('e_smartOffsetMaxLossPerMinute').value) : 0,
                     smartOffsetMaxLossTimeframeSeconds: document.getElementById('e_smartOffsetMaxLossTimeframeSeconds').value !== '' ? parseInt(document.getElementById('e_smartOffsetMaxLossTimeframeSeconds').value) : 60,
                     noPeakSlTimeframeMinutes: document.getElementById('e_noPeakSlTimeframeMinutes').value !== '' ? parseInt(document.getElementById('e_noPeakSlTimeframeMinutes').value) : 30,
+                    noPeakSlGatePnl: document.getElementById('e_noPeakSlGatePnl').value !== '' ? parseFloat(document.getElementById('e_noPeakSlGatePnl').value) : 0,
                     minuteCloseAutoDynamic: document.getElementById('e_minuteCloseAutoDynamic').checked
                 };
 
@@ -2292,6 +2299,7 @@ app.get('/', (req, res) => {
                     myMinuteCloseSlMaxPnl = config.minuteCloseSlMaxPnl !== undefined ? config.minuteCloseSlMaxPnl : 0;
 
                     myNoPeakSlTimeframeMinutes = config.noPeakSlTimeframeMinutes !== undefined ? config.noPeakSlTimeframeMinutes : 30;
+                    myNoPeakSlGatePnl = config.noPeakSlGatePnl !== undefined ? config.noPeakSlGatePnl : 0;
                     
                     document.getElementById('globalTargetPnl').value = myGlobalTargetPnl;
                     document.getElementById('globalTrailingPnl').value = myGlobalTrailingPnl;
@@ -2311,6 +2319,7 @@ app.get('/', (req, res) => {
                     document.getElementById('minuteCloseSlMaxPnl').value = myMinuteCloseSlMaxPnl;
 
                     document.getElementById('noPeakSlTimeframeMinutes').value = myNoPeakSlTimeframeMinutes;
+                    document.getElementById('noPeakSlGatePnl').value = myNoPeakSlGatePnl;
 
                     mySubAccounts = config.subAccounts || [];
                     renderSubAccounts();
@@ -2346,8 +2355,9 @@ app.get('/', (req, res) => {
                 myMinuteCloseSlMaxPnl = document.getElementById('minuteCloseSlMaxPnl').value !== '' ? -Math.abs(parseFloat(document.getElementById('minuteCloseSlMaxPnl').value)) : 0;
 
                 myNoPeakSlTimeframeMinutes = document.getElementById('noPeakSlTimeframeMinutes').value !== '' ? parseInt(document.getElementById('noPeakSlTimeframeMinutes').value) : 30;
+                myNoPeakSlGatePnl = document.getElementById('noPeakSlGatePnl').value !== '' ? parseFloat(document.getElementById('noPeakSlGatePnl').value) : 0;
                 
-                const data = { subAccounts: mySubAccounts, globalTargetPnl: myGlobalTargetPnl, globalTrailingPnl: myGlobalTrailingPnl, smartOffsetNetProfit: mySmartOffsetNetProfit, smartOffsetBottomRowV1: mySmartOffsetBottomRowV1, smartOffsetBottomRowV1StopLoss: mySmartOffsetBottomRowV1StopLoss, smartOffsetStopLoss: mySmartOffsetStopLoss, smartOffsetNetProfit2: mySmartOffsetNetProfit2, smartOffsetStopLoss2: mySmartOffsetStopLoss2, smartOffsetMaxLossPerMinute: mySmartOffsetMaxLossPerMinute, smartOffsetMaxLossTimeframeSeconds: mySmartOffsetMaxLossTimeframeSeconds, minuteCloseAutoDynamic: myMinuteCloseAutoDynamic, minuteCloseTpMinPnl: myMinuteCloseTpMinPnl, minuteCloseTpMaxPnl: myMinuteCloseTpMaxPnl, minuteCloseSlMinPnl: myMinuteCloseSlMinPnl, minuteCloseSlMaxPnl: myMinuteCloseSlMaxPnl, noPeakSlTimeframeMinutes: myNoPeakSlTimeframeMinutes };
+                const data = { subAccounts: mySubAccounts, globalTargetPnl: myGlobalTargetPnl, globalTrailingPnl: myGlobalTrailingPnl, smartOffsetNetProfit: mySmartOffsetNetProfit, smartOffsetBottomRowV1: mySmartOffsetBottomRowV1, smartOffsetBottomRowV1StopLoss: mySmartOffsetBottomRowV1StopLoss, smartOffsetStopLoss: mySmartOffsetStopLoss, smartOffsetNetProfit2: mySmartOffsetNetProfit2, smartOffsetStopLoss2: mySmartOffsetStopLoss2, smartOffsetMaxLossPerMinute: mySmartOffsetMaxLossPerMinute, smartOffsetMaxLossTimeframeSeconds: mySmartOffsetMaxLossTimeframeSeconds, minuteCloseAutoDynamic: myMinuteCloseAutoDynamic, minuteCloseTpMinPnl: myMinuteCloseTpMinPnl, minuteCloseTpMaxPnl: myMinuteCloseTpMaxPnl, minuteCloseSlMinPnl: myMinuteCloseSlMinPnl, minuteCloseSlMaxPnl: myMinuteCloseSlMaxPnl, noPeakSlTimeframeMinutes: myNoPeakSlTimeframeMinutes, noPeakSlGatePnl: myNoPeakSlGatePnl };
                 await fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token }, body: JSON.stringify(data) });
                 alert('Global Settings Saved!');
             }
@@ -2488,7 +2498,7 @@ app.get('/', (req, res) => {
                 profile.maxContracts = document.getElementById('maxContracts').value !== '' ? parseInt(document.getElementById('maxContracts').value) : 1000;
                 profile.coins = myCoins;
 
-                const data = { subAccounts: mySubAccounts, globalTargetPnl: myGlobalTargetPnl, globalTrailingPnl: myGlobalTrailingPnl, smartOffsetNetProfit: mySmartOffsetNetProfit, smartOffsetBottomRowV1: mySmartOffsetBottomRowV1, smartOffsetBottomRowV1StopLoss: mySmartOffsetBottomRowV1StopLoss, smartOffsetStopLoss: mySmartOffsetStopLoss, smartOffsetNetProfit2: mySmartOffsetNetProfit2, smartOffsetStopLoss2: mySmartOffsetStopLoss2, smartOffsetMaxLossPerMinute: mySmartOffsetMaxLossPerMinute, smartOffsetMaxLossTimeframeSeconds: mySmartOffsetMaxLossTimeframeSeconds, minuteCloseAutoDynamic: myMinuteCloseAutoDynamic, minuteCloseTpMinPnl: myMinuteCloseTpMinPnl, minuteCloseTpMaxPnl: myMinuteCloseTpMaxPnl, minuteCloseSlMinPnl: myMinuteCloseSlMinPnl, minuteCloseSlMaxPnl: myMinuteCloseSlMaxPnl, noPeakSlTimeframeMinutes: myNoPeakSlTimeframeMinutes };
+                const data = { subAccounts: mySubAccounts, globalTargetPnl: myGlobalTargetPnl, globalTrailingPnl: myGlobalTrailingPnl, smartOffsetNetProfit: mySmartOffsetNetProfit, smartOffsetBottomRowV1: mySmartOffsetBottomRowV1, smartOffsetBottomRowV1StopLoss: mySmartOffsetBottomRowV1StopLoss, smartOffsetStopLoss: mySmartOffsetStopLoss, smartOffsetNetProfit2: mySmartOffsetNetProfit2, smartOffsetStopLoss2: mySmartOffsetStopLoss2, smartOffsetMaxLossPerMinute: mySmartOffsetMaxLossPerMinute, smartOffsetMaxLossTimeframeSeconds: mySmartOffsetMaxLossTimeframeSeconds, minuteCloseAutoDynamic: myMinuteCloseAutoDynamic, minuteCloseTpMinPnl: myMinuteCloseTpMinPnl, minuteCloseTpMaxPnl: myMinuteCloseTpMaxPnl, minuteCloseSlMinPnl: myMinuteCloseSlMinPnl, minuteCloseSlMaxPnl: myMinuteCloseSlMaxPnl, noPeakSlTimeframeMinutes: myNoPeakSlTimeframeMinutes, noPeakSlGatePnl: myNoPeakSlGatePnl };
                 const res = await fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token }, body: JSON.stringify(data) });
                 const json = await res.json();
                 mySubAccounts = json.settings.subAccounts || [];
@@ -2667,6 +2677,7 @@ app.get('/', (req, res) => {
                     const stopLossNth = globalSet.smartOffsetBottomRowV1StopLoss || 0; 
                     const fullGroupSl = globalSet.smartOffsetStopLoss || 0; 
                     const bottomRowN = globalSet.smartOffsetBottomRowV1 !== undefined ? globalSet.smartOffsetBottomRowV1 : 5;
+                    const noPeakGateVal = globalSet.noPeakSlGatePnl !== undefined ? globalSet.noPeakSlGatePnl : 0;
 
                     if (totalPairs === 0) {
                         document.getElementById('liveOffsetsContainer').innerHTML = '<p class="text-secondary">Not enough active trades to form pairs.</p>';
@@ -2695,12 +2706,12 @@ app.get('/', (req, res) => {
                             if (blockedByLimit) topStatusMessage = '<span class="text-red" style="font-weight:bold;">🛑 Stop Loss Blocked by Timeframe Limit!</span>';
                             else { executingSl = true; topStatusMessage = '<span class="text-red" style="font-weight:bold;">🔥 Stop Loss Hit (Group &le; $' + fullGroupSl.toFixed(4) + ')!</span>'; }
                         } else if (peakRowIndex === -1 || peakAccumulation < 0.0001) {
-                            if (activeCandidates[0].pnl > 0) {
+                            if (activeCandidates[0].pnl > noPeakGateVal) {
                                 executingNoPeakSl = false;
-                                topStatusMessage = '<span class="text-warning" style="font-weight:bold;">⚠️ No Peak Found. GATED: Waiting for winners to drop &lt;= $0.</span>';
+                                topStatusMessage = '<span class="text-warning" style="font-weight:bold;">⚠️ No Peak Found. GATED: Waiting for winners to drop &le; $' + noPeakGateVal.toFixed(4) + '.</span>';
                             } else {
                                 executingNoPeakSl = true;
-                                topStatusMessage = '<span class="text-red" style="font-weight:bold;">⚠️ No Peak & Winners &lt;= $0. Ready to cut lowest PNL every ' + (globalSet.noPeakSlTimeframeMinutes !== undefined ? globalSet.noPeakSlTimeframeMinutes : 30) + ' mins.</span>';
+                                topStatusMessage = '<span class="text-red" style="font-weight:bold;">⚠️ No Peak & Winners &le; $' + noPeakGateVal.toFixed(4) + '. Ready to cut lowest PNL every ' + (globalSet.noPeakSlTimeframeMinutes !== undefined ? globalSet.noPeakSlTimeframeMinutes : 30) + ' mins.</span>';
                             }
                         } else {
                             let pColor = peakAccumulation >= 0.0001 ? 'text-green' : 'text-secondary';
