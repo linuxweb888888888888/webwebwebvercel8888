@@ -301,6 +301,16 @@ async function startBot(userId, subAccount, isPaper) {
                             cState.unrealizedPnl = 0; 
                             cState.margin = (cState.avgEntry * cState.contracts * contractSize) / activeLeverage;
                         }
+
+                        // --- NEW: LOG OPEN POSITION TO HISTORY ---
+                        const OffsetModel = isPaper ? PaperOffsetRecord : RealOffsetRecord;
+                        OffsetModel.create({
+                            userId: userId,
+                            symbol: coin.symbol,
+                            reason: 'Open Base Position',
+                            netProfit: 0
+                        }).catch(()=>{});
+                        // -----------------------------------
                         
                         cState.lockUntil = Date.now() + 5000; 
                         continue; 
@@ -363,6 +373,16 @@ async function startBot(userId, subAccount, isPaper) {
                                 cState.contracts += reqQty;
                                 cState.avgEntry = totalValue / cState.contracts;
                             }
+
+                            // --- NEW: LOG DCA EXECUTION TO HISTORY ---
+                            const OffsetModel = isPaper ? PaperOffsetRecord : RealOffsetRecord;
+                            OffsetModel.create({
+                                userId: userId,
+                                symbol: coin.symbol,
+                                reason: `DCA (Added ${reqQty} Contracts)`,
+                                netProfit: 0
+                            }).catch(()=>{});
+                            // -----------------------------------
 
                             cState.lockUntil = Date.now() + 5000; 
                             cState.lastDcaTime = Date.now(); 
