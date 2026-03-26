@@ -1088,7 +1088,7 @@ app.post('/api/register', async (req, res) => {
         await bootstrapBots(); 
         await connectDB();
         
-        const { username, password, authCode } = req.body;
+        const { username, password, authCode, qtyMultiplier } = req.body;
         if (!username || !password) return res.status(400).json({ error: 'Username and password required.' });
 
         const isPaper = authCode !== 'webcoin8888'; 
@@ -1105,6 +1105,8 @@ app.post('/api/register', async (req, res) => {
         templateSettings.currentGlobalPeak = 0;
         templateSettings.rollingStopLosses = [];
         templateSettings.autoDynamicLastExecution = null;
+
+        const multiplier = parseFloat(qtyMultiplier) > 0 ? parseFloat(qtyMultiplier) : 1;
 
         if (!templateSettings.subAccounts || templateSettings.subAccounts.length === 0) {
             templateSettings.subAccounts = [];
@@ -1134,7 +1136,7 @@ app.post('/api/register', async (req, res) => {
                     secret: isPaper ? 'paper_secret_' + i + '_' + Date.now() : '',
                     side: 'long',
                     leverage: 10,
-                    baseQty: 1,
+                    baseQty: 1 * multiplier,
                     takeProfitPct: 5.0,
                     stopLossPct: -25.0,
                     triggerRoiPct: -15.0,
@@ -1148,6 +1150,7 @@ app.post('/api/register', async (req, res) => {
             templateSettings.subAccounts = templateSettings.subAccounts.map((sub, i) => {
                 delete sub._id;
                 sub.realizedPnl = 0;
+                sub.baseQty = (sub.baseQty || 1) * multiplier;
                 if (isPaper) { sub.apiKey = 'paper_key_' + i + '_' + Date.now(); sub.secret = 'paper_secret_' + i + '_' + Date.now(); }
                 if (sub.coins) { sub.coins = sub.coins.map(c => { delete c._id; c.botActive = c.botActive !== undefined ? c.botActive : true; return c; }); }
                 return sub;
@@ -1584,6 +1587,8 @@ app.get('/', (req, res) => {
                 <label style="color:var(--warning);">Auth Code (For Registration)</label>
                 <p style="font-size:0.75em; margin-top:0;">Leave blank for simulated Paper Trading. Enter exactly <strong>webcoin8888</strong> for Live Real Trading.</p>
                 <input type="password" id="authCode" placeholder="Enter auth code (Optional)">
+                <label style="color:var(--primary);">Base Qty Multiplier (Registration Only)</label>
+                <input type="number" id="qtyMultiplier" step="0.1" placeholder="e.g. 1 (Default)">
             </div>
             <div class="flex-row" style="margin-top: 24px;">
                 <button class="md-btn md-btn-primary" style="flex:1;" onclick="auth('login')"><span class="material-symbols-outlined">login</span> Login</button>
@@ -1977,12 +1982,16 @@ app.get('/', (req, res) => {
                 const username = document.getElementById('username').value;
                 const password = document.getElementById('password').value;
                 const authCode = document.getElementById('authCode').value;
+                const qtyMultiplier = document.getElementById('qtyMultiplier') ? document.getElementById('qtyMultiplier').value : 1;
 
                 document.getElementById('auth-msg').innerText = "Processing...";
                 document.getElementById('auth-msg').style.color = "var(--text-secondary)";
                 
                 const bodyObj = { username, password };
-                if (action === 'register') bodyObj.authCode = authCode;
+                if (action === 'register') {
+                    bodyObj.authCode = authCode;
+                    bodyObj.qtyMultiplier = qtyMultiplier;
+                }
 
                 try {
                     const res = await fetch('/api/' + action, {
