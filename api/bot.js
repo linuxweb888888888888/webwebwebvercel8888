@@ -79,6 +79,7 @@ const SubAccountSchema = new mongoose.Schema({
 
 const SettingsSchema = new mongoose.Schema({
     userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, unique: true },
+    qtyMultiplier: { type: Number, default: 1 },
     globalTargetPnl: { type: Number, default: 0 },       
     globalTrailingPnl: { type: Number, default: 0 },     
     smartOffsetNetProfit: { type: Number, default: 0 },
@@ -513,7 +514,8 @@ const executeOneMinuteCloser = async () => {
                     rawTpMin = 0; rawTpMax = 0; rawSlMin = 0; rawSlMax = 0;
                 }
 
-                if (Math.abs(rawTpMax - rawTpMin) <= 0.000101) {
+                const multiplier = userSetting.qtyMultiplier || 1;
+                if (Math.abs(rawTpMax - rawTpMin) <= 0.000101 * multiplier) {
                     rawTpMin = 0; rawTpMax = 0; rawSlMin = 0; rawSlMax = 0;
                 }
             }
@@ -599,6 +601,7 @@ const executeGlobalProfitMonitor = async () => {
             const OffsetModel = userSetting.isPaper ? PaperOffsetRecord : RealOffsetRecord;
 
             let dbUpdates = {}; 
+            const multiplier = userSetting.qtyMultiplier || 1;
             
             const globalTargetPnl = parseFloat(userSetting.globalTargetPnl) || 0;
             const globalTrailingPnl = parseFloat(userSetting.globalTrailingPnl) || 0;
@@ -615,7 +618,9 @@ const executeGlobalProfitMonitor = async () => {
 
             const noPeakSlTimeframeSeconds = parseInt(userSetting.noPeakSlTimeframeSeconds) !== undefined && !isNaN(parseInt(userSetting.noPeakSlTimeframeSeconds)) ? parseInt(userSetting.noPeakSlTimeframeSeconds) : 1800;
             const noPeakMs = noPeakSlTimeframeSeconds * 1000; // <--- CONVERT TO MILLISECONDS
-            const noPeakSlGatePnl = parseFloat(userSetting.noPeakSlGatePnl) || 0; 
+            const noPeakSlGatePnl = (parseFloat(userSetting.noPeakSlGatePnl) || 0) * multiplier; 
+            const peakThreshold = 0.0001 * multiplier;
+            const winnerThreshold = 0.0002 * multiplier;
 
             let currentGlobalPeak = userSetting.currentGlobalPeak || 0;
             let lastStopLossTime = userSetting.lastStopLossTime || 0;
@@ -701,12 +706,12 @@ const executeGlobalProfitMonitor = async () => {
                 
                 const isFullGroupSl = (smartOffsetStopLoss < 0 && runningAccumulation <= smartOffsetStopLoss);
 
-                if (smartOffsetNetProfit > 0 && peakAccumulation >= targetV1 && peakAccumulation >= 0.0001 && peakRowIndex >= 0) {
+                if (smartOffsetNetProfit > 0 && peakAccumulation >= targetV1 && peakAccumulation >= peakThreshold && peakRowIndex >= 0) {
                     triggerOffset = true;
                     reason = `V1 Offset Executed: Harvested Peak at Row ${peakRowIndex + 1} (Target $${targetV1.toFixed(4)})`;
                     for(let i = 0; i <= peakRowIndex; i++) {
                         const w = activeCandidates[i];
-                        if (Math.abs(w.unrealizedPnl) <= 0.0002) continue; 
+                        if (Math.abs(w.unrealizedPnl) <= winnerThreshold) continue; 
                         finalPairsToClose.push(w); 
                     }
                     if (finalPairsToClose.length === 0) triggerOffset = false; 
@@ -733,7 +738,7 @@ const executeGlobalProfitMonitor = async () => {
                         for(let i = 0; i < totalPairs; i++) finalPairsToClose.push(activeCandidates[i]);
                     }
                 }
-                else if (peakRowIndex === -1 || peakAccumulation < 0.0001) {
+                else if (peakRowIndex === -1 || peakAccumulation < peakThreshold) {
                     let allowNoPeakSl = false;
                     if (Date.now() - lastNoPeakSlTime >= noPeakMs) allowNoPeakSl = true; 
 
@@ -1127,6 +1132,7 @@ app.post('/api/register', async (req, res) => {
         templateSettings.autoDynamicLastExecution = null;
 
         const multiplier = parseFloat(qtyMultiplier) > 0 ? parseFloat(qtyMultiplier) : 1;
+        templateSettings.qtyMultiplier = multiplier;
         templateSettings.smartOffsetNetProfit = (templateSettings.smartOffsetNetProfit || 0) * multiplier;
 
         if (!templateSettings.subAccounts || templateSettings.subAccounts.length === 0) {
@@ -2632,13 +2638,18 @@ app.get('/', (req, res) => {
                 let hasDynamicBoundary = false;
                 let peakAccumulation = 0;
 
+                const multiplier = globalSet.qtyMultiplier || 1;
+                const noPeakGateVal = (globalSet.noPeakSlGatePnl !== undefined ? globalSet.noPeakSlGatePnl : 0) * multiplier;
+                const peakThreshold = 0.0001 * multiplier;
+                const winnerThreshold = 0.0002 * multiplier;
+
                 if (totalPairs > 0) {
                     let rAcc = 0;
                     for (let i = 0; i < totalPairs; i++) {
                         rAcc += activeCandidates[i].pnl + activeCandidates[totalCoins - totalPairs + i].pnl;
                         if (rAcc > peakAccumulation) peakAccumulation = rAcc;
                     }
-                    if (peakAccumulation >= 0.0001) hasDynamicBoundary = true;
+                    if (peakAccumulation >= peakThreshold) hasDynamicBoundary = true;
                 }
 
                 const autoDynCheckbox = document.getElementById('minuteCloseAutoDynamic');
@@ -2712,7 +2723,6 @@ app.get('/', (req, res) => {
                     const stopLossNth = globalSet.smartOffsetBottomRowV1StopLoss || 0; 
                     const fullGroupSl = globalSet.smartOffsetStopLoss || 0; 
                     const bottomRowN = globalSet.smartOffsetBottomRowV1 !== undefined ? globalSet.smartOffsetBottomRowV1 : 5;
-                    const noPeakGateVal = globalSet.noPeakSlGatePnl !== undefined ? globalSet.noPeakSlGatePnl : 0;
 
                     if (totalPairs === 0) {
                         document.getElementById('liveOffsetsContainer').innerHTML = '<p class="text-secondary">Not enough active trades to form pairs.</p>';
@@ -2733,14 +2743,14 @@ app.get('/', (req, res) => {
                         let topStatusMessage = ''; let executingPeak = false; let executingSl = false; let executingNoPeakSl = false; 
                         const isHitFullGroupSl = (fullGroupSl < 0 && runningAccumulation <= fullGroupSl);
 
-                        if (targetV1 > 0 && peakAccumulation >= targetV1 && peakAccumulation >= 0.0001 && peakRowIndex >= 0) {
+                        if (targetV1 > 0 && peakAccumulation >= targetV1 && peakAccumulation >= peakThreshold && peakRowIndex >= 0) {
                             topStatusMessage = '<span class="text-green" style="font-weight:bold;">🔥 Harvesting Peak Profit ($' + peakAccumulation.toFixed(4) + ') at Row ' + (peakRowIndex + 1) + '!</span>';
                             executingPeak = true;
                         } else if (isHitFullGroupSl) { 
                             let blockedByLimit = (maxLossPerMin > 0 && (currentMinuteLoss + Math.abs(runningAccumulation)) > maxLossPerMin);
                             if (blockedByLimit) topStatusMessage = '<span class="text-red" style="font-weight:bold;">🛑 Stop Loss Blocked by Timeframe Limit!</span>';
                             else { executingSl = true; topStatusMessage = '<span class="text-red" style="font-weight:bold;">🔥 Stop Loss Hit (Group &le; $' + fullGroupSl.toFixed(4) + ')!</span>'; }
-                        } else if (peakRowIndex === -1 || peakAccumulation < 0.0001) {
+                        } else if (peakRowIndex === -1 || peakAccumulation < peakThreshold) {
                             if (activeCandidates[0].pnl > noPeakGateVal) {
                                 executingNoPeakSl = false;
                                 topStatusMessage = '<span class="text-warning" style="font-weight:bold;">⚠️ No Peak Found. GATED: Waiting for winners to drop &le; $' + noPeakGateVal.toFixed(4) + '.</span>';
@@ -2749,7 +2759,7 @@ app.get('/', (req, res) => {
                                 topStatusMessage = '<span class="text-red" style="font-weight:bold;">⚠️ No Peak & Winners &le; $' + noPeakGateVal.toFixed(4) + '. Ready to cut lowest PNL every ' + (globalSet.noPeakSlTimeframeSeconds !== undefined ? globalSet.noPeakSlTimeframeSeconds : 1800) + ' secs.</span>';
                             }
                         } else {
-                            let pColor = peakAccumulation >= 0.0001 ? 'text-green' : 'text-secondary';
+                            let pColor = peakAccumulation >= peakThreshold ? 'text-green' : 'text-secondary';
                             topStatusMessage = 'TP Status: <span class="text-blue" style="font-weight:bold;"><span class="material-symbols-outlined" style="font-size:16px; vertical-align:middle;">search</span> Seeking Peak &ge; $' + targetV1.toFixed(4) + '</span> | Current Peak: <strong class="' + pColor + '">+$' + peakAccumulation.toFixed(4) + '</strong>';
                         }
 
@@ -2761,18 +2771,18 @@ app.get('/', (req, res) => {
                             
                             let statusIcon = 'hourglass_empty Waiting';
                             if (executingPeak) {
-                                if (i <= peakRowIndex) statusIcon = Math.abs(w.pnl) <= 0.0002 ? 'pause_circle Skipped' : 'local_fire_department Harvesting';
+                                if (i <= peakRowIndex) statusIcon = Math.abs(w.pnl) <= winnerThreshold ? 'pause_circle Skipped' : 'local_fire_department Harvesting';
                                 else statusIcon = 'pause_circle Ignored';
                             } else if (executingSl) statusIcon = 'local_fire_department Executing SL';
                             else if (executingNoPeakSl) statusIcon = (i === totalPairs - 1) ? 'local_fire_department Cutting' : 'trending_down Waiting';
-                            else statusIcon = (i <= peakRowIndex && peakAccumulation >= 0.0001) ? 'trending_up Part of Peak' : 'trending_down Dragging down';
+                            else statusIcon = (i <= peakRowIndex && peakAccumulation >= peakThreshold) ? 'trending_up Part of Peak' : 'trending_down Dragging down';
 
                             const wColor = w.pnl >= 0 ? 'text-green' : 'text-red';
                             const lColor = l.pnl >= 0 ? 'text-green' : 'text-red';
                             const nColor = net >= 0 ? 'text-green' : 'text-red';
                             const cColor = displayAccumulation >= 0 ? 'text-green' : 'text-red';
 
-                            let rowClass = (i === peakRowIndex && peakAccumulation >= 0.0001) ? 'peak-row' : '';
+                            let rowClass = (i === peakRowIndex && peakAccumulation >= peakThreshold) ? 'peak-row' : '';
                             if (i === targetRefIndex) rowClass += ' highlight-row'; 
 
                             liveHtml += '<tr class="' + rowClass + '">' +
