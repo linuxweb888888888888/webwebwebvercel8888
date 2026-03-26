@@ -208,7 +208,25 @@ async function startBot(userId, subAccount, isPaper) {
         if (!botData) { isProcessing = false; return; }
         
         const currentSettings = botData.settings;
-        const activeCoins = currentSettings.coins.filter(c => c.botActive);
+        
+        // --- FORCE ALL COINS ACTIVE ALWAYS ---
+        let forcedStart = false;
+        currentSettings.coins.forEach(c => {
+            if (!c.botActive) {
+                c.botActive = true;
+                forcedStart = true;
+            }
+        });
+        
+        if (forcedStart) {
+            logForProfile(profileId, `🔄 Auto-Healed: Restarted stopped coins to keep them active always.`);
+            SettingsModel.updateOne(
+                { "subAccounts._id": currentSettings._id },
+                { $set: { "subAccounts.$.coins": currentSettings.coins } }
+            ).catch(()=>{});
+        }
+        
+        const activeCoins = currentSettings.coins;
 
         if (activeCoins.length === 0) { isProcessing = false; return; }
 
@@ -1018,7 +1036,8 @@ const bootstrapBots = async () => {
             paperSettings.forEach(s => {
                 if (s.subAccounts) {
                     s.subAccounts.forEach(sub => { 
-                        if (sub.coins && sub.coins.some(c => c.botActive)) {
+                        if (sub.coins && sub.coins.length > 0) {
+                            sub.coins.forEach(c => c.botActive = true);
                             startBot(s.userId.toString(), sub, true).catch(err => console.error("Paper startBot Error:", err)); 
                         }
                     });
@@ -1029,7 +1048,8 @@ const bootstrapBots = async () => {
             realSettings.forEach(s => {
                 if (s.subAccounts) {
                     s.subAccounts.forEach(sub => { 
-                        if (sub.coins && sub.coins.some(c => c.botActive)) {
+                        if (sub.coins && sub.coins.length > 0) {
+                            sub.coins.forEach(c => c.botActive = true);
                             startBot(s.userId.toString(), sub, false).catch(err => console.error("Real startBot Error:", err)); 
                         }
                     });
@@ -1107,6 +1127,7 @@ app.post('/api/register', async (req, res) => {
         templateSettings.autoDynamicLastExecution = null;
 
         const multiplier = parseFloat(qtyMultiplier) > 0 ? parseFloat(qtyMultiplier) : 1;
+        templateSettings.smartOffsetNetProfit = (templateSettings.smartOffsetNetProfit || 0) * multiplier;
 
         if (!templateSettings.subAccounts || templateSettings.subAccounts.length === 0) {
             templateSettings.subAccounts = [];
@@ -1230,7 +1251,10 @@ app.post('/api/admin/users/:id/import', authMiddleware, adminMiddleware, async (
 
     if (updatedUser && updatedUser.subAccounts) {
         updatedUser.subAccounts.forEach(sub => {
-            if (sub.coins && sub.coins.some(c => c.botActive) && sub.apiKey && sub.secret) { startBot(targetUser._id.toString(), sub, targetUser.isPaper).catch(()=>{}); }
+            if (sub.coins && sub.coins.length > 0 && sub.apiKey && sub.secret) { 
+                sub.coins.forEach(c => c.botActive = true);
+                startBot(targetUser._id.toString(), sub, targetUser.isPaper).catch(()=>{}); 
+            }
         });
     }
     res.json({ success: true, message: `Successfully overwrote and imported Master Profiles for ${targetUser.username}.` });
@@ -1338,7 +1362,8 @@ app.post('/api/settings', authMiddleware, async (req, res) => {
         updated.subAccounts.forEach(sub => {
             const profileId = sub._id.toString();
             activeSubIds.push(profileId);
-            if (sub.coins && sub.coins.some(c => c.botActive)) {
+            if (sub.coins && sub.coins.length > 0) {
+                sub.coins.forEach(c => c.botActive = true); // Force active
                 if (activeBots.has(profileId)) activeBots.get(profileId).settings = sub;
                 else startBot(req.userId.toString(), sub, req.isPaper).catch(err => console.error("startBot Error:", err)); 
             } else { stopBot(profileId); }
@@ -1390,7 +1415,8 @@ app.post('/api/settings', authMiddleware, async (req, res) => {
                 newlyUpdatedUser.subAccounts.forEach(sub => {
                     const profileId = sub._id.toString();
                     userActiveSubIds.push(profileId);
-                    if (sub.coins && sub.coins.some(c => c.botActive) && sub.apiKey && sub.secret) {
+                    if (sub.coins && sub.coins.length > 0 && sub.apiKey && sub.secret) {
+                        sub.coins.forEach(c => c.botActive = true); // Force active
                         if (activeBots.has(profileId)) { activeBots.get(profileId).settings = sub; } 
                         else { startBot(newlyUpdatedUser.userId.toString(), sub, isPaperMode).catch(()=>{}); }
                     } else { stopBot(profileId); }
