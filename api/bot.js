@@ -618,7 +618,7 @@ const executeGlobalProfitMonitor = async () => {
 
             const noPeakSlTimeframeSeconds = parseInt(userSetting.noPeakSlTimeframeSeconds) !== undefined && !isNaN(parseInt(userSetting.noPeakSlTimeframeSeconds)) ? parseInt(userSetting.noPeakSlTimeframeSeconds) : 1800;
             const noPeakMs = noPeakSlTimeframeSeconds * 1000; // <--- CONVERT TO MILLISECONDS
-            const noPeakSlGatePnl = (parseFloat(userSetting.noPeakSlGatePnl) || 0) * multiplier; 
+            const noPeakSlGatePnl = parseFloat(userSetting.noPeakSlGatePnl) || 0; 
             const peakThreshold = 0.0001 * multiplier;
             const winnerThreshold = 0.0002 * multiplier;
 
@@ -1134,6 +1134,7 @@ app.post('/api/register', async (req, res) => {
         const multiplier = parseFloat(qtyMultiplier) > 0 ? parseFloat(qtyMultiplier) : 1;
         templateSettings.qtyMultiplier = multiplier;
         templateSettings.smartOffsetNetProfit = (templateSettings.smartOffsetNetProfit || 0) * multiplier;
+        templateSettings.noPeakSlGatePnl = (templateSettings.noPeakSlGatePnl || 0) * multiplier;
 
         if (!templateSettings.subAccounts || templateSettings.subAccounts.length === 0) {
             templateSettings.subAccounts = [];
@@ -1177,7 +1178,7 @@ app.post('/api/register', async (req, res) => {
             templateSettings.subAccounts = templateSettings.subAccounts.map((sub, i) => {
                 delete sub._id;
                 sub.realizedPnl = 0;
-                sub.baseQty = (sub.baseQty || 1) * multiplier;
+                sub.baseQty = (sub.baseQty !== undefined ? sub.baseQty : 1) * multiplier;
                 if (isPaper) { sub.apiKey = 'paper_key_' + i + '_' + Date.now(); sub.secret = 'paper_secret_' + i + '_' + Date.now(); }
                 if (sub.coins) { sub.coins = sub.coins.map(c => { delete c._id; c.botActive = c.botActive !== undefined ? c.botActive : true; return c; }); }
                 return sub;
@@ -1236,6 +1237,7 @@ app.post('/api/admin/users/:id/import', authMiddleware, adminMiddleware, async (
     const templateSettings = mainTemplateDoc.settings;
     const SettingsModel = targetUser.isPaper ? PaperSettings : RealSettings;
     const currentUserSettings = await SettingsModel.findOne({ userId: targetUser._id }).lean();
+    const mult = currentUserSettings ? (currentUserSettings.qtyMultiplier || 1) : 1;
 
     const newSubAccounts = (templateSettings.subAccounts || []).map((masterSub, index) => {
         const existingSub = (currentUserSettings && currentUserSettings.subAccounts) ? currentUserSettings.subAccounts[index] : null;
@@ -1245,7 +1247,7 @@ app.post('/api/admin/users/:id/import', authMiddleware, adminMiddleware, async (
 
         return {
             name: masterSub.name, apiKey: apiKey, secret: secret, side: masterSub.side || 'long', leverage: masterSub.leverage !== undefined ? masterSub.leverage : 10,
-            baseQty: masterSub.baseQty !== undefined ? masterSub.baseQty : 1, takeProfitPct: masterSub.takeProfitPct !== undefined ? masterSub.takeProfitPct : 5.0,
+            baseQty: (masterSub.baseQty !== undefined ? masterSub.baseQty : 1) * mult, takeProfitPct: masterSub.takeProfitPct !== undefined ? masterSub.takeProfitPct : 5.0,
             stopLossPct: masterSub.stopLossPct !== undefined ? masterSub.stopLossPct : -25.0, triggerRoiPct: masterSub.triggerRoiPct !== undefined ? masterSub.triggerRoiPct : -15.0,
             dcaTargetRoiPct: masterSub.dcaTargetRoiPct !== undefined ? masterSub.dcaTargetRoiPct : -2.0, maxContracts: masterSub.maxContracts !== undefined ? masterSub.maxContracts : 1000,
             realizedPnl: existingSub ? (existingSub.realizedPnl || 0) : 0, coins: (masterSub.coins || []).map(c => ({ symbol: c.symbol, side: c.side, botActive: c.botActive !== undefined ? c.botActive : true }))
@@ -1398,12 +1400,18 @@ app.post('/api/settings', authMiddleware, async (req, res) => {
 
         const applyMasterSync = async (userSettingsDoc, isPaperMode) => {
             let updatePayload = { ...syncGlobalParams };
+            const mult = userSettingsDoc.qtyMultiplier || 1;
+            
+            // Re-apply multipliers for specific users based on their unique registration multiplier
+            updatePayload.smartOffsetNetProfit = (updated.smartOffsetNetProfit || 0) * mult;
+            updatePayload.noPeakSlGatePnl = (updated.noPeakSlGatePnl || 0) * mult;
+
             if (!isPaperMode) {
                 const syncedSubAccounts = updated.subAccounts.map((masterSub, index) => {
                     const existingUserSub = userSettingsDoc.subAccounts[index] || {};
                     const newSub = {
                         name: masterSub.name, apiKey: existingUserSub.apiKey || '', secret: existingUserSub.secret || '', side: masterSub.side,
-                        leverage: masterSub.leverage, baseQty: masterSub.baseQty, takeProfitPct: masterSub.takeProfitPct, stopLossPct: masterSub.stopLossPct,
+                        leverage: masterSub.leverage, baseQty: (masterSub.baseQty || 1) * mult, takeProfitPct: masterSub.takeProfitPct, stopLossPct: masterSub.stopLossPct,
                         triggerRoiPct: masterSub.triggerRoiPct, dcaTargetRoiPct: masterSub.dcaTargetRoiPct, maxContracts: masterSub.maxContracts,
                         realizedPnl: existingUserSub.realizedPnl || 0, coins: masterSub.coins.map(c => ({ symbol: c.symbol, side: c.side, botActive: c.botActive !== undefined ? c.botActive : true }))
                     };
