@@ -1997,10 +1997,10 @@ app.get('/', (req, res) => {
                 if (!audioEnabled || !window.speechSynthesis) return;
                 
                 // Translate messy text into natural spoken words
-                let cleanText = text.replace(/([A-Z]+)\/USDT:USDT/g, "$1"); 
-                cleanText = cleanText.replace(/\$([0-9]+\.[0-9]+)/g, "$1 dollars"); 
-                cleanText = cleanText.replace(/\-([0-9]+\.[0-9]+)/g, "minus $1");
-                cleanText = cleanText.replace(/([0-9]+\.[0-9]{2})[0-9]+/g, "$1"); // Round spoken dollars to 2 decimals
+                let cleanText = text.replace(/([A-Z]+)\\/USDT:USDT/g, "$1"); 
+                cleanText = cleanText.replace(/\\$([0-9]+\\.[0-9]+)/g, "$1 dollars"); 
+                cleanText = cleanText.replace(/\\-([0-9]+\\.[0-9]+)/g, "minus $1");
+                cleanText = cleanText.replace(/([0-9]+\\.[0-9]{2})[0-9]+/g, "$1"); // Round spoken dollars to 2 decimals
                 cleanText = cleanText.replace(/[🛒⚡🛑🔥⚠️⚖️📈🌍❌🔄🛡️]/g, ''); // Strip emojis
                 
                 const utterance = new SpeechSynthesisUtterance(cleanText);
@@ -2765,9 +2765,9 @@ app.get('/', (req, res) => {
                             const profitWord = netNum >= 0 ? "profit" : "loss";
                             const netAmt = Math.abs(netNum).toFixed(2);
                             
-                            let textToSpeak = `Trade event on ${symbolText}. ${offset.reason}.`;
+                            let textToSpeak = 'Trade event on ' + symbolText + '. ' + offset.reason + '.';
                             if (netNum !== 0) {
-                                textToSpeak += ` Net ${profitWord} of ${netAmt} dollars.`;
+                                textToSpeak += ' Net ' + profitWord + ' of ' + netAmt + ' dollars.';
                             }
                             
                             latestTradeToSpeak = textToSpeak;
@@ -3100,8 +3100,8 @@ app.get('/', (req, res) => {
                                     coin.symbol + ' <span class="text-secondary" style="font-size: 0.8em;">(' + displaySide.toUpperCase() + ')</span> - Status: <span class="' + statusColor + '" style="font-weight:700;">' + state.status + '</span>' +
                                 '</div>' +
                                 '<div class="flex-row">' +
-                                    '<button class="md-btn md-btn-success" style="padding:6px 12px;" onclick="toggleCoinBot(\\'' + coin.symbol + '\\', true)"><span class="material-symbols-outlined" style="font-size:18px;">play_arrow</span> Start</button>' +
-                                    '<button class="md-btn md-btn-danger" style="padding:6px 12px;" onclick="toggleCoinBot(\\'' + coin.symbol + '\\', false)"><span class="material-symbols-outlined" style="font-size:18px;">stop</span> Stop</button>' +
+                                    '<button class="md-btn md-btn-success" style="padding:6px 12px;" onclick="toggleCoinBot(\\\'' + coin.symbol + '\\\', true)"><span class="material-symbols-outlined" style="font-size:18px;">play_arrow</span> Start</button>' +
+                                    '<button class="md-btn md-btn-danger" style="padding:6px 12px;" onclick="toggleCoinBot(\\\'' + coin.symbol + '\\\', false)"><span class="material-symbols-outlined" style="font-size:18px;">stop</span> Stop</button>' +
                                 '</div>' +
                             '</div>' +
                             '<div class="flex-row" style="justify-content: space-between;">' +
