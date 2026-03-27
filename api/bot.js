@@ -352,45 +352,55 @@ async function startBot(userId, subAccount, isPaper) {
                     let tpReasonTxt = '';
                     
                     const tpPnlTarget = parseFloat(currentSettings.takeProfitPnl) || 0;
-                    if (tpPnlTarget > 0 && cState.unrealizedPnl >= tpPnlTarget) {
+                    const tpPctTarget = parseFloat(currentSettings.takeProfitPct) || 0;
+                    const currentPnl = parseFloat(cState.unrealizedPnl) || 0;
+                    const currentRoi = parseFloat(cState.currentRoi) || 0;
+                    const slPctTarget = parseFloat(currentSettings.stopLossPct) || -25.0;
+
+                    if (tpPnlTarget > 0 && currentPnl >= tpPnlTarget) {
                         isTakeProfit = true;
-                        tpReasonTxt = `Take Profit Hit (PNL >= $${tpPnlTarget})`;
-                    } else if (cState.currentRoi >= currentSettings.takeProfitPct) {
+                        tpReasonTxt = `Take Profit Hit (PNL $${currentPnl.toFixed(4)} >= $${tpPnlTarget.toFixed(4)})`;
+                    } else if (tpPctTarget > 0 && currentRoi >= tpPctTarget) {
                         isTakeProfit = true;
-                        tpReasonTxt = `Take Profit Hit (ROI >= ${currentSettings.takeProfitPct}%)`;
+                        tpReasonTxt = `Take Profit Hit (ROI ${currentRoi.toFixed(2)}% >= ${tpPctTarget}%)`;
                     }
                     
-                    const isStopLoss = currentSettings.stopLossPct < 0 && cState.currentRoi <= currentSettings.stopLossPct;
+                    const isStopLoss = slPctTarget < 0 && currentRoi <= slPctTarget;
 
                     if (isTakeProfit || isStopLoss) {
-                        const reasonTxt = isTakeProfit ? tpReasonTxt : `Stop Loss Hit (ROI <= ${currentSettings.stopLossPct}%)`;
+                        const reasonTxt = isTakeProfit ? tpReasonTxt : `Stop Loss Hit (ROI ${currentRoi.toFixed(2)}% <= ${slPctTarget}%)`;
                         const modeTxt = isPaper ? "PAPER" : "REAL";
-                        logForProfile(profileId, `[${modeTxt}] ${reasonTxt}. Closing ${cState.contracts} contracts.`);
                         
-                        if (!isPaper) {
-                            const closeSide = activeSide === 'long' ? 'sell' : 'buy';
-                            await exchange.createOrder(coin.symbol, 'market', closeSide, cState.contracts, undefined, { offset: 'close' });
-                        }
-
-                        cState.lockUntil = Date.now() + 5000;
-                        currentSettings.realizedPnl = (currentSettings.realizedPnl || 0) + cState.unrealizedPnl;
+                        logForProfile(profileId, `[${modeTxt}] [${coin.symbol}] ⚡ Triggered: ${reasonTxt}. Attempting to close ${cState.contracts} contracts.`);
                         
-                        // PRECISE EXCHANGE LOG: Close Position
-                        const OffsetModel = isPaper ? PaperOffsetRecord : RealOffsetRecord;
-                        OffsetModel.create({
-                            userId: userId,
-                            symbol: coin.symbol,
-                            winnerSymbol: coin.symbol,
-                            reason: reasonTxt,
-                            netProfit: cState.unrealizedPnl
-                        }).catch(()=>{});
+                        try {
+                            if (!isPaper) {
+                                const closeSide = activeSide === 'long' ? 'sell' : 'buy';
+                                await exchange.createOrder(coin.symbol, 'market', closeSide, cState.contracts, undefined, { offset: 'close' });
+                            }
 
-                        if (isPaper) {
-                            cState.contracts = 0; cState.unrealizedPnl = 0; cState.currentRoi = 0; cState.avgEntry = 0;
+                            cState.lockUntil = Date.now() + 5000;
+                            currentSettings.realizedPnl = (currentSettings.realizedPnl || 0) + currentPnl;
+                            
+                            const OffsetModel = isPaper ? PaperOffsetRecord : RealOffsetRecord;
+                            OffsetModel.create({
+                                userId: userId,
+                                symbol: coin.symbol,
+                                winnerSymbol: coin.symbol,
+                                reason: reasonTxt,
+                                netProfit: currentPnl
+                            }).catch(()=>{});
+
+                            if (isPaper) {
+                                cState.contracts = 0; cState.unrealizedPnl = 0; cState.currentRoi = 0; cState.avgEntry = 0;
+                            }
+
+                            SettingsModel.updateOne({ "subAccounts._id": currentSettings._id }, { $set: { "subAccounts.$.realizedPnl": currentSettings.realizedPnl } }).catch(()=>{});
+                            continue; 
+                        } catch (closeErr) {
+                            logForProfile(profileId, `[${modeTxt}] [${coin.symbol}] ❌ FAILED TO CLOSE: ${closeErr.message}`);
+                            continue;
                         }
-
-                        SettingsModel.updateOne({ "subAccounts._id": currentSettings._id }, { $set: { "subAccounts.$.realizedPnl": currentSettings.realizedPnl } }).catch(()=>{});
-                        continue; 
                     }
 
                     // 3. DCA TRIGGER
@@ -2843,7 +2853,7 @@ app.get('/', (req, res) => {
                         
                         let dynamicInfoHtml = '<div class="stat-box" style="margin-bottom:16px; background:#E3F2FD; border-color:#90CAF9; color:var(--primary);">' +
                             '<div class="flex-row" style="justify-content: space-between; margin-bottom: 8px;">' +
-                                '<div><span class="material-symbols-outlined" style="vertical-align:middle;">my_location</span> Target: $' + targetV1.toFixed(4) + '</div>' +
+                                '<div><span class="material-symbols-outlined" style="vertical-align:middle;">my_location</span> Group Offset Target V1: $' + targetV1.toFixed(4) + '</div>' +
                                 '<div><span class="material-symbols-outlined" style="vertical-align:middle;">block</span> Full Group Stop: $' + fullGroupSl.toFixed(4) + '</div>' +
                                 '<div><span class="material-symbols-outlined" style="vertical-align:middle; color:var(--warning);">star</span> Row ' + bottomRowN + ' Gate Limit: $' + stopLossNth.toFixed(4) + '</div>' +
                             '</div>' +
