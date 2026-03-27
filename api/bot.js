@@ -1134,7 +1134,7 @@ app.post('/api/tts', authMiddleware, (req, res) => {
         if (!req.body.text) return res.status(400).json({ error: "No text provided" });
 
         const ELEVENLABS_API_KEY = 'sk_791cb61d631f20abdcf8d560dd2d442260d9943aae2b30a2';
-        const VOICE_ID = 'AXdMgz6evoL7OPd7eU12'; // "Elizabeth"
+        const VOICE_ID = 'EXAVITQu4vr4xnSDxMaL'; // "Elizabeth"
 
         const payload = JSON.stringify({
             text: req.body.text,
