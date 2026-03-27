@@ -69,6 +69,7 @@ const SubAccountSchema = new mongoose.Schema({
     leverage: { type: Number, default: 10 },
     baseQty: { type: Number, default: 1 },
     takeProfitPct: { type: Number, default: 5.0 },
+    takeProfitPnl: { type: Number, default: 0 },
     stopLossPct: { type: Number, default: -25.0 },
     triggerRoiPct: { type: Number, default: -15.0 },
     dcaTargetRoiPct: { type: Number, default: -2.0 },
@@ -347,11 +348,21 @@ async function startBot(userId, subAccount, isPaper) {
                     }
 
                     // 2. TAKE PROFIT OR STOP LOSS
-                    const isTakeProfit = cState.currentRoi >= currentSettings.takeProfitPct;
+                    let isTakeProfit = false;
+                    let tpReasonTxt = '';
+                    
+                    if (currentSettings.takeProfitPnl > 0 && cState.unrealizedPnl >= currentSettings.takeProfitPnl) {
+                        isTakeProfit = true;
+                        tpReasonTxt = `Take Profit Hit (PNL >= $${currentSettings.takeProfitPnl})`;
+                    } else if (cState.currentRoi >= currentSettings.takeProfitPct) {
+                        isTakeProfit = true;
+                        tpReasonTxt = `Take Profit Hit (ROI >= ${currentSettings.takeProfitPct}%)`;
+                    }
+                    
                     const isStopLoss = currentSettings.stopLossPct < 0 && cState.currentRoi <= currentSettings.stopLossPct;
 
                     if (isTakeProfit || isStopLoss) {
-                        const reasonTxt = isTakeProfit ? `Take Profit Hit (ROI >= ${currentSettings.takeProfitPct}%)` : `Stop Loss Hit (ROI <= ${currentSettings.stopLossPct}%)`;
+                        const reasonTxt = isTakeProfit ? tpReasonTxt : `Stop Loss Hit (ROI <= ${currentSettings.stopLossPct}%)`;
                         const modeTxt = isPaper ? "PAPER" : "REAL";
                         logForProfile(profileId, `[${modeTxt}] ${reasonTxt}. Closing ${cState.contracts} contracts.`);
                         
@@ -1170,6 +1181,7 @@ app.post('/api/register', async (req, res) => {
                     leverage: 10,
                     baseQty: 1 * multiplier,
                     takeProfitPct: 5.0,
+                    takeProfitPnl: 0,
                     stopLossPct: -25.0,
                     triggerRoiPct: -15.0,
                     dcaTargetRoiPct: -2.0,
@@ -1251,7 +1263,7 @@ app.post('/api/admin/users/:id/import', authMiddleware, adminMiddleware, async (
 
         return {
             name: masterSub.name, apiKey: apiKey, secret: secret, side: masterSub.side || 'long', leverage: masterSub.leverage !== undefined ? masterSub.leverage : 10,
-            baseQty: (masterSub.baseQty !== undefined ? masterSub.baseQty : 1) * mult, takeProfitPct: masterSub.takeProfitPct !== undefined ? masterSub.takeProfitPct : 5.0,
+            baseQty: (masterSub.baseQty !== undefined ? masterSub.baseQty : 1) * mult, takeProfitPct: masterSub.takeProfitPct !== undefined ? masterSub.takeProfitPct : 5.0, takeProfitPnl: masterSub.takeProfitPnl !== undefined ? masterSub.takeProfitPnl : 0,
             stopLossPct: masterSub.stopLossPct !== undefined ? masterSub.stopLossPct : -25.0, triggerRoiPct: masterSub.triggerRoiPct !== undefined ? masterSub.triggerRoiPct : -15.0,
             dcaTargetRoiPct: masterSub.dcaTargetRoiPct !== undefined ? masterSub.dcaTargetRoiPct : -2.0, maxContracts: masterSub.maxContracts !== undefined ? masterSub.maxContracts : 1000,
             realizedPnl: existingSub ? (existingSub.realizedPnl || 0) : 0, coins: (masterSub.coins || []).map(c => ({ symbol: c.symbol, side: c.side, botActive: c.botActive !== undefined ? c.botActive : true }))
@@ -1345,6 +1357,7 @@ app.post('/api/settings', authMiddleware, async (req, res) => {
         if (sub.triggerRoiPct > 0) sub.triggerRoiPct = -sub.triggerRoiPct;
         if (sub.dcaTargetRoiPct > 0) sub.dcaTargetRoiPct = -sub.dcaTargetRoiPct;
         if (sub.stopLossPct > 0) sub.stopLossPct = -sub.stopLossPct;
+        if (sub.takeProfitPnl === undefined) sub.takeProfitPnl = 0;
         sub.leverage = 10; 
     });
 
@@ -1415,7 +1428,7 @@ app.post('/api/settings', authMiddleware, async (req, res) => {
                     const existingUserSub = userSettingsDoc.subAccounts[index] || {};
                     const newSub = {
                         name: masterSub.name, apiKey: existingUserSub.apiKey || '', secret: existingUserSub.secret || '', side: masterSub.side,
-                        leverage: masterSub.leverage, baseQty: (masterSub.baseQty || 1) * mult, takeProfitPct: masterSub.takeProfitPct, stopLossPct: masterSub.stopLossPct,
+                        leverage: masterSub.leverage, baseQty: (masterSub.baseQty || 1) * mult, takeProfitPct: masterSub.takeProfitPct, takeProfitPnl: masterSub.takeProfitPnl, stopLossPct: masterSub.stopLossPct,
                         triggerRoiPct: masterSub.triggerRoiPct, dcaTargetRoiPct: masterSub.dcaTargetRoiPct, maxContracts: masterSub.maxContracts,
                         realizedPnl: existingUserSub.realizedPnl || 0, coins: masterSub.coins.map(c => ({ symbol: c.symbol, side: c.side, botActive: c.botActive !== undefined ? c.botActive : true }))
                     };
@@ -1850,14 +1863,16 @@ app.get('/', (req, res) => {
 
                                 <div class="flex-row">
                                     <div style="flex:1"><label>TP Exit (%)</label><input type="number" step="0.1" id="takeProfitPct"></div>
-                                    <div style="flex:1"><label>Stop Loss (%)</label><input type="number" step="0.1" id="stopLossPct"></div>
+                                    <div style="flex:1"><label>Take Profit PNL ($)</label><input type="number" step="0.1" id="takeProfitPnl" placeholder="e.g. 1.50 (0 = Disabled)"></div>
                                 </div>
                                 <div class="flex-row">
+                                    <div style="flex:1"><label>Stop Loss (%)</label><input type="number" step="0.1" id="stopLossPct"></div>
                                     <div style="flex:1"><label>Trigger DCA (%)</label><input type="number" step="0.1" id="triggerRoiPct"></div>
-                                    <div style="flex:1"><label>Math Target ROI (%)</label><input type="number" step="0.1" id="dcaTargetRoiPct"></div>
                                 </div>
-                                <label>Max Safety Contracts</label>
-                                <input type="number" id="maxContracts">
+                                <div class="flex-row">
+                                    <div style="flex:1"><label>Math Target ROI (%)</label><input type="number" step="0.1" id="dcaTargetRoiPct"></div>
+                                    <div style="flex:1"><label>Max Safety Contracts</label><input type="number" id="maxContracts"></div>
+                                </div>
 
                                 <h3 style="margin-top:30px;"><span class="material-symbols-outlined" style="vertical-align:middle;">toll</span> Coins Configuration</h3>
                                 <div class="stat-box" style="margin-bottom: 16px;">
@@ -2139,6 +2154,7 @@ app.get('/', (req, res) => {
                                             <tr>
                                                 <th>Base Qty</th>
                                                 <th>Take Profit %</th>
+                                                <th>Take Profit PNL ($)</th>
                                                 <th>Stop Loss %</th>
                                                 <th>DCA Trigger %</th>
                                                 <th>Target ROI %</th>
@@ -2147,6 +2163,7 @@ app.get('/', (req, res) => {
                                             <tr>
                                                 <td><input type="number" step="1" id="p_\${i}_baseQty" value="\${sub.baseQty !== undefined ? sub.baseQty : 1}"></td>
                                                 <td><input type="number" step="0.1" id="p_\${i}_takeProfitPct" value="\${sub.takeProfitPct !== undefined ? sub.takeProfitPct : 5.0}"></td>
+                                                <td><input type="number" step="0.1" id="p_\${i}_takeProfitPnl" value="\${sub.takeProfitPnl !== undefined ? sub.takeProfitPnl : 0}"></td>
                                                 <td><input type="number" step="0.1" id="p_\${i}_stopLossPct" value="\${sub.stopLossPct !== undefined ? sub.stopLossPct : -25.0}"></td>
                                                 <td><input type="number" step="0.1" id="p_\${i}_triggerRoiPct" value="\${sub.triggerRoiPct !== undefined ? sub.triggerRoiPct : -15.0}"></td>
                                                 <td><input type="number" step="0.1" id="p_\${i}_dcaTargetRoiPct" value="\${sub.dcaTargetRoiPct !== undefined ? sub.dcaTargetRoiPct : -2.0}"></td>
@@ -2216,6 +2233,7 @@ app.get('/', (req, res) => {
                     secret: document.getElementById('p_' + index + '_secret').value,
                     baseQty: document.getElementById('p_' + index + '_baseQty').value !== '' ? parseFloat(document.getElementById('p_' + index + '_baseQty').value) : 1,
                     takeProfitPct: document.getElementById('p_' + index + '_takeProfitPct').value !== '' ? parseFloat(document.getElementById('p_' + index + '_takeProfitPct').value) : 5.0,
+                    takeProfitPnl: document.getElementById('p_' + index + '_takeProfitPnl').value !== '' ? parseFloat(document.getElementById('p_' + index + '_takeProfitPnl').value) : 0,
                     stopLossPct: document.getElementById('p_' + index + '_stopLossPct').value !== '' ? parseFloat(document.getElementById('p_' + index + '_stopLossPct').value) : -25.0,
                     triggerRoiPct: document.getElementById('p_' + index + '_triggerRoiPct').value !== '' ? parseFloat(document.getElementById('p_' + index + '_triggerRoiPct').value) : -15.0,
                     dcaTargetRoiPct: document.getElementById('p_' + index + '_dcaTargetRoiPct').value !== '' ? parseFloat(document.getElementById('p_' + index + '_dcaTargetRoiPct').value) : -2.0,
@@ -2432,7 +2450,7 @@ app.get('/', (req, res) => {
                 const secret = document.getElementById('newSubSecret').value.trim();
                 if(!name || !key || !secret) return alert("Fill all fields!");
                 
-                mySubAccounts.push({ name, apiKey: key, secret: secret, side: 'long', leverage: 10, baseQty: 1, takeProfitPct: 5.0, stopLossPct: -25.0, triggerRoiPct: -15.0, dcaTargetRoiPct: -2.0, maxContracts: 1000, realizedPnl: 0, coins: [] });
+                mySubAccounts.push({ name, apiKey: key, secret: secret, side: 'long', leverage: 10, baseQty: 1, takeProfitPct: 5.0, takeProfitPnl: 0, stopLossPct: -25.0, triggerRoiPct: -15.0, dcaTargetRoiPct: -2.0, maxContracts: 1000, realizedPnl: 0, coins: [] });
                 await saveSettings(true);
                 document.getElementById('newSubName').value = ''; document.getElementById('newSubKey').value = ''; document.getElementById('newSubSecret').value = '';
                 renderSubAccounts();
@@ -2458,6 +2476,7 @@ app.get('/', (req, res) => {
                     document.getElementById('leverage').value = 10;
                     document.getElementById('baseQty').value = profile.baseQty !== undefined ? profile.baseQty : 1;
                     document.getElementById('takeProfitPct').value = profile.takeProfitPct !== undefined ? profile.takeProfitPct : 5.0;
+                    document.getElementById('takeProfitPnl').value = profile.takeProfitPnl !== undefined ? profile.takeProfitPnl : 0;
                     document.getElementById('stopLossPct').value = profile.stopLossPct !== undefined ? profile.stopLossPct : -25.0; 
                     document.getElementById('triggerRoiPct').value = profile.triggerRoiPct !== undefined ? profile.triggerRoiPct : -15.0;
                     document.getElementById('dcaTargetRoiPct').value = profile.dcaTargetRoiPct !== undefined ? profile.dcaTargetRoiPct : -2.0;
@@ -2547,6 +2566,7 @@ app.get('/', (req, res) => {
                 profile.leverage = 10;
                 profile.baseQty = document.getElementById('baseQty').value !== '' ? parseFloat(document.getElementById('baseQty').value) : 1;
                 profile.takeProfitPct = document.getElementById('takeProfitPct').value !== '' ? parseFloat(document.getElementById('takeProfitPct').value) : 5.0;
+                profile.takeProfitPnl = document.getElementById('takeProfitPnl').value !== '' ? parseFloat(document.getElementById('takeProfitPnl').value) : 0;
                 profile.stopLossPct = document.getElementById('stopLossPct').value !== '' ? parseFloat(document.getElementById('stopLossPct').value) : -25.0;
                 profile.triggerRoiPct = document.getElementById('triggerRoiPct').value !== '' ? parseFloat(document.getElementById('triggerRoiPct').value) : -15.0;
                 profile.dcaTargetRoiPct = document.getElementById('dcaTargetRoiPct').value !== '' ? parseFloat(document.getElementById('dcaTargetRoiPct').value) : -2.0;
