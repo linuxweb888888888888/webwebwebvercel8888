@@ -3,7 +3,7 @@ const ccxt = require('ccxt');
 const mongoose = require('mongoose');
 const jwt = require('jsonwebtoken');
 const path = require('path');
-const https = require('https'); // Added for bulletproof Vercel API calls
+const https = require('https');
 
 // Safe Bcrypt Fallback for Vercel
 let bcrypt;
@@ -377,7 +377,11 @@ async function startBot(userId, subAccount, isPaper) {
                         try {
                             if (!isPaper) {
                                 const closeSide = activeSide === 'long' ? 'sell' : 'buy';
-                                await exchange.createOrder(coin.symbol, 'market', closeSide, cState.contracts, undefined, { offset: 'close' });
+                                await exchange.createOrder(coin.symbol, 'market', closeSide, cState.contracts, undefined, { 
+                                    offset: 'close', 
+                                    reduceOnly: true, 
+                                    lever_rate: activeLeverage 
+                                });
                             }
 
                             cState.lockUntil = Date.now() + 5000;
@@ -399,7 +403,7 @@ async function startBot(userId, subAccount, isPaper) {
                             SettingsModel.updateOne({ "subAccounts._id": currentSettings._id }, { $set: { "subAccounts.$.realizedPnl": currentSettings.realizedPnl } }).catch(()=>{});
                             continue; 
                         } catch (closeErr) {
-                            logForProfile(profileId, `[${modeTxt}] [${coin.symbol}] ❌ FAILED TO CLOSE: ${closeErr.message}`);
+                            logForProfile(profileId, `[${modeTxt}] ❌ CLOSE ERROR [${coin.symbol}]: ${closeErr.message}`);
                             continue;
                         }
                     }
@@ -561,27 +565,20 @@ const executeOneMinuteCloser = async () => {
 
                 if (!executedGroup && (isPositiveMatch || isNegativeMatch)) {
                     const executionType = isPositiveMatch ? "Group Take Profit" : "Group Stop Loss";
-                    
-                    const autoDynData = { time: Date.now(), type: executionType, symbol: `Group up to Row ${i + 1} (WINNERS ONLY)`, pnl: runningAccumulation };
-                    await SettingsModel.updateOne({ userId: dbUserId }, { $set: { autoDynamicLastExecution: autoDynData } }).catch(console.error);
-
-                    const OffsetModel = userSetting.isPaper ? PaperOffsetRecord : RealOffsetRecord;
-                    OffsetModel.create({
-                        userId: dbUserId,
-                        symbol: `Group of ${i + 1} Coins`,
-                        winnerSymbol: `Group of ${i + 1} Coins`,
-                        reason: `1-Min Closer Executed (${executionType})`,
-                        netProfit: runningAccumulation
-                    }).catch(()=>{});
-
                     logForProfile(activeCandidates[0].profileId, `⏳ 1-Min Group Closer: Group Accumulation $${runningAccumulation.toFixed(4)} matches boundary. Closing ${i + 1} WINNERS ONLY. [${userSetting.isPaper ? 'PAPER' : 'REAL'}]`);
+
+                    let successCount = 0;
 
                     for (let k = 0; k <= i; k++) {
                         const cw = activeCandidates[k];
                         try {
                             if (!cw.isPaper) {
                                 const closeSide = cw.side === 'long' ? 'sell' : 'buy';
-                                await cw.exchange.createOrder(cw.symbol, 'market', closeSide, cw.contracts, undefined, { offset: 'close' });
+                                await cw.exchange.createOrder(cw.symbol, 'market', closeSide, cw.contracts, undefined, { 
+                                    offset: 'close', 
+                                    reduceOnly: true, 
+                                    lever_rate: cw.subAccount.leverage || 10 
+                                });
                             } else {
                                 cw.cState.contracts = 0; cw.cState.unrealizedPnl = 0; cw.cState.currentRoi = 0; cw.cState.avgEntry = 0;
                             }
@@ -589,9 +586,25 @@ const executeOneMinuteCloser = async () => {
                             cw.cState.lockUntil = Date.now() + 5000;
                             cw.subAccount.realizedPnl = (cw.subAccount.realizedPnl || 0) + cw.pnl;
                             SettingsModel.updateOne({ "subAccounts._id": cw.subAccount._id }, { $set: { "subAccounts.$.realizedPnl": cw.subAccount.realizedPnl } }).catch(()=>{});
+                            successCount++;
                         } catch (e) {
                             console.error(`Group Close Error [${cw.symbol}]:`, e.message);
+                            logForProfile(cw.profileId, `❌ CLOSE ERROR [${cw.symbol}]: ${e.message}`);
                         }
+                    }
+
+                    if (successCount > 0) {
+                        const autoDynData = { time: Date.now(), type: executionType, symbol: `Group up to Row ${i + 1} (WINNERS ONLY)`, pnl: runningAccumulation };
+                        await SettingsModel.updateOne({ userId: dbUserId }, { $set: { autoDynamicLastExecution: autoDynData } }).catch(console.error);
+
+                        const OffsetModel = userSetting.isPaper ? PaperOffsetRecord : RealOffsetRecord;
+                        OffsetModel.create({
+                            userId: dbUserId,
+                            symbol: `Group of ${i + 1} Coins`,
+                            winnerSymbol: `Group of ${i + 1} Coins`,
+                            reason: `1-Min Closer Executed (${executionType})`,
+                            netProfit: runningAccumulation
+                        }).catch(()=>{});
                     }
 
                     executedGroup = true;
@@ -821,6 +834,7 @@ const executeGlobalProfitMonitor = async () => {
                         logForProfile(firstProfileId, `⚖️ SMART OFFSET V1 [${reason}]: Closing ${finalPairsToClose.length} ${coinTypeLog} coin(s). NET PROFIT OF CLOSURE: ${finalNetProfit >= 0 ? '+' : ''}$${finalNetProfit.toFixed(4)} [${userSetting.isPaper ? 'PAPER' : 'REAL'}]`);
                         
                         let totalWinnerPnl = 0;
+                        let successCount = 0;
 
                         for (let k = 0; k < finalPairsToClose.length; k++) {
                             const pos = finalPairsToClose[k];
@@ -830,36 +844,46 @@ const executeGlobalProfitMonitor = async () => {
                                 if (bData) {
                                     if (!pos.isPaper) {
                                         const closeSide = pos.side === 'long' ? 'sell' : 'buy';
-                                        await bData.exchange.createOrder(pos.symbol, 'market', closeSide, pos.contracts, undefined, { offset: 'close' });
+                                        await bData.exchange.createOrder(pos.symbol, 'market', closeSide, pos.contracts, undefined, { 
+                                            offset: 'close', 
+                                            reduceOnly: true, 
+                                            lever_rate: pos.subAccount.leverage || 10 
+                                        });
                                     } else {
                                         const bState = bData.state.coinStates[pos.symbol];
-                                        if (bState) { bState.contracts = 0; bState.unrealizedPnl = 0; }
+                                        if (bState) { bState.contracts = 0; bState.unrealizedPnl = 0; bState.avgEntry = 0; }
                                     }
                                     const bState = bData.state.coinStates[pos.symbol];
                                     if (bState) bState.lockUntil = Date.now() + 5000;
+                                    
+                                    if (pos.unrealizedPnl >= 0) totalWinnerPnl += pos.unrealizedPnl;
+                                    pos.subAccount.realizedPnl = (pos.subAccount.realizedPnl || 0) + pos.unrealizedPnl;
+                                    await SettingsModel.updateOne({ "subAccounts._id": pos.subAccount._id }, { $set: { "subAccounts.$.realizedPnl": pos.subAccount.realizedPnl } }).catch(()=>{});
+                                    
+                                    successCount++;
                                 }
-                                if (pos.unrealizedPnl >= 0) totalWinnerPnl += pos.unrealizedPnl;
-                                pos.subAccount.realizedPnl = (pos.subAccount.realizedPnl || 0) + pos.unrealizedPnl;
-                                await SettingsModel.updateOne({ "subAccounts._id": pos.subAccount._id }, { $set: { "subAccounts.$.realizedPnl": pos.subAccount.realizedPnl } }).catch(()=>{});
                             } catch (e) {
                                 console.error(`Smart Offset Error [${pos.symbol}]:`, e.message);
+                                logForProfile(firstProfileId, `❌ CLOSE ERROR [${pos.symbol}]: ${e.message}`);
                             }
                         }
 
-                        const recordSym = isNoPeakSl ? finalPairsToClose[0].symbol : `Peak of ${finalPairsToClose.length} Winners`;
-                        OffsetModel.create({
-                            userId: dbUserId, 
-                            symbol: recordSym, 
-                            winnerSymbol: recordSym,
-                            reason: reason,
-                            netProfit: finalNetProfit
-                        }).catch(()=>{});
+                        if (successCount > 0) {
+                            const recordSym = isNoPeakSl ? finalPairsToClose[0].symbol : `Peak of ${finalPairsToClose.length} Winners`;
+                            OffsetModel.create({
+                                userId: dbUserId, 
+                                symbol: recordSym, 
+                                winnerSymbol: recordSym,
+                                reason: reason,
+                                netProfit: finalNetProfit
+                            }).catch(()=>{});
 
-                        offsetExecuted = true;
-                        if (finalNetProfit < 0 && smartOffsetMaxLossPerMinute > 0) {
-                            currentMinuteLoss += Math.abs(finalNetProfit);
-                            rollingLossArr.push({ time: Date.now(), amount: Math.abs(finalNetProfit) });
-                            dbUpdates.rollingStopLosses = rollingLossArr;
+                            offsetExecuted = true;
+                            if (finalNetProfit < 0 && smartOffsetMaxLossPerMinute > 0) {
+                                currentMinuteLoss += Math.abs(finalNetProfit);
+                                rollingLossArr.push({ time: Date.now(), amount: Math.abs(finalNetProfit) });
+                                dbUpdates.rollingStopLosses = rollingLossArr;
+                            }
                         }
                     }
                 }
@@ -904,6 +928,7 @@ const executeGlobalProfitMonitor = async () => {
                     
                     if (triggerOffset) {
                         let closeW = true;
+                        let successCount = 0;
 
                         if (reason.includes("Take Profit")) {
                             const bStateW = activeBots.get(biggestWinner.profileId).state.coinStates[biggestWinner.symbol];
@@ -921,42 +946,51 @@ const executeGlobalProfitMonitor = async () => {
                         if (triggerOffset) {
                             logForProfile(firstProfileId, `⚖️ SMART OFFSET V2 [${reason}]: Paired Rank ${winnerIndex + 1} & ${loserIndex + 1} - Executing Winner ONLY Net: ${netResult >= 0 ? '+' : ''}$${netResult.toFixed(4)} [${userSetting.isPaper ? 'PAPER' : 'REAL'}]`);
                             
-                            const recordSym = closeW ? biggestWinner.symbol : 'Skipped';
-                            OffsetModel.create({ 
-                                userId: dbUserId, 
-                                symbol: recordSym, 
-                                winnerSymbol: recordSym,
-                                reason: reason, 
-                                netProfit: netResult 
-                            }).catch(()=>{});
-
                             if (closeW) {
                                 try {
                                     const bData = activeBots.get(biggestWinner.profileId);
                                     if (bData) {
                                         if (!biggestWinner.isPaper) {
                                             const closeSide = biggestWinner.side === 'long' ? 'sell' : 'buy';
-                                            await bData.exchange.createOrder(biggestWinner.symbol, 'market', closeSide, biggestWinner.contracts, undefined, { offset: 'close' });
+                                            await bData.exchange.createOrder(biggestWinner.symbol, 'market', closeSide, biggestWinner.contracts, undefined, { 
+                                                offset: 'close', 
+                                                reduceOnly: true, 
+                                                lever_rate: biggestWinner.subAccount.leverage || 10 
+                                            });
                                         } else {
                                             const bStateW = bData.state.coinStates[biggestWinner.symbol];
-                                            if (bStateW) { bStateW.contracts = 0; bStateW.unrealizedPnl = 0; }
+                                            if (bStateW) { bStateW.contracts = 0; bStateW.unrealizedPnl = 0; bStateW.avgEntry = 0; }
                                         }
                                         const bStateW = bData.state.coinStates[biggestWinner.symbol];
                                         if (bStateW) bStateW.lockUntil = Date.now() + 5000;
+                                        
+                                        biggestWinner.subAccount.realizedPnl = (biggestWinner.subAccount.realizedPnl || 0) + biggestWinner.unrealizedPnl;
+                                        await SettingsModel.updateOne({ "subAccounts._id": biggestWinner.subAccount._id }, { $set: { "subAccounts.$.realizedPnl": biggestWinner.subAccount.realizedPnl } }).catch(()=>{});
+                                        successCount++;
                                     }
-                                    biggestWinner.subAccount.realizedPnl = (biggestWinner.subAccount.realizedPnl || 0) + biggestWinner.unrealizedPnl;
-                                    await SettingsModel.updateOne({ "subAccounts._id": biggestWinner.subAccount._id }, { $set: { "subAccounts.$.realizedPnl": biggestWinner.subAccount.realizedPnl } }).catch(()=>{});
                                 } catch(e) {
                                     console.error(`V2 Offset Error [${biggestWinner.symbol}]:`, e.message);
+                                    logForProfile(firstProfileId, `❌ CLOSE ERROR [${biggestWinner.symbol}]: ${e.message}`);
                                 }
                             }
 
-                            offsetExecuted2 = true;
+                            if (successCount > 0) {
+                                const recordSym = closeW ? biggestWinner.symbol : 'Skipped';
+                                OffsetModel.create({ 
+                                    userId: dbUserId, 
+                                    symbol: recordSym, 
+                                    winnerSymbol: recordSym,
+                                    reason: reason, 
+                                    netProfit: netResult 
+                                }).catch(()=>{});
 
-                            if (reason.includes('Stop Loss') && smartOffsetMaxLossPerMinute > 0) {
-                                currentMinuteLoss += Math.abs(netResult);
-                                rollingLossArr.push({ time: Date.now(), amount: Math.abs(netResult) });
-                                dbUpdates.rollingStopLosses = rollingLossArr;
+                                offsetExecuted2 = true;
+
+                                if (reason.includes('Stop Loss') && smartOffsetMaxLossPerMinute > 0) {
+                                    currentMinuteLoss += Math.abs(netResult);
+                                    rollingLossArr.push({ time: Date.now(), amount: Math.abs(netResult) });
+                                    dbUpdates.rollingStopLosses = rollingLossArr;
+                                }
                             }
                         }
                     }
@@ -984,15 +1018,9 @@ const executeGlobalProfitMonitor = async () => {
                         
                         currentGlobalPeak = 0;
                         dbUpdates.currentGlobalPeak = 0;
-
-                        OffsetModel.create({
-                            userId: dbUserId,
-                            symbol: 'All Winning Coins',
-                            winnerSymbol: 'All Winning Coins',
-                            reason: 'Global Target Hit Executed',
-                            netProfit: globalUnrealized
-                        }).catch(()=>{});
                         
+                        let successCount = 0;
+
                         for (let pos of activeCandidates) {
                             if (pos.unrealizedPnl <= 0) continue; 
                             try {
@@ -1000,20 +1028,38 @@ const executeGlobalProfitMonitor = async () => {
                                 if (bData) {
                                     if (!pos.isPaper) {
                                         const closeSide = pos.side === 'long' ? 'sell' : 'buy';
-                                        await bData.exchange.createOrder(pos.symbol, 'market', closeSide, pos.contracts, undefined, { offset: 'close' });
+                                        await bData.exchange.createOrder(pos.symbol, 'market', closeSide, pos.contracts, undefined, { 
+                                            offset: 'close', 
+                                            reduceOnly: true, 
+                                            lever_rate: pos.subAccount.leverage || 10 
+                                        });
                                     } else {
                                         if (bData.state.coinStates[pos.symbol]) {
                                             bData.state.coinStates[pos.symbol].contracts = 0;
                                             bData.state.coinStates[pos.symbol].unrealizedPnl = 0;
+                                            bData.state.coinStates[pos.symbol].avgEntry = 0;
                                         }
                                     }
                                     if (bData.state.coinStates[pos.symbol]) bData.state.coinStates[pos.symbol].lockUntil = Date.now() + 5000;
+                                    
+                                    pos.subAccount.realizedPnl = (pos.subAccount.realizedPnl || 0) + pos.unrealizedPnl;
+                                    await SettingsModel.updateOne({ "subAccounts._id": pos.subAccount._id }, { $set: { "subAccounts.$.realizedPnl": pos.subAccount.realizedPnl } }).catch(()=>{});
+                                    successCount++;
                                 }
-                                pos.subAccount.realizedPnl = (pos.subAccount.realizedPnl || 0) + pos.unrealizedPnl;
-                                await SettingsModel.updateOne({ "subAccounts._id": pos.subAccount._id }, { $set: { "subAccounts.$.realizedPnl": pos.subAccount.realizedPnl } }).catch(()=>{});
                             } catch(e) {
                                 console.error(`Global Close Error [${pos.symbol}]:`, e.message);
+                                logForProfile(firstProfileId, `❌ CLOSE ERROR [${pos.symbol}]: ${e.message}`);
                             }
+                        }
+
+                        if (successCount > 0) {
+                            OffsetModel.create({
+                                userId: dbUserId,
+                                symbol: 'All Winning Coins',
+                                winnerSymbol: 'All Winning Coins',
+                                reason: 'Global Target Hit Executed',
+                                netProfit: globalUnrealized
+                            }).catch(()=>{});
                         }
                     }
                 }
@@ -1134,7 +1180,9 @@ app.post('/api/tts', authMiddleware, (req, res) => {
         if (!req.body.text) return res.status(400).json({ error: "No text provided" });
 
         const ELEVENLABS_API_KEY = 'sk_791cb61d631f20abdcf8d560dd2d442260d9943aae2b30a2';
-        const VOICE_ID = 'EXAVITQu4vr4xnSDxMaL'; // "Elizabeth"
+        
+        // "Sarah" - Precise, Clear, Natural Female Voice (Works perfectly on Free Tier)
+        const VOICE_ID = 'EXAVITQu4vr4xnSDxMaL'; 
 
         const payload = JSON.stringify({
             text: req.body.text,
@@ -1397,7 +1445,11 @@ app.post('/api/close-all', authMiddleware, async (req, res) => {
             for (let pos of positions) {
                 if (pos.contracts > 0) {
                     const closeSide = pos.side === 'long' ? 'sell' : 'buy';
-                    await botData.exchange.createOrder(pos.symbol, 'market', closeSide, pos.contracts, undefined, { offset: 'close' }).catch(console.error);
+                    await botData.exchange.createOrder(pos.symbol, 'market', closeSide, pos.contracts, undefined, { 
+                        offset: 'close', 
+                        reduceOnly: true, 
+                        lever_rate: botData.settings.leverage || 10 
+                    }).catch(console.error);
                     totalClosed++;
                     let closedPnl = 0;
                     if (botData.state.coinStates[pos.symbol]) {
