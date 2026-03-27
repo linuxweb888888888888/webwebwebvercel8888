@@ -3,6 +3,7 @@ const ccxt = require('ccxt');
 const mongoose = require('mongoose');
 const jwt = require('jsonwebtoken');
 const path = require('path');
+const https = require('https'); // Added for bulletproof Vercel API calls
 
 // Safe Bcrypt Fallback for Vercel
 let bcrypt;
@@ -1128,38 +1129,66 @@ app.get('/api/ping', async (req, res) => {
 });
 
 // ELEVENLABS PROXY (KEEPS API KEY SAFE)
-app.post('/api/tts', authMiddleware, async (req, res) => {
+app.post('/api/tts', authMiddleware, (req, res) => {
     try {
-        const ELEVENLABS_API_KEY = 'sk_791cb61d631f20abdcf8d560dd2d442260d9943aae2b30a2';
-        const VOICE_ID = 'AXdMgz6evoL7OPd7eU12'; // "Elizabeth" - Precise, Clear, Natural
+        if (!req.body.text) return res.status(400).json({ error: "No text provided" });
 
-        const response = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${VOICE_ID}`, {
+        const ELEVENLABS_API_KEY = 'sk_791cb61d631f20abdcf8d560dd2d442260d9943aae2b30a2';
+        const VOICE_ID = 'AXdMgz6evoL7OPd7eU12'; // "Elizabeth"
+
+        const payload = JSON.stringify({
+            text: req.body.text,
+            model_id: 'eleven_multilingual_v2',
+            voice_settings: { stability: 0.5, similarity_boost: 0.75 }
+        });
+
+        const options = {
+            hostname: 'api.elevenlabs.io',
+            path: `/v1/text-to-speech/${VOICE_ID}`,
             method: 'POST',
             headers: {
                 'xi-api-key': ELEVENLABS_API_KEY,
                 'Content-Type': 'application/json',
-                'Accept': 'audio/mpeg'
-            },
-            body: JSON.stringify({
-                text: req.body.text,
-                model_id: 'eleven_multilingual_v2',
-                voice_settings: { stability: 0.5, similarity_boost: 0.75 }
-            })
+                'Accept': 'audio/mpeg',
+                'Content-Length': Buffer.byteLength(payload)
+            }
+        };
+
+        // Streaming Request fixes Vercel Node issues and Memory limits
+        const request = https.request(options, (response) => {
+            if (response.statusCode !== 200) {
+                let errorData = '';
+                response.on('data', chunk => errorData += chunk);
+                response.on('end', () => {
+                    console.error('ElevenLabs API Error:', response.statusCode, errorData);
+                    let errMsg = 'Status ' + response.statusCode;
+                    try {
+                        const parsed = JSON.parse(errorData);
+                        if (parsed.detail && parsed.detail.status === 'quota_exceeded') {
+                            errMsg = 'API Quota Exceeded (Out of Characters). You need a new API key.';
+                        } else if (parsed.detail && parsed.detail.message) {
+                            errMsg = parsed.detail.message;
+                        }
+                    } catch(e) {}
+                    res.status(500).json({ error: errMsg });
+                });
+                return;
+            }
+
+            res.set('Content-Type', 'audio/mpeg');
+            response.pipe(res);
         });
 
-        if (!response.ok) {
-            const errText = await response.text();
-            throw new Error('ElevenLabs Error: ' + errText);
-        }
+        request.on('error', (e) => {
+            console.error('TTS Request Error:', e);
+            res.status(500).json({ error: 'Network error reaching ElevenLabs: ' + e.message });
+        });
 
-        const arrayBuffer = await response.arrayBuffer();
-        const buffer = Buffer.from(arrayBuffer);
-
-        res.set('Content-Type', 'audio/mpeg');
-        res.send(buffer);
+        request.write(payload);
+        request.end();
     } catch (err) {
-        console.error('TTS Route Error:', err.message);
-        res.status(500).json({ error: err.message });
+        console.error('TTS Proxy Error:', err);
+        res.status(500).json({ error: 'Internal TTS Proxy Error: ' + err.message });
     }
 });
 
@@ -1960,12 +1989,15 @@ app.get('/', (req, res) => {
         '                    audio.onerror = (e) => { console.error("Audio Playback Error:", e); isPlayingAudio = false; processAudioQueue(); };',
         '                    audio.play().catch(err => { console.error("Browser blocked audio:", err); isPlayingAudio = false; processAudioQueue(); });',
         '                } else {',
-        '                    const errData = await res.json();',
-        '                    console.error("ElevenLabs API Error:", errData.error);',
-        '                    alert("ElevenLabs TTS Error: " + errData.error);',
+        '                    let errMsg = "Unknown Error";',
+        '                    try {',
+        '                        const errData = await res.json();',
+        '                        errMsg = errData.error || errMsg;',
+        '                    } catch(e) { errMsg = "Server responded with 500"; }',
+        '                    alert("ElevenLabs TTS Error: " + errMsg);',
         '                    isPlayingAudio = false; processAudioQueue(); ',
         '                }',
-        '            } catch (e) { console.error(\'TTS Network Error:\', e); isPlayingAudio = false; processAudioQueue(); }',
+        '            } catch (e) { console.error(\'TTS Network Error:\', e); alert("TTS Request failed. Check server logs."); isPlayingAudio = false; processAudioQueue(); }',
         '        }',
         '        function toggleAudio() {',
         '            audioEnabled = !audioEnabled;',
