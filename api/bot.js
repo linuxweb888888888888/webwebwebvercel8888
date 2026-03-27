@@ -351,9 +351,10 @@ async function startBot(userId, subAccount, isPaper) {
                     let isTakeProfit = false;
                     let tpReasonTxt = '';
                     
-                    if (currentSettings.takeProfitPnl > 0 && cState.unrealizedPnl >= currentSettings.takeProfitPnl) {
+                    const tpPnlTarget = parseFloat(currentSettings.takeProfitPnl) || 0;
+                    if (tpPnlTarget > 0 && cState.unrealizedPnl >= tpPnlTarget) {
                         isTakeProfit = true;
-                        tpReasonTxt = `Take Profit Hit (PNL >= $${currentSettings.takeProfitPnl})`;
+                        tpReasonTxt = `Take Profit Hit (PNL >= $${tpPnlTarget})`;
                     } else if (cState.currentRoi >= currentSettings.takeProfitPct) {
                         isTakeProfit = true;
                         tpReasonTxt = `Take Profit Hit (ROI >= ${currentSettings.takeProfitPct}%)`;
@@ -1726,11 +1727,11 @@ app.get('/', (req, res) => {
                         <div class="stat-box" style="background: #E3F2FD; border-color: #90CAF9;">
                             <label style="margin-top:0;">Manual Offset Net Profit Target V2 ($)</label>
                             <p style="margin-top:2px;">Strict 1-to-1 pairings (Rank 1 & N). Closes ONLY the winner if Net PNL &ge; this amount.</p>
-                            <input type="number" step="0.1" id="smartOffsetNetProfit2" placeholder="e.g. 1.00 (0 = Disabled)">
+                            <input type="number" step="0.0001" id="smartOffsetNetProfit2" placeholder="e.g. 1.00 (0 = Disabled)">
                             
                             <label>Manual Offset Stop Loss V2 ($)</label>
                             <p style="margin-top:2px;">If the paired Net Result drops below this amount, it closes the winner only.</p>
-                            <input type="number" step="0.1" id="smartOffsetStopLoss2" placeholder="e.g. -2.00 (0 = Disabled)">
+                            <input type="number" step="0.0001" id="smartOffsetStopLoss2" placeholder="e.g. -2.00 (0 = Disabled)">
                             
                             <button class="md-btn md-btn-primary" style="margin-top:16px; width:100%;" onclick="saveGlobalSettings()"><span class="material-symbols-outlined">save</span> Save Global Offset V2</button>
                         </div>
@@ -1774,30 +1775,30 @@ app.get('/', (req, res) => {
                             <div class="stat-box" style="margin-bottom: 24px;">
                                 <h4 style="margin: 0 0 8px 0; color: var(--primary);">Smart Net Profit Targets</h4>
                                 <div class="flex-row">
-                                    <div style="flex:1;"><label style="margin-top:0;">Global Target ($)</label><input type="number" step="0.1" id="globalTargetPnl" placeholder="e.g. 15.00"></div>
-                                    <div style="flex:1;"><label style="margin-top:0;">Trailing Drop ($)</label><input type="number" step="0.1" id="globalTrailingPnl" placeholder="e.g. 2.00"></div>
+                                    <div style="flex:1;"><label style="margin-top:0;">Global Target ($)</label><input type="number" step="0.0001" id="globalTargetPnl" placeholder="e.g. 15.00"></div>
+                                    <div style="flex:1;"><label style="margin-top:0;">Trailing Drop ($)</label><input type="number" step="0.0001" id="globalTrailingPnl" placeholder="e.g. 2.00"></div>
                                 </div>
-                                <label>Offset V1 Target ($)</label>
-                                <input type="number" step="0.1" id="smartOffsetNetProfit" placeholder="e.g. 1.00 (0 = Disabled)">
+                                <label>Group Offset V1 Target ($)</label>
+                                <input type="number" step="0.0001" id="smartOffsetNetProfit" placeholder="e.g. 1.00 (0 = Disabled)">
                                 
                                 <label>Nth Bottom Row Reference (V1)</label>
                                 <input type="number" step="1" id="smartOffsetBottomRowV1" placeholder="e.g. 5">
                                 
                                 <label>Nth Bottom Row SL Gate (V1) ($)</label>
-                                <input type="number" step="0.1" id="smartOffsetBottomRowV1StopLoss" placeholder="e.g. -1.50 (0 = Disabled)">
+                                <input type="number" step="0.0001" id="smartOffsetBottomRowV1StopLoss" placeholder="e.g. -1.50 (0 = Disabled)">
                                 
                                 <label>Full Group Stop Loss V1 ($)</label>
-                                <input type="number" step="0.1" id="smartOffsetStopLoss" placeholder="e.g. -2.00 (0 = Disabled)">
+                                <input type="number" step="0.0001" id="smartOffsetStopLoss" placeholder="e.g. -2.00 (0 = Disabled)">
 
                                 <div style="margin-top:16px; border-top: 1px solid #ccc; padding-top: 16px;">
                                     <label style="margin-top:0;">Stop Loss Execution Limits</label>
                                     <div class="flex-row">
-                                        <div style="flex:1;"><input type="number" step="0.1" id="smartOffsetMaxLossPerMinute" placeholder="Max Amt (e.g. 10.00)"></div>
+                                        <div style="flex:1;"><input type="number" step="0.0001" id="smartOffsetMaxLossPerMinute" placeholder="Max Amt (e.g. 10.00)"></div>
                                         <div style="flex:1;"><input type="number" step="1" id="smartOffsetMaxLossTimeframeSeconds" placeholder="Timeframe (e.g. 60s)"></div>
                                     </div>
                                     <div class="flex-row">
                                         <div style="flex:1;"><label>No Peak SL Time (Secs)</label><input type="number" step="1" id="noPeakSlTimeframeSeconds" placeholder="e.g. 1800"></div>
-                                        <div style="flex:1;"><label>No Peak Gate PNL ($)</label><input type="number" step="0.1" id="noPeakSlGatePnl" placeholder="e.g. 0"></div>
+                                        <div style="flex:1;"><label>No Peak Gate PNL ($)</label><input type="number" step="0.0001" id="noPeakSlGatePnl" placeholder="e.g. 0"></div>
                                     </div>
                                 </div>
 
@@ -1863,7 +1864,7 @@ app.get('/', (req, res) => {
 
                                 <div class="flex-row">
                                     <div style="flex:1"><label>TP Exit (%)</label><input type="number" step="0.1" id="takeProfitPct"></div>
-                                    <div style="flex:1"><label>Take Profit PNL ($)</label><input type="number" step="0.1" id="takeProfitPnl" placeholder="e.g. 1.50 (0 = Disabled)"></div>
+                                    <div style="flex:1"><label class="text-green">Single Coin TP PNL ($)</label><input type="number" step="0.0001" id="takeProfitPnl" placeholder="e.g. 1.50 (0 = Disabled)"></div>
                                 </div>
                                 <div class="flex-row">
                                     <div style="flex:1"><label>Stop Loss (%)</label><input type="number" step="0.1" id="stopLossPct"></div>
@@ -2101,24 +2102,24 @@ app.get('/', (req, res) => {
                     let globalHtml = \`
                         <form id="globalSettingsForm">
                             <div class="flex-row" style="margin-bottom: 12px;">
-                                <div class="flex-1"><label>Global Target PNL ($)</label><input type="number" step="0.01" id="e_globalTargetPnl" value="\${masterSettings.globalTargetPnl !== undefined ? masterSettings.globalTargetPnl : 0}"></div>
-                                <div class="flex-1"><label>Global Trailing PNL ($)</label><input type="number" step="0.01" id="e_globalTrailingPnl" value="\${masterSettings.globalTrailingPnl !== undefined ? masterSettings.globalTrailingPnl : 0}"></div>
+                                <div class="flex-1"><label>Global Target PNL ($)</label><input type="number" step="0.0001" id="e_globalTargetPnl" value="\${masterSettings.globalTargetPnl !== undefined ? masterSettings.globalTargetPnl : 0}"></div>
+                                <div class="flex-1"><label>Global Trailing PNL ($)</label><input type="number" step="0.0001" id="e_globalTrailingPnl" value="\${masterSettings.globalTrailingPnl !== undefined ? masterSettings.globalTrailingPnl : 0}"></div>
                             </div>
                             <div class="flex-row" style="margin-bottom: 12px;">
-                                <div class="flex-1"><label>Smart Offset Target V1 ($)</label><input type="number" step="0.01" id="e_smartOffsetNetProfit" value="\${masterSettings.smartOffsetNetProfit !== undefined ? masterSettings.smartOffsetNetProfit : 0}"></div>
-                                <div class="flex-1"><label>Smart Offset Stop Loss V1 ($)</label><input type="number" step="0.01" id="e_smartOffsetStopLoss" value="\${masterSettings.smartOffsetStopLoss !== undefined ? masterSettings.smartOffsetStopLoss : 0}"></div>
+                                <div class="flex-1"><label>Group Offset Target V1 ($)</label><input type="number" step="0.0001" id="e_smartOffsetNetProfit" value="\${masterSettings.smartOffsetNetProfit !== undefined ? masterSettings.smartOffsetNetProfit : 0}"></div>
+                                <div class="flex-1"><label>Full Group Stop Loss V1 ($)</label><input type="number" step="0.0001" id="e_smartOffsetStopLoss" value="\${masterSettings.smartOffsetStopLoss !== undefined ? masterSettings.smartOffsetStopLoss : 0}"></div>
                             </div>
                             <div class="flex-row" style="margin-bottom: 12px;">
-                                <div class="flex-1"><label>Smart Offset Target V2 ($)</label><input type="number" step="0.01" id="e_smartOffsetNetProfit2" value="\${masterSettings.smartOffsetNetProfit2 !== undefined ? masterSettings.smartOffsetNetProfit2 : 0}"></div>
-                                <div class="flex-1"><label>Smart Offset Stop Loss V2 ($)</label><input type="number" step="0.01" id="e_smartOffsetStopLoss2" value="\${masterSettings.smartOffsetStopLoss2 !== undefined ? masterSettings.smartOffsetStopLoss2 : 0}"></div>
+                                <div class="flex-1"><label>Smart Offset Target V2 ($)</label><input type="number" step="0.0001" id="e_smartOffsetNetProfit2" value="\${masterSettings.smartOffsetNetProfit2 !== undefined ? masterSettings.smartOffsetNetProfit2 : 0}"></div>
+                                <div class="flex-1"><label>Smart Offset Stop Loss V2 ($)</label><input type="number" step="0.0001" id="e_smartOffsetStopLoss2" value="\${masterSettings.smartOffsetStopLoss2 !== undefined ? masterSettings.smartOffsetStopLoss2 : 0}"></div>
                             </div>
                             <div class="flex-row" style="margin-bottom: 12px;">
-                                <div class="flex-1"><label>Max Loss Limit Amount ($)</label><input type="number" step="0.01" id="e_smartOffsetMaxLossPerMinute" value="\${masterSettings.smartOffsetMaxLossPerMinute !== undefined ? masterSettings.smartOffsetMaxLossPerMinute : 0}"></div>
+                                <div class="flex-1"><label>Max Loss Limit Amount ($)</label><input type="number" step="0.0001" id="e_smartOffsetMaxLossPerMinute" value="\${masterSettings.smartOffsetMaxLossPerMinute !== undefined ? masterSettings.smartOffsetMaxLossPerMinute : 0}"></div>
                                 <div class="flex-1"><label>Max Loss Timeframe (Seconds)</label><input type="number" step="1" id="e_smartOffsetMaxLossTimeframeSeconds" value="\${masterSettings.smartOffsetMaxLossTimeframeSeconds !== undefined ? masterSettings.smartOffsetMaxLossTimeframeSeconds : 60}"></div>
                             </div>
                             <div class="flex-row" style="margin-bottom: 12px;">
                                 <div class="flex-1"><label>No Peak SL Timeframe (Secs)</label><input type="number" step="1" id="e_noPeakSlTimeframeSeconds" value="\${masterSettings.noPeakSlTimeframeSeconds !== undefined ? masterSettings.noPeakSlTimeframeSeconds : 1800}"></div>
-                                <div class="flex-1"><label>No Peak Gate PNL ($)</label><input type="number" step="0.01" id="e_noPeakSlGatePnl" value="\${masterSettings.noPeakSlGatePnl !== undefined ? masterSettings.noPeakSlGatePnl : 0}"></div>
+                                <div class="flex-1"><label>No Peak Gate PNL ($)</label><input type="number" step="0.0001" id="e_noPeakSlGatePnl" value="\${masterSettings.noPeakSlGatePnl !== undefined ? masterSettings.noPeakSlGatePnl : 0}"></div>
                             </div>
                             <div class="flex-row" style="margin-bottom: 16px;">
                                 <label style="display:flex; align-items:center; cursor:pointer;"><input type="checkbox" id="e_minuteCloseAutoDynamic" \${masterSettings.minuteCloseAutoDynamic ? 'checked' : ''} style="width:auto; margin:0 8px 0 0;"> 1-Min Auto-Dynamic Status</label>
@@ -2154,7 +2155,7 @@ app.get('/', (req, res) => {
                                             <tr>
                                                 <th>Base Qty</th>
                                                 <th>Take Profit %</th>
-                                                <th>Take Profit PNL ($)</th>
+                                                <th class="text-green">Single Coin TP PNL ($)</th>
                                                 <th>Stop Loss %</th>
                                                 <th>DCA Trigger %</th>
                                                 <th>Target ROI %</th>
@@ -2163,7 +2164,7 @@ app.get('/', (req, res) => {
                                             <tr>
                                                 <td><input type="number" step="1" id="p_\${i}_baseQty" value="\${sub.baseQty !== undefined ? sub.baseQty : 1}"></td>
                                                 <td><input type="number" step="0.1" id="p_\${i}_takeProfitPct" value="\${sub.takeProfitPct !== undefined ? sub.takeProfitPct : 5.0}"></td>
-                                                <td><input type="number" step="0.1" id="p_\${i}_takeProfitPnl" value="\${sub.takeProfitPnl !== undefined ? sub.takeProfitPnl : 0}"></td>
+                                                <td><input type="number" step="0.0001" id="p_\${i}_takeProfitPnl" value="\${sub.takeProfitPnl !== undefined ? sub.takeProfitPnl : 0}"></td>
                                                 <td><input type="number" step="0.1" id="p_\${i}_stopLossPct" value="\${sub.stopLossPct !== undefined ? sub.stopLossPct : -25.0}"></td>
                                                 <td><input type="number" step="0.1" id="p_\${i}_triggerRoiPct" value="\${sub.triggerRoiPct !== undefined ? sub.triggerRoiPct : -15.0}"></td>
                                                 <td><input type="number" step="0.1" id="p_\${i}_dcaTargetRoiPct" value="\${sub.dcaTargetRoiPct !== undefined ? sub.dcaTargetRoiPct : -2.0}"></td>
