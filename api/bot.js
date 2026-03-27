@@ -1,5 +1,3 @@
-//web8888
-
 const express = require('express');
 const ccxt = require('ccxt');
 const mongoose = require('mongoose');
@@ -1682,6 +1680,8 @@ app.get('/', (req, res) => {
                     <button class="md-btn md-btn-text nav-btn" id="nav-main" onclick="switchTab('main')"><span class="material-symbols-outlined">dashboard</span> Dashboard</button>
                     <button class="md-btn md-btn-text nav-btn" id="nav-offsets" onclick="switchTab('offsets')"><span class="material-symbols-outlined">call_merge</span> V1 Offsets</button>
                     <button class="md-btn md-btn-text nav-btn" id="nav-offsets2" onclick="switchTab('offsets2')"><span class="material-symbols-outlined">alt_route</span> V2 Offsets</button>
+                    
+                    <button class="md-btn md-btn-text" id="audioToggle" onclick="toggleAudio()"><span class="material-symbols-outlined" id="audioIcon">volume_off</span> Audio Alerts</button>
                     <button class="md-btn md-btn-text" style="color:var(--text-secondary);" onclick="logout()"><span class="material-symbols-outlined">logout</span> Logout</button>
                 </div>
             </div>
@@ -1951,7 +1951,30 @@ app.get('/', (req, res) => {
             let currentProfileIndex = -1;
             let myCoins = [];
             
+            // TTS AUDIO VARIABLES
+            let audioEnabled = false;
+            let seenLogs = new Set();
+            let isFirstLoad = true;
+
             const PREDEFINED_COINS = ["TON", "AXS", "APT", "FIL", "ETHFI", "BERA", "MASK", "TIA", "DASH", "GIGGLE", "BSV", "OP", "TAO", "SSV", "YFI"];
+
+            function toggleAudio() {
+                audioEnabled = !audioEnabled;
+                document.getElementById('audioIcon').innerText = audioEnabled ? 'volume_up' : 'volume_off';
+                if (audioEnabled) {
+                    const utterance = new SpeechSynthesisUtterance("Audio alerts enabled.");
+                    speechSynthesis.speak(utterance);
+                }
+            }
+
+            function speakText(text) {
+                if (!audioEnabled || !window.speechSynthesis) return;
+                let cleanText = text.replace(/^[0-9:]+\s[APM]+\s-\s/, ''); 
+                cleanText = cleanText.replace(/[🛒⚡🛑🔥⚠️⚖️📈🌍❌🔄🛡️]/g, '');
+                const utterance = new SpeechSynthesisUtterance(cleanText);
+                utterance.rate = 1.0;
+                speechSynthesis.speak(utterance);
+            }
 
             async function checkAuth() {
                 if (statusInterval) { clearInterval(statusInterval); statusInterval = null; }
@@ -2660,6 +2683,19 @@ app.get('/', (req, res) => {
 
                 for (let pid in allStatuses) {
                     const st = allStatuses[pid];
+
+                    if (st && st.logs) {
+                        for (let i = st.logs.length - 1; i >= 0; i--) {
+                            const logMsg = st.logs[i];
+                            if (!seenLogs.has(logMsg)) {
+                                seenLogs.add(logMsg);
+                                if (!isFirstLoad) {
+                                    speakText(logMsg);
+                                }
+                            }
+                        }
+                    }
+
                     if (st && st.coinStates) {
                         for (let sym in st.coinStates) {
                             const cs = st.coinStates[sym];
@@ -2676,6 +2712,8 @@ app.get('/', (req, res) => {
                         }
                     }
                 }
+
+                if (isFirstLoad) isFirstLoad = false;
 
                 document.getElementById('topGlobalMargin').innerText = "$" + globalMarginUsed.toFixed(2);
 
@@ -2855,7 +2893,7 @@ app.get('/', (req, res) => {
                         
                         let dynamicInfoHtml = '<div class="stat-box" style="margin-bottom:16px; background:#E3F2FD; border-color:#90CAF9; color:var(--primary);">' +
                             '<div class="flex-row" style="justify-content: space-between; margin-bottom: 8px;">' +
-                                '<div><span class="material-symbols-outlined" style="vertical-align:middle;">my_location</span> Group Offset Target V1: $' + targetV1.toFixed(4) + '</div>' +
+                                '<div><span class="material-symbols-outlined" style="vertical-align:middle;">my_location</span> Target: $' + targetV1.toFixed(4) + '</div>' +
                                 '<div><span class="material-symbols-outlined" style="vertical-align:middle;">block</span> Full Group Stop: $' + fullGroupSl.toFixed(4) + '</div>' +
                                 '<div><span class="material-symbols-outlined" style="vertical-align:middle; color:var(--warning);">star</span> Row ' + bottomRowN + ' Gate Limit: $' + stopLossNth.toFixed(4) + '</div>' +
                             '</div>' +
