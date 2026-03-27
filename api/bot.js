@@ -1480,6 +1480,7 @@ app.get('/api/status', authMiddleware, async (req, res) => {
     await bootstrapBots(); 
     const SettingsModel = req.isPaper ? PaperSettings : RealSettings;
     const ProfileStateModel = req.isPaper ? PaperProfileState : RealProfileState;
+    const OffsetModel = req.isPaper ? PaperOffsetRecord : RealOffsetRecord;
 
     const settings = await SettingsModel.findOne({ userId: req.userId });
     const userStatuses = {};
@@ -1501,7 +1502,10 @@ app.get('/api/status', authMiddleware, async (req, res) => {
         currentMinuteLoss = arr.reduce((sum, r) => sum + r.amount, 0);
     }
 
-    res.json({ states: userStatuses, subAccounts: settings ? settings.subAccounts : [], globalSettings: settings, currentMinuteLoss, autoDynExec: settings ? settings.autoDynamicLastExecution : null });
+    // Pass the most recent offsets to the frontend for TTS
+    const recentOffsets = await OffsetModel.find({ userId: req.userId }).sort({ timestamp: -1 }).limit(5);
+
+    res.json({ states: userStatuses, subAccounts: settings ? settings.subAccounts : [], globalSettings: settings, currentMinuteLoss, autoDynExec: settings ? settings.autoDynamicLastExecution : null, recentOffsets });
 });
 
 app.get('/api/offsets', authMiddleware, async (req, res) => {
@@ -1727,7 +1731,10 @@ app.get('/', (req, res) => {
                         <div id="liveOffsetsContainer">Waiting for live data...</div>
                     </div>
                     <div class="md-card">
-                        <h2 class="md-card-header text-green"><span class="material-symbols-outlined">history</span> Executed Trade History</h2>
+                        <h2 class="md-card-header text-green" style="justify-content:space-between; width:100%;">
+                            <span><span class="material-symbols-outlined">history</span> Executed Trade History</span>
+                            <button class="md-btn md-btn-text" onclick="speakLatestTrade()"><span class="material-symbols-outlined">play_circle</span> Listen to Latest</button>
+                        </h2>
                         <div id="offsetTableContainer">Loading historical offset data...</div>
                     </div>
                 </div>
@@ -1755,7 +1762,10 @@ app.get('/', (req, res) => {
                         <div id="liveOffsetsContainer2">Waiting for live data...</div>
                     </div>
                     <div class="md-card">
-                        <h2 class="md-card-header text-green"><span class="material-symbols-outlined">history</span> Executed Trade History</h2>
+                        <h2 class="md-card-header text-green" style="justify-content:space-between; width:100%;">
+                            <span><span class="material-symbols-outlined">history</span> Executed Trade History</span>
+                            <button class="md-btn md-btn-text" onclick="speakLatestTrade()"><span class="material-symbols-outlined">play_circle</span> Listen to Latest</button>
+                        </h2>
                         <div id="offsetTableContainer2">Loading historical offset data...</div>
                     </div>
                 </div>
@@ -1954,27 +1964,61 @@ app.get('/', (req, res) => {
             // TTS AUDIO VARIABLES
             let audioEnabled = false;
             let seenLogs = new Set();
+            let seenOffsets = new Set();
             let isFirstLoad = true;
+            let latestTradeToSpeak = "No trades have been executed yet.";
+            
+            let premiumVoice = null;
 
-            const PREDEFINED_COINS = ["TON", "AXS", "APT", "FIL", "ETHFI", "BERA", "MASK", "TIA", "DASH", "GIGGLE", "BSV", "OP", "TAO", "SSV", "YFI"];
+            // Load Premium Voices for Natural Sounding TTS
+            function loadVoices() {
+                const voices = window.speechSynthesis.getVoices();
+                premiumVoice = voices.find(v => v.lang.startsWith('en') && (v.name.includes('Natural') || v.name.includes('Google') || v.name.includes('Premium'))) 
+                               || voices.find(v => v.lang.startsWith('en')) 
+                               || voices[0];
+            }
+            if (window.speechSynthesis) {
+                window.speechSynthesis.onvoiceschanged = loadVoices;
+                setTimeout(loadVoices, 100); 
+            }
 
             function toggleAudio() {
                 audioEnabled = !audioEnabled;
                 document.getElementById('audioIcon').innerText = audioEnabled ? 'volume_up' : 'volume_off';
                 if (audioEnabled) {
                     const utterance = new SpeechSynthesisUtterance("Audio alerts enabled.");
+                    if (premiumVoice) utterance.voice = premiumVoice;
+                    utterance.rate = 0.95;
                     speechSynthesis.speak(utterance);
                 }
             }
 
             function speakText(text) {
                 if (!audioEnabled || !window.speechSynthesis) return;
-                let cleanText = text.replace(/^[0-9:]+\s[APM]+\s-\s/, ''); 
-                cleanText = cleanText.replace(/[🛒⚡🛑🔥⚠️⚖️📈🌍❌🔄🛡️]/g, '');
+                
+                // Translate messy text into natural spoken words
+                let cleanText = text.replace(/([A-Z]+)\/USDT:USDT/g, "$1"); 
+                cleanText = cleanText.replace(/\$([0-9]+\.[0-9]+)/g, "$1 dollars"); 
+                cleanText = cleanText.replace(/\-([0-9]+\.[0-9]+)/g, "minus $1");
+                cleanText = cleanText.replace(/([0-9]+\.[0-9]{2})[0-9]+/g, "$1"); // Round spoken dollars to 2 decimals
+                cleanText = cleanText.replace(/[🛒⚡🛑🔥⚠️⚖️📈🌍❌🔄🛡️]/g, ''); // Strip emojis
+                
                 const utterance = new SpeechSynthesisUtterance(cleanText);
-                utterance.rate = 1.0;
+                if (premiumVoice) utterance.voice = premiumVoice;
+                utterance.rate = 0.95; // Slightly slower sounds more human
+                utterance.pitch = 1.0;
                 speechSynthesis.speak(utterance);
             }
+
+            function speakLatestTrade() {
+                if (!audioEnabled) {
+                    audioEnabled = true;
+                    document.getElementById('audioIcon').innerText = 'volume_up';
+                }
+                speakText(latestTradeToSpeak);
+            }
+
+            const PREDEFINED_COINS = ["TON", "AXS", "APT", "FIL", "ETHFI", "BERA", "MASK", "TIA", "DASH", "GIGGLE", "BSV", "OP", "TAO", "SSV", "YFI"];
 
             async function checkAuth() {
                 if (statusInterval) { clearInterval(statusInterval); statusInterval = null; }
@@ -2684,15 +2728,11 @@ app.get('/', (req, res) => {
                 for (let pid in allStatuses) {
                     const st = allStatuses[pid];
 
+                    // Mark logs as seen so we don't accidentally read them later
                     if (st && st.logs) {
                         for (let i = st.logs.length - 1; i >= 0; i--) {
                             const logMsg = st.logs[i];
-                            if (!seenLogs.has(logMsg)) {
-                                seenLogs.add(logMsg);
-                                if (!isFirstLoad) {
-                                    speakText(logMsg);
-                                }
-                            }
+                            if (!seenLogs.has(logMsg)) seenLogs.add(logMsg);
                         }
                     }
 
@@ -2711,6 +2751,31 @@ app.get('/', (req, res) => {
                             }
                         }
                     }
+                }
+
+                // TTS: Play new Executed Trades automatically
+                if (data.recentOffsets && data.recentOffsets.length > 0) {
+                    for (let i = data.recentOffsets.length - 1; i >= 0; i--) {
+                        const offset = data.recentOffsets[i];
+                        if (!seenOffsets.has(offset._id)) {
+                            seenOffsets.add(offset._id);
+                            
+                            const symbolText = offset.symbol ? offset.symbol.replace('/USDT:USDT', '') : 'Unknown Pair';
+                            const netNum = parseFloat(offset.netProfit) || 0;
+                            const profitWord = netNum >= 0 ? "profit" : "loss";
+                            const netAmt = Math.abs(netNum).toFixed(2);
+                            
+                            let textToSpeak = `Trade event on ${symbolText}. ${offset.reason}.`;
+                            if (netNum !== 0) {
+                                textToSpeak += ` Net ${profitWord} of ${netAmt} dollars.`;
+                            }
+                            
+                            latestTradeToSpeak = textToSpeak;
+                            if (!isFirstLoad) speakText(textToSpeak);
+                        }
+                    }
+                } else if (isFirstLoad) {
+                    latestTradeToSpeak = "No trades have been executed yet.";
                 }
 
                 if (isFirstLoad) isFirstLoad = false;
