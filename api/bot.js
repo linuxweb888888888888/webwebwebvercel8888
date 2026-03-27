@@ -1131,7 +1131,7 @@ app.get('/api/ping', async (req, res) => {
 app.post('/api/tts', authMiddleware, async (req, res) => {
     try {
         const ELEVENLABS_API_KEY = 'sk_791cb61d631f20abdcf8d560dd2d442260d9943aae2b30a2';
-        const VOICE_ID = '21m00Tcm4TlvDq8ikWAM'; // "Rachel" - Clear, Calm, Female English Voice
+        const VOICE_ID = 'AXdMgz6evoL7OPd7eU12'; // "Elizabeth" - Precise, Clear, Natural
 
         const response = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${VOICE_ID}`, {
             method: 'POST',
@@ -1942,6 +1942,7 @@ app.get('/', (req, res) => {
         '            if (isPlayingAudio || audioQueue.length === 0) return;',
         '            isPlayingAudio = true;',
         '            const textToSpeak = audioQueue.shift();',
+        '            if (!textToSpeak || textToSpeak.trim() === "") { isPlayingAudio = false; processAudioQueue(); return; }',
         '            try {',
         '                const res = await fetch(\'/api/tts\', {',
         '                    method: \'POST\',',
@@ -1956,10 +1957,15 @@ app.get('/', (req, res) => {
         '                    const audioUrl = URL.createObjectURL(blob);',
         '                    const audio = new Audio(audioUrl);',
         '                    audio.onended = () => { isPlayingAudio = false; processAudioQueue(); };',
-        '                    audio.onerror = () => { isPlayingAudio = false; processAudioQueue(); };',
-        '                    audio.play();',
-        '                } else { isPlayingAudio = false; processAudioQueue(); }',
-        '            } catch (e) { console.error(\'TTS Error:\', e); isPlayingAudio = false; processAudioQueue(); }',
+        '                    audio.onerror = (e) => { console.error("Audio Playback Error:", e); isPlayingAudio = false; processAudioQueue(); };',
+        '                    audio.play().catch(err => { console.error("Browser blocked audio:", err); isPlayingAudio = false; processAudioQueue(); });',
+        '                } else {',
+        '                    const errData = await res.json();',
+        '                    console.error("ElevenLabs API Error:", errData.error);',
+        '                    alert("ElevenLabs TTS Error: " + errData.error);',
+        '                    isPlayingAudio = false; processAudioQueue(); ',
+        '                }',
+        '            } catch (e) { console.error(\'TTS Network Error:\', e); isPlayingAudio = false; processAudioQueue(); }',
         '        }',
         '        function toggleAudio() {',
         '            audioEnabled = !audioEnabled;',
