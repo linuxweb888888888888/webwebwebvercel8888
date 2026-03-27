@@ -1676,34 +1676,35 @@ app.get('/', (req, res) => {
                         return;
                     }
 
-                    let globalHtml = '<form id="globalSettingsForm">' +
-                        '<div class="flex-row" style="margin-bottom: 12px;">' +
-                            '<div class="flex-1"><label>Global Target PNL ($)</label><input type="number" step="0.01" id="e_globalTargetPnl" value="' + (masterSettings.globalTargetPnl !== undefined ? masterSettings.globalTargetPnl : 0) + '"></div>' +
-                            '<div class="flex-1"><label>Global Trailing PNL ($)</label><input type="number" step="0.01" id="e_globalTrailingPnl" value="' + (masterSettings.globalTrailingPnl !== undefined ? masterSettings.globalTrailingPnl : 0) + '"></div>' +
-                        '</div>' +
-                        '<div class="flex-row" style="margin-bottom: 12px;">' +
-                            '<div class="flex-1"><label>Smart Offset Target V1 ($)</label><input type="number" step="0.01" id="e_smartOffsetNetProfit" value="' + (masterSettings.smartOffsetNetProfit !== undefined ? masterSettings.smartOffsetNetProfit : 0) + '"></div>' +
-                            '<div class="flex-1"><label>Smart Offset Stop Loss V1 ($)</label><input type="number" step="0.01" id="e_smartOffsetStopLoss" value="' + (masterSettings.smartOffsetStopLoss !== undefined ? masterSettings.smartOffsetStopLoss : 0) + '"></div>' +
-                        '</div>' +
-                        '<div class="flex-row" style="margin-bottom: 12px;">' +
-                            '<div class="flex-1"><label>Smart Offset Target V2 ($)</label><input type="number" step="0.01" id="e_smartOffsetNetProfit2" value="' + (masterSettings.smartOffsetNetProfit2 !== undefined ? masterSettings.smartOffsetNetProfit2 : 0) + '"></div>' +
-                            '<div class="flex-1"><label>Smart Offset Stop Loss V2 ($)</label><input type="number" step="0.01" id="e_smartOffsetStopLoss2" value="' + (masterSettings.smartOffsetStopLoss2 !== undefined ? masterSettings.smartOffsetStopLoss2 : 0) + '"></div>' +
-                        '</div>' +
-                        '<div class="flex-row" style="margin-bottom: 12px;">' +
-                            '<div class="flex-1"><label>Max Loss Limit Amount ($)</label><input type="number" step="0.01" id="e_smartOffsetMaxLossPerMinute" value="' + (masterSettings.smartOffsetMaxLossPerMinute !== undefined ? masterSettings.smartOffsetMaxLossPerMinute : 0) + '"></div>' +
-                            '<div class="flex-1"><label>Max Loss Timeframe (Seconds)</label><input type="number" step="1" id="e_smartOffsetMaxLossTimeframeSeconds" value="' + (masterSettings.smartOffsetMaxLossTimeframeSeconds !== undefined ? masterSettings.smartOffsetMaxLossTimeframeSeconds : 60) + '"></div>' +
-                        '</div>' +
-                        '<div class="flex-row" style="margin-bottom: 12px;">' +
-                            '<div class="flex-1"><label>No Peak SL Timeframe (Secs)</label><input type="number" step="1" id="e_noPeakSlTimeframeSeconds" value="' + (masterSettings.noPeakSlTimeframeSeconds !== undefined ? masterSettings.noPeakSlTimeframeSeconds : 1800) + '"></div>' +
-                            '<div class="flex-1"><label>No Peak Gate PNL ($)</label><input type="number" step="0.01" id="e_noPeakSlGatePnl" value="' + (masterSettings.noPeakSlGatePnl !== undefined ? masterSettings.noPeakSlGatePnl : 0) + '"></div>' +
-                        '</div>' +
-                        '<div class="flex-row" style="margin-bottom: 16px;">' +
-                            '<label style="display:flex; align-items:center; cursor:pointer;"><input type="checkbox" id="e_minuteCloseAutoDynamic" ' + (masterSettings.minuteCloseAutoDynamic ? 'checked' : '') + ' style="width:auto; margin:0 8px 0 0;"> 1-Min Auto-Dynamic Status</label>' +
-                        '</div>' +
-                        '<button type="button" class="md-btn md-btn-primary" onclick="saveMasterGlobalSettings()"><span class="material-symbols-outlined">save</span> Save Global Settings</button>' +
-                        '<div id="e_globalMsg" style="margin-top: 8px; font-weight: bold;"></div>' +
-                    '</form>';
-
+                    let globalHtml = `
+                        <form id="globalSettingsForm">
+                            <div class="flex-row" style="margin-bottom: 12px;">
+                                <div class="flex-1"><label>Global Target PNL ($)</label><input type="number" step="0.01" id="e_globalTargetPnl" value="${masterSettings.globalTargetPnl !== undefined ? masterSettings.globalTargetPnl : 0}"></div>
+                                <div class="flex-1"><label>Global Trailing PNL ($)</label><input type="number" step="0.01" id="e_globalTrailingPnl" value="${masterSettings.globalTrailingPnl !== undefined ? masterSettings.globalTrailingPnl : 0}"></div>
+                            </div>
+                            <div class="flex-row" style="margin-bottom: 12px;">
+                                <div class="flex-1"><label>Smart Offset Target V1 ($)</label><input type="number" step="0.01" id="e_smartOffsetNetProfit" value="${masterSettings.smartOffsetNetProfit !== undefined ? masterSettings.smartOffsetNetProfit : 0}"></div>
+                                <div class="flex-1"><label>Smart Offset Stop Loss V1 ($)</label><input type="number" step="0.01" id="e_smartOffsetStopLoss" value="${masterSettings.smartOffsetStopLoss !== undefined ? masterSettings.smartOffsetStopLoss : 0}"></div>
+                            </div>
+                            <div class="flex-row" style="margin-bottom: 12px;">
+                                <div class="flex-1"><label>Smart Offset Target V2 ($)</label><input type="number" step="0.01" id="e_smartOffsetNetProfit2" value="${masterSettings.smartOffsetNetProfit2 !== undefined ? masterSettings.smartOffsetNetProfit2 : 0}"></div>
+                                <div class="flex-1"><label>Smart Offset Stop Loss V2 ($)</label><input type="number" step="0.01" id="e_smartOffsetStopLoss2" value="${masterSettings.smartOffsetStopLoss2 !== undefined ? masterSettings.smartOffsetStopLoss2 : 0}"></div>
+                            </div>
+                            <div class="flex-row" style="margin-bottom: 12px;">
+                                <div class="flex-1"><label>Max Loss Limit Amount ($)</label><input type="number" step="0.01" id="e_smartOffsetMaxLossPerMinute" value="${masterSettings.smartOffsetMaxLossPerMinute !== undefined ? masterSettings.smartOffsetMaxLossPerMinute : 0}"></div>
+                                <div class="flex-1"><label>Max Loss Timeframe (Seconds)</label><input type="number" step="1" id="e_smartOffsetMaxLossTimeframeSeconds" value="${masterSettings.smartOffsetMaxLossTimeframeSeconds !== undefined ? masterSettings.smartOffsetMaxLossTimeframeSeconds : 60}"></div>
+                            </div>
+                            <div class="flex-row" style="margin-bottom: 12px;">
+                                <div class="flex-1"><label>No Peak SL Timeframe (Secs)</label><input type="number" step="1" id="e_noPeakSlTimeframeSeconds" value="${masterSettings.noPeakSlTimeframeSeconds !== undefined ? masterSettings.noPeakSlTimeframeSeconds : 1800}"></div>
+                                <div class="flex-1"><label>No Peak Gate PNL ($)</label><input type="number" step="0.01" id="e_noPeakSlGatePnl" value="${masterSettings.noPeakSlGatePnl !== undefined ? masterSettings.noPeakSlGatePnl : 0}"></div>
+                            </div>
+                            <div class="flex-row" style="margin-bottom: 16px;">
+                                <label style="display:flex; align-items:center; cursor:pointer;"><input type="checkbox" id="e_minuteCloseAutoDynamic" ${masterSettings.minuteCloseAutoDynamic ? 'checked' : ''} style="width:auto; margin:0 8px 0 0;"> 1-Min Auto-Dynamic Status</label>
+                            </div>
+                            <button type="button" class="md-btn md-btn-primary" onclick="saveMasterGlobalSettings()"><span class="material-symbols-outlined">save</span> Save Global Settings</button>
+                            <div id="e_globalMsg" style="margin-top: 8px; font-weight: bold;"></div>
+                        </form>
+                    `;
                     document.getElementById('editorGlobalContainer').innerHTML = globalHtml;
 
                     let profilesHtml = '';
@@ -1711,39 +1712,52 @@ app.get('/', (req, res) => {
                         masterSettings.subAccounts.forEach((sub, i) => {
                             const activeCoins = (sub.coins || []).filter(c => c.botActive);
                             const coinHtml = activeCoins.map(c => 
-                                '<span style="display:inline-block; background:' + (c.side === 'short' ? '#fad2cf' : '#ceead6') + '; color:' + (c.side === 'short' ? '#d93025' : '#1e8e3e') + '; padding:4px 8px; border-radius:12px; font-size:12px; font-weight:bold; margin:2px;">' + c.symbol + ' (' + c.side + ')</span>'
+                                `<span style="display:inline-block; background:${c.side === 'short' ? '#fad2cf' : '#ceead6'}; color:${c.side === 'short' ? '#d93025' : '#1e8e3e'}; padding:4px 8px; border-radius:12px; font-size:12px; font-weight:bold; margin:2px;">${c.symbol} (${c.side})</span>`
                             ).join(' ');
 
-                            profilesHtml += '<div class="stat-box" style="margin-bottom: 24px; border: 1px solid var(--primary); background: #fff;">' +
-                                '<div style="background: #e8f0fe; padding: 12px 16px; margin: -16px -16px 16px -16px; border-bottom: 1px solid var(--primary); color: var(--primary); display:flex; justify-content:space-between; font-weight:bold; border-radius: 6px 6px 0 0;">' +
-                                    '<span>' + (i + 1) + '. ' + sub.name + '</span>' +
-                                    '<span>Default Side: ' + (sub.side || 'long').toUpperCase() + '</span>' +
-                                '</div>' +
-                                '<div class="flex-row" style="margin-bottom: 16px;">' +
-                                    '<div class="flex-1"><label style="margin-top:0;">API Key</label><input type="text" id="p_' + i + '_apiKey" value="' + (sub.apiKey || '') + '"></div>' +
-                                    '<div class="flex-1"><label style="margin-top:0;">Secret Key</label><input type="text" id="p_' + i + '_secret" value="' + (sub.secret || '') + '"></div>' +
-                                '</div>' +
-                                '<div style="overflow-x:auto;">' +
-                                    '<table class="md-table" style="margin-bottom: 16px;">' +
-                                        '<tr><th>Base Qty</th><th>Take Profit %</th><th>Stop Loss %</th><th>DCA Trigger %</th><th>Target ROI %</th><th>Max Contracts</th></tr>' +
-                                        '<tr>' +
-                                            '<td><input type="number" step="1" id="p_' + i + '_baseQty" value="' + (sub.baseQty !== undefined ? sub.baseQty : 1) + '"></td>' +
-                                            '<td><input type="number" step="0.1" id="p_' + i + '_takeProfitPct" value="' + (sub.takeProfitPct !== undefined ? sub.takeProfitPct : 5.0) + '"></td>' +
-                                            '<td><input type="number" step="0.1" id="p_' + i + '_stopLossPct" value="' + (sub.stopLossPct !== undefined ? sub.stopLossPct : -25.0) + '"></td>' +
-                                            '<td><input type="number" step="0.1" id="p_' + i + '_triggerRoiPct" value="' + (sub.triggerRoiPct !== undefined ? sub.triggerRoiPct : -15.0) + '"></td>' +
-                                            '<td><input type="number" step="0.1" id="p_' + i + '_dcaTargetRoiPct" value="' + (sub.dcaTargetRoiPct !== undefined ? sub.dcaTargetRoiPct : -2.0) + '"></td>' +
-                                            '<td><input type="number" step="1" id="p_' + i + '_maxContracts" value="' + (sub.maxContracts !== undefined ? sub.maxContracts : 1000) + '"></td>' +
-                                        '</tr>' +
-                                    '</table>' +
-                                '</div>' +
-                                '<p style="margin-bottom: 8px;"><strong>Active Coins Trading (' + activeCoins.length + '):</strong></p>' +
-                                '<div style="margin-bottom: 16px;">' + (coinHtml || '<span class="text-secondary">No active coins</span>') + '</div>' +
-                                '<button type="button" class="md-btn md-btn-success" onclick="saveMasterProfile(' + i + ')"><span class="material-symbols-outlined">done</span> Save Profile ' + (i + 1) + '</button>' +
-                                '<div id="p_' + i + '_msg" style="margin-top: 8px; font-weight: bold;"></div>' +
-                            '</div>';
+                            profilesHtml += `
+                                <div class="stat-box" style="margin-bottom: 24px; border: 1px solid var(--primary); background: #fff;">
+                                    <div style="background: #e8f0fe; padding: 12px 16px; margin: -16px -16px 16px -16px; border-bottom: 1px solid var(--primary); color: var(--primary); display:flex; justify-content:space-between; font-weight:bold; border-radius: 6px 6px 0 0;">
+                                        <span>${i + 1}. ${sub.name}</span>
+                                        <span>Default Side: ${(sub.side || 'long').toUpperCase()}</span>
+                                    </div>
+                                    
+                                    <div class="flex-row" style="margin-bottom: 16px;">
+                                        <div class="flex-1"><label style="margin-top:0;">API Key</label><input type="text" id="p_${i}_apiKey" value="${sub.apiKey || ''}"></div>
+                                        <div class="flex-1"><label style="margin-top:0;">Secret Key</label><input type="text" id="p_${i}_secret" value="${sub.secret || ''}"></div>
+                                    </div>
+
+                                    <div style="overflow-x:auto;">
+                                        <table class="md-table" style="margin-bottom: 16px;">
+                                            <tr>
+                                                <th>Base Qty</th>
+                                                <th>Take Profit %</th>
+                                                <th>Stop Loss %</th>
+                                                <th>DCA Trigger %</th>
+                                                <th>Target ROI %</th>
+                                                <th>Max Contracts</th>
+                                            </tr>
+                                            <tr>
+                                                <td><input type="number" step="1" id="p_${i}_baseQty" value="${sub.baseQty !== undefined ? sub.baseQty : 1}"></td>
+                                                <td><input type="number" step="0.1" id="p_${i}_takeProfitPct" value="${sub.takeProfitPct !== undefined ? sub.takeProfitPct : 5.0}"></td>
+                                                <td><input type="number" step="0.1" id="p_${i}_stopLossPct" value="${sub.stopLossPct !== undefined ? sub.stopLossPct : -25.0}"></td>
+                                                <td><input type="number" step="0.1" id="p_${i}_triggerRoiPct" value="${sub.triggerRoiPct !== undefined ? sub.triggerRoiPct : -15.0}"></td>
+                                                <td><input type="number" step="0.1" id="p_${i}_dcaTargetRoiPct" value="${sub.dcaTargetRoiPct !== undefined ? sub.dcaTargetRoiPct : -2.0}"></td>
+                                                <td><input type="number" step="1" id="p_${i}_maxContracts" value="${sub.maxContracts !== undefined ? sub.maxContracts : 1000}"></td>
+                                            </tr>
+                                        </table>
+                                    </div>
+
+                                    <p style="margin-bottom: 8px;"><strong>Active Coins Trading (${activeCoins.length}):</strong></p>
+                                    <div style="margin-bottom: 16px;">${coinHtml || '<span class="text-secondary">No active coins</span>'}</div>
+
+                                    <button type="button" class="md-btn md-btn-success" onclick="saveMasterProfile(${i})"><span class="material-symbols-outlined">done</span> Save Profile ${i + 1}</button>
+                                    <div id="p_${i}_msg" style="margin-top: 8px; font-weight: bold;"></div>
+                                </div>
+                            `;
                         });
                     } else {
-                        profilesHtml += '<p class="text-secondary">No profiles configured for the master account.</p>';
+                        profilesHtml += `<p class="text-secondary">No profiles configured for the master account.</p>`;
                     }
                     document.getElementById('editorProfilesContainer').innerHTML = profilesHtml;
 
