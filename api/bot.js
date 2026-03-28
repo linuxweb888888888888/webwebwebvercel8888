@@ -89,7 +89,7 @@ const SettingsSchema = new mongoose.Schema({
     globalTargetPnl: { type: Number, default: 0 },       
     globalTrailingPnl: { type: Number, default: 0 },   
     globalSingleCoinTpPnl: { type: Number, default: 0 }, 
-    globalTriggerDcaPnl: { type: Number, default: 0 }, 
+    globalTriggerDcaPnl: { type: Number, default: 0 }, // Global Override
     smartOffsetNetProfit: { type: Number, default: 0 },
     smartOffsetBottomRowV1: { type: Number, default: 5 }, 
     smartOffsetBottomRowV1StopLoss: { type: Number, default: 0 }, 
@@ -149,6 +149,46 @@ const RealProfileState = mongoose.models.ProfileState || mongoose.model('Profile
 const PaperProfileState = mongoose.models.PaperProfileState || mongoose.model('PaperProfileState', ProfileStateSchema, 'paper_profile_states');
 const MainTemplate = mongoose.models.MainTemplate || mongoose.model('MainTemplate', MainTemplateSchema, 'main_settings_template');
 
+
+// ==========================================
+// GLOBAL PRICE ORACLE (BINANCE + HTX)
+// ==========================================
+global.livePrices = global.livePrices || {};
+let isBinanceFetching = false;
+let isHtxFetching = false;
+
+const binanceOracle = new ccxt.binance({ options: { defaultType: 'swap' }, enableRateLimit: true, timeout: 20000 });
+const htxOracle = new ccxt.htx({ options: { defaultType: 'swap' }, enableRateLimit: true, timeout: 30000 });
+
+function startPriceOracle() {
+    console.log("🔮 Starting Global Price Oracle (Binance + HTX)...");
+    
+    // Fast Fetch (Binance)
+    setInterval(async () => {
+        if (isBinanceFetching) return;
+        isBinanceFetching = true;
+        try {
+            const tickers = await binanceOracle.fetchTickers();
+            for (let sym in tickers) {
+                if (tickers[sym] && tickers[sym].last) global.livePrices[sym] = tickers[sym].last;
+            }
+        } catch(e) { } finally { isBinanceFetching = false; }
+    }, 3000);
+
+    // Fallback Fetch (HTX)
+    setInterval(async () => {
+        if (isHtxFetching) return;
+        isHtxFetching = true;
+        try {
+            const tickers = await htxOracle.fetchTickers();
+            for (let sym in tickers) {
+                if (tickers[sym] && tickers[sym].last) global.livePrices[sym] = tickers[sym].last; 
+            }
+        } catch(e) { } finally { isHtxFetching = false; }
+    }, 5000);
+}
+
+
 // ==========================================
 // 3. MULTI-MODE BOT ENGINE STATE
 // ==========================================
@@ -165,8 +205,6 @@ function logForProfile(profileId, msg) {
 }
 
 // 50% MATH TARGET GAP CALCULATOR
-// By doubling the position size (Cn = C0), the Breakeven point is mathematically shifted 
-// exactly 50% closer to the current price, regardless of the leverage used.
 function calculateDcaQtyToHalveGap(currentContracts) {
     return currentContracts > 0 ? currentContracts : 1;
 }
@@ -183,11 +221,13 @@ async function startBot(userId, subAccount, isPaper) {
 
     if (!subAccount.apiKey || !subAccount.secret) return;
 
+    // Increased Timeout to prevent Vercel crashes
     const exchange = new ccxt.htx({ 
         apiKey: subAccount.apiKey, 
         secret: subAccount.secret, 
         options: { defaultType: 'swap' },
-        enableRateLimit: true 
+        enableRateLimit: true,
+        timeout: 30000 
     });
     
     const ProfileStateModel = isPaper ? PaperProfileState : RealProfileState;
@@ -212,7 +252,6 @@ async function startBot(userId, subAccount, isPaper) {
         
         const currentSettings = botData.settings;
         
-        // --- FORCE ALL COINS ACTIVE ALWAYS ---
         let forcedStart = false;
         currentSettings.coins.forEach(c => {
             if (!c.botActive) {
@@ -234,28 +273,22 @@ async function startBot(userId, subAccount, isPaper) {
         if (activeCoins.length === 0) { isProcessing = false; return; }
 
         try {
-            if (!exchange.markets) await exchange.loadMarkets().catch(()=>{});
-            const symbolsToFetch = activeCoins.map(c => c.symbol);
+            if (!exchange.markets || Object.keys(exchange.markets).length === 0) {
+                await exchange.loadMarkets().catch(()=>{});
+            }
             
             let positions = [];
-            let allTickers = {};
-
+            
+            // Replaced fetchTickers entirely. Drastically reduces API Load.
             if (!isPaper) {
-                const [fetchedPos, fetchedTick] = await Promise.all([
-                    exchange.fetchPositions(symbolsToFetch).catch(e => { throw new Error('Positions: ' + e.message); }),
-                    exchange.fetchTickers(symbolsToFetch).catch(e => { throw new Error('Tickers: ' + e.message); })
-                ]);
-                positions = fetchedPos;
-                allTickers = fetchedTick;
-            } else {
-                allTickers = await exchange.fetchTickers(symbolsToFetch).catch(e => { throw new Error('Tickers: ' + e.message); });
+                positions = await exchange.fetchPositions().catch(e => { throw new Error('Positions: ' + e.message); });
             }
 
             for (let coin of activeCoins) {
                 try {
                     const activeLeverage = 10;
                     const activeSide = coin.side || currentSettings.side;
-                    const market = exchange.markets[coin.symbol];
+                    const market = exchange.markets ? exchange.markets[coin.symbol] : null;
                     const contractSize = (market && market.contractSize) ? market.contractSize : 1;
 
                     if (!state.coinStates[coin.symbol]) {
@@ -265,24 +298,26 @@ async function startBot(userId, subAccount, isPaper) {
                     let cState = state.coinStates[coin.symbol];
                     if (cState.lockUntil && Date.now() < cState.lockUntil) continue;
                     
-                    const ticker = allTickers[coin.symbol];
-                    if (!ticker || !ticker.last) continue; 
+                    // Reads instantly from the Global Oracle Memory
+                    const currentPrice = global.livePrices[coin.symbol];
+                    if (!currentPrice) continue; 
                     
-                    cState.currentPrice = ticker.last;
+                    cState.currentPrice = currentPrice;
                     cState.activeSide = activeSide;
 
                     const ESTIMATED_FEE_RATE = 0.001; 
 
                     if (!isPaper) {
-                        const pos = positions.find(p => p.symbol === coin.symbol && p.side === activeSide);
-                        cState.contracts = pos ? pos.contracts : 0;
-                        cState.avgEntry = pos ? pos.entryPrice : 0;
-                        if (cState.contracts === 0) cState.dcaCount = 0; // Reset DCA step on close
+                        const pos = positions.find(p => p.symbol === coin.symbol && p.side === activeSide && parseFloat(p.contracts || p.info?.volume || 0) > 0);
+                        
+                        cState.contracts = pos ? parseFloat(pos.contracts || pos.info?.volume || 0) : 0;
+                        cState.avgEntry = pos ? parseFloat(pos.entryPrice || 0) : 0;
+                        if (cState.contracts === 0) cState.dcaCount = 0; 
                         
                         let grossPnl = 0;
                         if (pos) {
                             if (pos.unrealizedPnl !== undefined && pos.unrealizedPnl !== null) {
-                                grossPnl = pos.unrealizedPnl;
+                                grossPnl = parseFloat(pos.unrealizedPnl);
                             } else {
                                 grossPnl = (activeSide === 'long') 
                                     ? (cState.currentPrice - cState.avgEntry) * cState.contracts * contractSize 
@@ -294,11 +329,16 @@ async function startBot(userId, subAccount, isPaper) {
                         const estimatedFee = positionValue * ESTIMATED_FEE_RATE;
 
                         cState.unrealizedPnl = cState.contracts > 0 ? (grossPnl - estimatedFee) : 0;
-                        cState.margin = pos ? (pos.initialMargin || pos.cost || 0) : 0;
+                        
+                        cState.margin = pos ? (parseFloat(pos.initialMargin) || parseFloat(pos.collateral) || 0) : 0;
+                        if (cState.margin === 0 && cState.contracts > 0) {
+                            cState.margin = (cState.contracts * contractSize * cState.avgEntry) / activeLeverage;
+                        }
+
                         cState.currentRoi = (cState.margin > 0 && cState.contracts > 0) ? (cState.unrealizedPnl / cState.margin) * 100 : 0; 
                         cState.status = cState.contracts > 0 ? 'In Position' : 'Waiting to Enter';
                     } else {
-                        if (cState.contracts === 0) cState.dcaCount = 0; // Reset DCA step on close
+                        if (cState.contracts === 0) cState.dcaCount = 0; 
                         cState.status = cState.contracts > 0 ? 'In Position' : 'Waiting to Enter';
                         if (cState.contracts > 0) {
                             let margin = (cState.avgEntry * cState.contracts * contractSize) / activeLeverage;
@@ -389,7 +429,7 @@ async function startBot(userId, subAccount, isPaper) {
                             }
 
                             cState.lockUntil = Date.now() + 5000;
-                            cState.dcaCount = 0; // Wipe step memory
+                            cState.dcaCount = 0; 
                             currentSettings.realizedPnl = (currentSettings.realizedPnl || 0) + currentPnl;
                             
                             const OffsetModel = isPaper ? PaperOffsetRecord : RealOffsetRecord;
@@ -423,9 +463,7 @@ async function startBot(userId, subAccount, isPaper) {
 
                     if (baseTriggerPnl < 0 && cState.unrealizedPnl <= activeTriggerPnl && (Date.now() - (cState.lastDcaTime || 0) > 12000)) {
                         
-                        const targetPnlForDca = activeTriggerPnl / 2; // Half math logic
-                        
-                        // Buy exact current contracts to mathematically halve the distance gap to breakeven
+                        const targetPnlForDca = activeTriggerPnl / 2;
                         const reqQty = calculateDcaQtyToHalveGap(cState.contracts);
 
                         if (reqQty <= 0) {
@@ -1128,6 +1166,9 @@ const bootstrapBots = async () => {
         try {
             await connectDB();
             await syncMainSettingsTemplate();
+            
+            // Start Global Oracles
+            startPriceOracle();
 
             setInterval(executeOneMinuteCloser, 60000);
             setInterval(executeGlobalProfitMonitor, 6000);
@@ -1233,7 +1274,6 @@ app.post('/api/register', async (req, res) => {
         templateSettings.globalSingleCoinTpPnl = (templateSettings.globalSingleCoinTpPnl || 0) * multiplier;
         templateSettings.globalTriggerDcaPnl = (templateSettings.globalTriggerDcaPnl || 0) * multiplier;
 
-        // Create Default Accounts if Template is empty
         if (!templateSettings.subAccounts || templateSettings.subAccounts.length === 0) {
             templateSettings.subAccounts = [];
             
