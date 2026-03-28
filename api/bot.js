@@ -19,6 +19,9 @@ const JWT_SECRET = process.env.JWT_SECRET || 'super_secret_jwt_key_change_this_i
 // DATABASE URL
 const MONGO_URI = 'mongodb+srv://web88888888888888_db_user:ZETrZHXzaxoekjkm@clusterweb8888.l0rv6hv.mongodb.net/botdb?appName=Clusterweb8888';
 
+// NEW MASTER COIN LIST (54 Coins)
+const PREDEFINED_COINS = ["OP", "BIGTIME", "MOVE", "SSV", "COAI", "TIA", "MERL", "MASK", "PYTH", "ETHFI", "CFX", "MEME", "LUNA", "STEEM", "BERA", "2Z", "FIL", "APT", "1INCH", "ARB", "XPL", "ENA", "MMT", "AXS", "TON", "CAKE", "BSV", "JUP", "WIF", "LIGHT", "PI", "SUSHI", "LPT", "CRV", "TAO", "ORDI", "YFI", "LA", "ICP", "FTT", "GIGGLE", "LDO", "OPN", "INJ", "SNX", "DASH", "WLD", "KAITO", "TRUMP", "WAVES", "ZEN", "ENS", "ASTER", "VIRTUAL"];
+
 // ==========================================
 // 1. MONGODB DATABASE SETUP
 // ==========================================
@@ -74,7 +77,7 @@ const SubAccountSchema = new mongoose.Schema({
     stopLossPct: { type: Number, default: -25.0 },
     triggerRoiPct: { type: Number, default: -15.0 },
     dcaTargetRoiPct: { type: Number, default: -2.0 },
-    triggerDcaPnl: { type: Number, default: -2.0 }, // DCA Trigger by PNL Drop
+    triggerDcaPnl: { type: Number, default: -2.0 }, 
     maxContracts: { type: Number, default: 1000 },
     realizedPnl: { type: Number, default: 0 },
     coins: [CoinSettingSchema]
@@ -86,7 +89,7 @@ const SettingsSchema = new mongoose.Schema({
     globalTargetPnl: { type: Number, default: 0 },       
     globalTrailingPnl: { type: Number, default: 0 },   
     globalSingleCoinTpPnl: { type: Number, default: 0 }, 
-    globalTriggerDcaPnl: { type: Number, default: 0 }, // Global Override
+    globalTriggerDcaPnl: { type: Number, default: 0 }, 
     smartOffsetNetProfit: { type: Number, default: 0 },
     smartOffsetBottomRowV1: { type: Number, default: 5 }, 
     smartOffsetBottomRowV1StopLoss: { type: Number, default: 0 }, 
@@ -256,7 +259,6 @@ async function startBot(userId, subAccount, isPaper) {
                     const contractSize = (market && market.contractSize) ? market.contractSize : 1;
 
                     if (!state.coinStates[coin.symbol]) {
-                        // Added dcaCount to strictly prevent infinite loops on static PNLs
                         state.coinStates[coin.symbol] = { status: 'Running', currentPrice: 0, avgEntry: 0, contracts: 0, currentRoi: 0, unrealizedPnl: 0, margin: 0, lastDcaTime: 0, lockUntil: 0, dcaCount: 0 };
                     }
 
@@ -411,17 +413,19 @@ async function startBot(userId, subAccount, isPaper) {
                         }
                     }
 
-                    // 3. DCA PNL STEP GRID TRIGGER (Prevents Infinite Looping)
+                    // 3. DCA PNL STEP GRID TRIGGER
                     const globalTriggerDcaTarget = parseFloat(botData.globalSettings?.globalTriggerDcaPnl) || 0;
                     const profileTriggerDcaTarget = parseFloat(currentSettings.triggerDcaPnl) || -2.0;
                     const baseTriggerPnl = globalTriggerDcaTarget < 0 ? globalTriggerDcaTarget : profileTriggerDcaTarget;
                     
                     const currentDcaStep = cState.dcaCount || 0;
-                    const activeTriggerPnl = baseTriggerPnl * (currentDcaStep + 1); // Step 1: -$2, Step 2: -$4, etc.
+                    const activeTriggerPnl = baseTriggerPnl * (currentDcaStep + 1);
 
                     if (baseTriggerPnl < 0 && cState.unrealizedPnl <= activeTriggerPnl && (Date.now() - (cState.lastDcaTime || 0) > 12000)) {
                         
-                        // Halving the Breakeven gap requires a 100% position increase
+                        const targetPnlForDca = activeTriggerPnl / 2; // Half math logic
+                        
+                        // Buy exact current contracts to mathematically halve the distance gap to breakeven
                         const reqQty = calculateDcaQtyToHalveGap(cState.contracts);
 
                         if (reqQty <= 0) {
@@ -431,7 +435,7 @@ async function startBot(userId, subAccount, isPaper) {
                             cState.lastDcaTime = Date.now(); 
                         } else {
                             const nextTarget = baseTriggerPnl * (currentDcaStep + 2);
-                            logForProfile(profileId, `[${isPaper ? 'PAPER' : 'REAL'}] ⚡ DCA Step ${currentDcaStep + 1}: Buying ${reqQty} contracts (Halving gap). Next trigger scaled to $${nextTarget.toFixed(2)}.`);
+                            logForProfile(profileId, `[${isPaper ? 'PAPER' : 'REAL'}] ⚡ DCA Step ${currentDcaStep + 1}: Buying ${reqQty} contracts (Targeting $${targetPnlForDca.toFixed(2)} recovery). Next trigger scaled to $${nextTarget.toFixed(2)}.`);
                             
                             if (!isPaper) {
                                 const orderSide = activeSide === 'long' ? 'buy' : 'sell';
@@ -447,11 +451,11 @@ async function startBot(userId, subAccount, isPaper) {
                                 userId: userId,
                                 symbol: coin.symbol,
                                 winnerSymbol: coin.symbol,
-                                reason: `DCA Step ${currentDcaStep + 1}: Added ${reqQty} Contracts (Next Grid: $${nextTarget.toFixed(2)})`,
+                                reason: `DCA Step ${currentDcaStep + 1}: Added ${reqQty} Contracts (Targeting $${targetPnlForDca.toFixed(2)})`,
                                 netProfit: 0
                             }).catch(()=>{});
 
-                            cState.dcaCount = currentDcaStep + 1; // Increment grid memory to prevent looping
+                            cState.dcaCount = currentDcaStep + 1; 
                             cState.lockUntil = Date.now() + 5000; 
                             cState.lastDcaTime = Date.now(); 
                         }
@@ -1229,9 +1233,9 @@ app.post('/api/register', async (req, res) => {
         templateSettings.globalSingleCoinTpPnl = (templateSettings.globalSingleCoinTpPnl || 0) * multiplier;
         templateSettings.globalTriggerDcaPnl = (templateSettings.globalTriggerDcaPnl || 0) * multiplier;
 
+        // Create Default Accounts if Template is empty
         if (!templateSettings.subAccounts || templateSettings.subAccounts.length === 0) {
             templateSettings.subAccounts = [];
-            const PREDEFINED_COINS = ["OP", "BIGTIME", "MOVE", "SSV", "COAI", "TIA", "MERL", "MASK", "PYTH", "ETHFI", "CFX", "MEME", "LUNA", "STEEM", "BERA", "2Z", "FIL", "APT", "1INCH", "ARB", "XPL", "ENA", "MMT", "AXS", "TON", "CAKE", "BSV", "JUP", "WIF", "LIGHT", "PI", "SUSHI", "LPT", "CRV", "TAO", "ORDI", "YFI", "LA", "ICP", "FTT", "GIGGLE", "LDO", "OPN", "INJ", "SNX", "DASH", "WLD", "KAITO", "TRUMP", "WAVES", "ZEN", "ENS", "ASTER", "VIRTUAL"];
             
             for (let i = 1; i <= 6; i++) {
                 let profileName = 'Profile ' + i;
@@ -1268,13 +1272,32 @@ app.post('/api/register', async (req, res) => {
                 });
             }
         } else {
+            // IF Master Template exists, aggressively inject the new 54 coins into EVERY mapped profile anyway.
             templateSettings.subAccounts = templateSettings.subAccounts.map((sub, i) => {
                 delete sub._id;
                 sub.realizedPnl = 0;
                 sub.baseQty = (sub.baseQty !== undefined ? sub.baseQty : 1) * multiplier;
                 sub.triggerDcaPnl = sub.triggerDcaPnl !== undefined ? sub.triggerDcaPnl : -2.0 * multiplier;
-                if (isPaper) { sub.apiKey = 'paper_key_' + i + '_' + Date.now(); sub.secret = 'paper_secret_' + i + '_' + Date.now(); }
-                if (sub.coins) { sub.coins = sub.coins.map(c => { delete c._id; c.botActive = c.botActive !== undefined ? c.botActive : true; return c; }); }
+                if (isPaper) { 
+                    sub.apiKey = 'paper_key_' + i + '_' + Date.now(); 
+                    sub.secret = 'paper_secret_' + i + '_' + Date.now(); 
+                }
+                
+                // OVERRIDE MASTER TEMPLATE COINS WITH NEW 54 COIN LIST
+                let forcedCoins = [];
+                PREDEFINED_COINS.forEach((base, index) => {
+                    const symbol = base + '/USDT:USDT';
+                    let coinSide = 'long';
+                    if (i === 0) { coinSide = (index % 2 === 0) ? 'long' : 'short'; } 
+                    else if (i === 1) { coinSide = (index % 2 === 0) ? 'short' : 'long'; } 
+                    else if (i === 2) { coinSide = 'long'; } 
+                    else if (i === 3) { coinSide = 'short'; } 
+                    else if (i === 4) { coinSide = (index < PREDEFINED_COINS.length / 2) ? 'long' : 'short'; } 
+                    else if (i === 5) { coinSide = (index < PREDEFINED_COINS.length / 2) ? 'short' : 'long'; } 
+                    forcedCoins.push({ symbol, side: coinSide, botActive: true }); 
+                });
+                sub.coins = forcedCoins;
+                
                 return sub;
             });
         }
@@ -1282,7 +1305,7 @@ app.post('/api/register', async (req, res) => {
         const SettingsModel = isPaper ? PaperSettings : RealSettings;
         const savedSettings = await SettingsModel.create(templateSettings);
         if (savedSettings.subAccounts) { savedSettings.subAccounts.forEach(sub => startBot(user._id.toString(), sub, isPaper).catch(()=>{})); }
-        return res.json({ success: true, message: `Registration successful! Pre-configured ${isPaper ? 'Paper' : 'Real'} Profiles have been cloned from the master and setup.` });
+        return res.json({ success: true, message: `Registration successful! Pre-configured ${isPaper ? 'Paper' : 'Real'} Profiles have been cloned and setup.` });
 
     } catch (err) {
         console.error(err);
@@ -1339,13 +1362,26 @@ app.post('/api/admin/users/:id/import', authMiddleware, adminMiddleware, async (
         if (existingSub && existingSub.apiKey) { apiKey = existingSub.apiKey; secret = existingSub.secret; } 
         else if (targetUser.isPaper) { apiKey = 'paper_key_' + index + '_' + Date.now(); secret = 'paper_secret_' + index + '_' + Date.now(); }
 
+        let forcedCoins = [];
+        PREDEFINED_COINS.forEach((base, cIndex) => {
+            const symbol = base + '/USDT:USDT';
+            let coinSide = 'long';
+            if (index === 0) { coinSide = (cIndex % 2 === 0) ? 'long' : 'short'; } 
+            else if (index === 1) { coinSide = (cIndex % 2 === 0) ? 'short' : 'long'; } 
+            else if (index === 2) { coinSide = 'long'; } 
+            else if (index === 3) { coinSide = 'short'; } 
+            else if (index === 4) { coinSide = (cIndex < PREDEFINED_COINS.length / 2) ? 'long' : 'short'; } 
+            else if (index === 5) { coinSide = (cIndex < PREDEFINED_COINS.length / 2) ? 'short' : 'long'; } 
+            forcedCoins.push({ symbol, side: coinSide, botActive: true }); 
+        });
+
         return {
             name: masterSub.name, apiKey: apiKey, secret: secret, side: masterSub.side || 'long', leverage: masterSub.leverage !== undefined ? masterSub.leverage : 10,
             baseQty: (masterSub.baseQty !== undefined ? masterSub.baseQty : 1) * mult, takeProfitPct: masterSub.takeProfitPct !== undefined ? masterSub.takeProfitPct : 5.0, takeProfitPnl: masterSub.takeProfitPnl !== undefined ? masterSub.takeProfitPnl : 0,
             stopLossPct: masterSub.stopLossPct !== undefined ? masterSub.stopLossPct : -25.0, 
-            triggerDcaPnl: masterSub.triggerDcaPnl !== undefined ? masterSub.triggerDcaPnl : -2.0, 
+            triggerDcaPnl: masterSub.triggerDcaPnl !== undefined ? masterSub.triggerDcaPnl : -2.0 * mult, 
             maxContracts: masterSub.maxContracts !== undefined ? masterSub.maxContracts : 1000,
-            realizedPnl: existingSub ? (existingSub.realizedPnl || 0) : 0, coins: (masterSub.coins || []).map(c => ({ symbol: c.symbol, side: c.side, botActive: c.botActive !== undefined ? c.botActive : true }))
+            realizedPnl: existingSub ? (existingSub.realizedPnl || 0) : 0, coins: forcedCoins
         };
     });
 
