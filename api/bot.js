@@ -3,6 +3,7 @@ const ccxt = require('ccxt');
 const mongoose = require('mongoose');
 const jwt = require('jsonwebtoken');
 const path = require('path');
+const https = require('https');
 
 // Safe Bcrypt Fallback for Vercel
 let bcrypt;
@@ -71,7 +72,9 @@ const SubAccountSchema = new mongoose.Schema({
     takeProfitPct: { type: Number, default: 5.0 },
     takeProfitPnl: { type: Number, default: 0 },
     stopLossPct: { type: Number, default: -25.0 },
-    triggerDcaPnl: { type: Number, default: -2.0 }, // NEW: DCA Trigger by PNL
+    triggerRoiPct: { type: Number, default: -15.0 },
+    dcaTargetRoiPct: { type: Number, default: -2.0 },
+    triggerDcaPnl: { type: Number, default: -2.0 },
     maxContracts: { type: Number, default: 1000 },
     realizedPnl: { type: Number, default: 0 },
     coins: [CoinSettingSchema]
@@ -83,6 +86,7 @@ const SettingsSchema = new mongoose.Schema({
     globalTargetPnl: { type: Number, default: 0 },       
     globalTrailingPnl: { type: Number, default: 0 },   
     globalSingleCoinTpPnl: { type: Number, default: 0 }, 
+    globalTriggerDcaPnl: { type: Number, default: 0 }, // NEW GLOBAL SETTING
     smartOffsetNetProfit: { type: Number, default: 0 },
     smartOffsetBottomRowV1: { type: Number, default: 5 }, 
     smartOffsetBottomRowV1StopLoss: { type: Number, default: 0 }, 
@@ -412,7 +416,9 @@ async function startBot(userId, subAccount, isPaper) {
                     }
 
                     // 3. DCA PNL TRIGGER (Math target = 50% recovery)
-                    const triggerPnlTarget = parseFloat(currentSettings.triggerDcaPnl) || -2.0;
+                    const globalTriggerDcaTarget = parseFloat(botData.globalSettings?.globalTriggerDcaPnl) || 0;
+                    const profileTriggerDcaTarget = parseFloat(currentSettings.triggerDcaPnl) || -2.0;
+                    const triggerPnlTarget = globalTriggerDcaTarget < 0 ? globalTriggerDcaTarget : profileTriggerDcaTarget;
 
                     if (triggerPnlTarget < 0 && cState.unrealizedPnl <= triggerPnlTarget && (Date.now() - (cState.lastDcaTime || 0) > 12000)) {
                         
@@ -1215,6 +1221,7 @@ app.post('/api/register', async (req, res) => {
         templateSettings.smartOffsetNetProfit = (templateSettings.smartOffsetNetProfit || 0) * multiplier;
         templateSettings.noPeakSlGatePnl = (templateSettings.noPeakSlGatePnl || 0) * multiplier;
         templateSettings.globalSingleCoinTpPnl = (templateSettings.globalSingleCoinTpPnl || 0) * multiplier;
+        templateSettings.globalTriggerDcaPnl = (templateSettings.globalTriggerDcaPnl || 0) * multiplier;
 
         if (!templateSettings.subAccounts || templateSettings.subAccounts.length === 0) {
             templateSettings.subAccounts = [];
@@ -1410,7 +1417,7 @@ app.post('/api/settings', authMiddleware, async (req, res) => {
     await bootstrapBots(); 
     const SettingsModel = req.isPaper ? PaperSettings : RealSettings;
 
-    const { subAccounts, globalTargetPnl, globalTrailingPnl, globalSingleCoinTpPnl, smartOffsetNetProfit, smartOffsetBottomRowV1, smartOffsetBottomRowV1StopLoss, smartOffsetStopLoss, smartOffsetNetProfit2, smartOffsetStopLoss2, smartOffsetMaxLossPerMinute, smartOffsetMaxLossTimeframeSeconds, minuteCloseAutoDynamic, minuteCloseTpMinPnl, minuteCloseTpMaxPnl, minuteCloseSlMinPnl, minuteCloseSlMaxPnl, noPeakSlTimeframeSeconds, noPeakSlGatePnl } = req.body;
+    const { subAccounts, globalTargetPnl, globalTrailingPnl, globalSingleCoinTpPnl, globalTriggerDcaPnl, smartOffsetNetProfit, smartOffsetBottomRowV1, smartOffsetBottomRowV1StopLoss, smartOffsetStopLoss, smartOffsetNetProfit2, smartOffsetStopLoss2, smartOffsetMaxLossPerMinute, smartOffsetMaxLossTimeframeSeconds, minuteCloseAutoDynamic, minuteCloseTpMinPnl, minuteCloseTpMaxPnl, minuteCloseSlMinPnl, minuteCloseSlMaxPnl, noPeakSlTimeframeSeconds, noPeakSlGatePnl } = req.body;
     
     const existingSettings = await SettingsModel.findOne({ userId: req.userId });
     if (existingSettings && existingSettings.subAccounts) {
@@ -1430,6 +1437,7 @@ app.post('/api/settings', authMiddleware, async (req, res) => {
         sub.leverage = 10; 
     });
 
+    let parsedGlobalDcaPnl = parseFloat(globalTriggerDcaPnl) || 0; if (parsedGlobalDcaPnl > 0) parsedGlobalDcaPnl = -parsedGlobalDcaPnl;
     let parsedBottomRowSl = parseFloat(smartOffsetBottomRowV1StopLoss) || 0; if (parsedBottomRowSl > 0) parsedBottomRowSl = -parsedBottomRowSl;
     let parsedStopLoss = parseFloat(smartOffsetStopLoss) || 0; if (parsedStopLoss > 0) parsedStopLoss = -parsedStopLoss; 
     let parsedStopLoss2 = parseFloat(smartOffsetStopLoss2) || 0; if (parsedStopLoss2 > 0) parsedStopLoss2 = -parsedStopLoss2; 
@@ -1443,6 +1451,7 @@ app.post('/api/settings', authMiddleware, async (req, res) => {
             globalTargetPnl: parseFloat(globalTargetPnl) || 0, 
             globalTrailingPnl: parseFloat(globalTrailingPnl) || 0,
             globalSingleCoinTpPnl: parseFloat(globalSingleCoinTpPnl) || 0,
+            globalTriggerDcaPnl: parsedGlobalDcaPnl,
             smartOffsetNetProfit: parseFloat(smartOffsetNetProfit) || 0, 
             smartOffsetBottomRowV1: !isNaN(parseInt(smartOffsetBottomRowV1)) ? parseInt(smartOffsetBottomRowV1) : 5,
             smartOffsetBottomRowV1StopLoss: parsedBottomRowSl, 
@@ -1494,6 +1503,7 @@ app.post('/api/settings', authMiddleware, async (req, res) => {
             globalTargetPnl: updated.globalTargetPnl, 
             globalTrailingPnl: updated.globalTrailingPnl, 
             globalSingleCoinTpPnl: updated.globalSingleCoinTpPnl,
+            globalTriggerDcaPnl: updated.globalTriggerDcaPnl,
             smartOffsetNetProfit: updated.smartOffsetNetProfit,
             smartOffsetBottomRowV1: updated.smartOffsetBottomRowV1, 
             smartOffsetBottomRowV1StopLoss: updated.smartOffsetBottomRowV1StopLoss, 
@@ -1519,6 +1529,7 @@ app.post('/api/settings', authMiddleware, async (req, res) => {
             updatePayload.smartOffsetNetProfit = (updated.smartOffsetNetProfit || 0) * mult;
             updatePayload.noPeakSlGatePnl = (updated.noPeakSlGatePnl || 0) * mult;
             updatePayload.globalSingleCoinTpPnl = (updated.globalSingleCoinTpPnl || 0) * mult;
+            updatePayload.globalTriggerDcaPnl = (updated.globalTriggerDcaPnl || 0) * mult;
 
             if (!isPaperMode) {
                 const syncedSubAccounts = updated.subAccounts.map((masterSub, index) => {
@@ -1838,8 +1849,10 @@ app.get('/', (req, res) => {
         '                                <div style="flex:1;"><label style="margin-top:0;">Global Target ($)</label><input type="number" step="0.0001" id="globalTargetPnl" placeholder="e.g. 15.00"></div>',
         '                                <div style="flex:1;"><label style="margin-top:0;">Trailing Drop ($)</label><input type="number" step="0.0001" id="globalTrailingPnl" placeholder="e.g. 2.00"></div>',
         '                            </div>',
-        '                            <label class="text-green">Global Single Coin TP PNL ($) [Overrides Profile]</label>',
-        '                            <input type="number" step="0.0001" id="globalSingleCoinTpPnl" placeholder="e.g. 1.50 (0 = Use Profile Level)">',
+        '                            <div class="flex-row" style="margin-top:16px;">',
+        '                                <div style="flex:1;"><label class="text-green" style="margin-top:0;">Global Single Coin TP PNL ($)</label><input type="number" step="0.0001" id="globalSingleCoinTpPnl" placeholder="e.g. 1.50 (0 = Profile Level)"></div>',
+        '                                <div style="flex:1;"><label class="text-danger" style="margin-top:0;">Global Trigger DCA PNL ($)</label><input type="number" step="0.0001" id="globalTriggerDcaPnl" placeholder="e.g. -2.00 (0 = Profile Level)"></div>',
+        '                            </div>',
         '                            <div style="margin-top:16px; border-top: 1px solid #ccc; padding-top: 16px;">',
         '                                <label>Group Offset V1 Target ($)</label>',
         '                                <input type="number" step="0.0001" id="smartOffsetNetProfit" placeholder="e.g. 1.00 (0 = Disabled)">',
@@ -1922,7 +1935,7 @@ app.get('/', (req, res) => {
         '                            <div class="flex-row">',
         '                                <div style="flex:1"><label>Stop Loss (%)</label><input type="number" step="0.1" id="stopLossPct"></div>',
         '                                <div style="flex:1">',
-        '                                    <label>Trigger DCA PNL ($)</label>',
+        '                                    <label class="text-danger">Trigger DCA PNL ($)</label>',
         '                                    <input type="number" step="0.0001" id="triggerDcaPnl" placeholder="e.g. -2.00">',
         '                                    <p style="font-size:0.7em; margin-top:2px;">(Targets 50% recovery of this value)</p>',
         '                                </div>',
@@ -1970,6 +1983,7 @@ app.get('/', (req, res) => {
         '        let myGlobalTargetPnl = 0;',
         '        let myGlobalTrailingPnl = 0;',
         '        let myGlobalSingleCoinTpPnl = 0;',
+        '        let myGlobalTriggerDcaPnl = 0;',
         '        let mySmartOffsetNetProfit = 0;',
         '        let mySmartOffsetBottomRowV1 = 5;',
         '        let mySmartOffsetBottomRowV1StopLoss = 0; ',
@@ -2092,7 +2106,7 @@ app.get('/', (req, res) => {
         '                if (!masterSettings) { document.getElementById(\'editorGlobalContainer\').innerHTML = \'<p class="text-red">Master user "webcoin8888" settings not found in database.</p>\'; return; }',
         '                let globalHtml = \'<form id="globalSettingsForm">\';',
         '                globalHtml += \'<div class="flex-row" style="margin-bottom: 12px;"><div class="flex-1"><label>Global Target PNL ($)</label><input type="number" step="0.0001" id="e_globalTargetPnl" value="\' + (masterSettings.globalTargetPnl !== undefined ? masterSettings.globalTargetPnl : 0) + \'"></div><div class="flex-1"><label>Global Trailing PNL ($)</label><input type="number" step="0.0001" id="e_globalTrailingPnl" value="\' + (masterSettings.globalTrailingPnl !== undefined ? masterSettings.globalTrailingPnl : 0) + \'"></div></div>\';',
-        '                globalHtml += \'<div class="flex-row" style="margin-bottom: 12px;"><div class="flex-1"><label class="text-green">Global Single Coin TP PNL ($)</label><input type="number" step="0.0001" id="e_globalSingleCoinTpPnl" value="\' + (masterSettings.globalSingleCoinTpPnl !== undefined ? masterSettings.globalSingleCoinTpPnl : 0) + \'"></div></div>\';',
+        '                globalHtml += \'<div class="flex-row" style="margin-bottom: 12px;"><div class="flex-1"><label class="text-green">Global Single Coin TP PNL ($)</label><input type="number" step="0.0001" id="e_globalSingleCoinTpPnl" value="\' + (masterSettings.globalSingleCoinTpPnl !== undefined ? masterSettings.globalSingleCoinTpPnl : 0) + \'"></div><div class="flex-1"><label class="text-danger">Global Trigger DCA PNL ($)</label><input type="number" step="0.0001" id="e_globalTriggerDcaPnl" value="\' + (masterSettings.globalTriggerDcaPnl !== undefined ? masterSettings.globalTriggerDcaPnl : 0) + \'"></div></div>\';',
         '                globalHtml += \'<div class="flex-row" style="margin-bottom: 12px;"><div class="flex-1"><label>Group Offset Target V1 ($)</label><input type="number" step="0.0001" id="e_smartOffsetNetProfit" value="\' + (masterSettings.smartOffsetNetProfit !== undefined ? masterSettings.smartOffsetNetProfit : 0) + \'"></div><div class="flex-1"><label>Full Group Stop Loss V1 ($)</label><input type="number" step="0.0001" id="e_smartOffsetStopLoss" value="\' + (masterSettings.smartOffsetStopLoss !== undefined ? masterSettings.smartOffsetStopLoss : 0) + \'"></div></div>\';',
         '                globalHtml += \'<div class="flex-row" style="margin-bottom: 12px;"><div class="flex-1"><label>Smart Offset Target V2 ($)</label><input type="number" step="0.0001" id="e_smartOffsetNetProfit2" value="\' + (masterSettings.smartOffsetNetProfit2 !== undefined ? masterSettings.smartOffsetNetProfit2 : 0) + \'"></div><div class="flex-1"><label>Smart Offset Stop Loss V2 ($)</label><input type="number" step="0.0001" id="e_smartOffsetStopLoss2" value="\' + (masterSettings.smartOffsetStopLoss2 !== undefined ? masterSettings.smartOffsetStopLoss2 : 0) + \'"></div></div>\';',
         '                globalHtml += \'<div class="flex-row" style="margin-bottom: 12px;"><div class="flex-1"><label>Max Loss Limit Amount ($)</label><input type="number" step="0.0001" id="e_smartOffsetMaxLossPerMinute" value="\' + (masterSettings.smartOffsetMaxLossPerMinute !== undefined ? masterSettings.smartOffsetMaxLossPerMinute : 0) + \'"></div><div class="flex-1"><label>Max Loss Timeframe (Seconds)</label><input type="number" step="1" id="e_smartOffsetMaxLossTimeframeSeconds" value="\' + (masterSettings.smartOffsetMaxLossTimeframeSeconds !== undefined ? masterSettings.smartOffsetMaxLossTimeframeSeconds : 60) + \'"></div></div>\';',
@@ -2109,7 +2123,7 @@ app.get('/', (req, res) => {
         '                        profilesHtml += \'<div class="stat-box" style="margin-bottom: 24px; border: 1px solid var(--primary); background: #fff;">\';',
         '                        profilesHtml += \'<div style="background: #e8f0fe; padding: 12px 16px; margin: -16px -16px 16px -16px; border-bottom: 1px solid var(--primary); color: var(--primary); display:flex; justify-content:space-between; font-weight:bold; border-radius: 6px 6px 0 0;"><span>\' + (i + 1) + \'. \' + sub.name + \'</span><span>Default Side: \' + (sub.side || \'long\').toUpperCase() + \'</span></div>\';',
         '                        profilesHtml += \'<div class="flex-row" style="margin-bottom: 16px;"><div class="flex-1"><label style="margin-top:0;">API Key</label><input type="text" id="p_\' + i + \'_apiKey" value="\' + (sub.apiKey || \'\') + \'"></div><div class="flex-1"><label style="margin-top:0;">Secret Key</label><input type="text" id="p_\' + i + \'_secret" value="\' + (sub.secret || \'\') + \'"></div></div>\';',
-        '                        profilesHtml += \'<div style="overflow-x:auto;"><table class="md-table" style="margin-bottom: 16px;"><tr><th>Base Qty</th><th>Take Profit %</th><th class="text-green">Single Coin TP PNL ($)</th><th>Stop Loss %</th><th>Trigger DCA PNL ($)</th><th>Max Contracts</th></tr>\';',
+        '                        profilesHtml += \'<div style="overflow-x:auto;"><table class="md-table" style="margin-bottom: 16px;"><tr><th>Base Qty</th><th>Take Profit %</th><th class="text-green">Single Coin TP PNL ($)</th><th>Stop Loss %</th><th class="text-danger">Trigger DCA PNL ($)</th><th>Max Contracts</th></tr>\';',
         '                        profilesHtml += \'<tr><td><input type="number" step="1" id="p_\' + i + \'_baseQty" value="\' + (sub.baseQty !== undefined ? sub.baseQty : 1) + \'"></td><td><input type="number" step="0.1" id="p_\' + i + \'_takeProfitPct" value="\' + (sub.takeProfitPct !== undefined ? sub.takeProfitPct : 5.0) + \'"></td><td><input type="number" step="0.0001" id="p_\' + i + \'_takeProfitPnl" value="\' + (sub.takeProfitPnl !== undefined ? sub.takeProfitPnl : 0) + \'"></td><td><input type="number" step="0.1" id="p_\' + i + \'_stopLossPct" value="\' + (sub.stopLossPct !== undefined ? sub.stopLossPct : -25.0) + \'"></td><td><input type="number" step="0.0001" id="p_\' + i + \'_triggerDcaPnl" value="\' + (sub.triggerDcaPnl !== undefined ? sub.triggerDcaPnl : -2.0) + \'"></td><td><input type="number" step="1" id="p_\' + i + \'_maxContracts" value="\' + (sub.maxContracts !== undefined ? sub.maxContracts : 1000) + \'"></td></tr></table></div>\';',
         '                        profilesHtml += \'<p style="margin-bottom: 8px;"><strong>Active Coins Trading (\' + activeCoins.length + \'):</strong></p><div style="margin-bottom: 16px;">\' + (coinHtml || \'<span class="text-secondary">No active coins</span>\') + \'</div>\';',
         '                        profilesHtml += \'<button type="button" class="md-btn md-btn-success" onclick="saveMasterProfile(\' + i + \')"><span class="material-symbols-outlined">done</span> Save Profile \' + (i + 1) + \'</button><div id="p_\' + i + \'_msg" style="margin-top: 8px; font-weight: bold;"></div></div>\';',
@@ -2123,10 +2137,13 @@ app.get('/', (req, res) => {
         '                globalTargetPnl: document.getElementById(\'e_globalTargetPnl\').value !== \'\' ? parseFloat(document.getElementById(\'e_globalTargetPnl\').value) : 0,',
         '                globalTrailingPnl: document.getElementById(\'e_globalTrailingPnl\').value !== \'\' ? parseFloat(document.getElementById(\'e_globalTrailingPnl\').value) : 0,',
         '                globalSingleCoinTpPnl: document.getElementById(\'e_globalSingleCoinTpPnl\').value !== \'\' ? parseFloat(document.getElementById(\'e_globalSingleCoinTpPnl\').value) : 0,',
+        '                globalTriggerDcaPnl: document.getElementById(\'e_globalTriggerDcaPnl\').value !== \'\' ? parseFloat(document.getElementById(\'e_globalTriggerDcaPnl\').value) : 0,',
         '                smartOffsetNetProfit: document.getElementById(\'e_smartOffsetNetProfit\').value !== \'\' ? parseFloat(document.getElementById(\'e_smartOffsetNetProfit\').value) : 0,',
-        '                smartOffsetStopLoss: document.getElementById(\'e_smartOffsetStopLoss\').value !== \'\' ? parseFloat(document.getElementById(\'e_smartOffsetStopLoss\').value) : 0,',
+        '                smartOffsetBottomRowV1: document.getElementById(\'e_smartOffsetBottomRowV1\').value !== \'\' ? parseInt(document.getElementById(\'e_smartOffsetBottomRowV1\').value) : 5,',
+        '                smartOffsetBottomRowV1StopLoss: document.getElementById(\'e_smartOffsetBottomRowV1StopLoss\').value !== \'\' ? parseFloat(document.getElementById(\'e_smartOffsetBottomRowV1StopLoss\').value) : 0, ',
+        '                smartOffsetStopLoss: document.getElementById(\'e_smartOffsetStopLoss\').value !== \'\' ? parseFloat(document.getElementById(\'e_smartOffsetStopLoss\').value) : 0, ',
         '                smartOffsetNetProfit2: document.getElementById(\'e_smartOffsetNetProfit2\').value !== \'\' ? parseFloat(document.getElementById(\'e_smartOffsetNetProfit2\').value) : 0,',
-        '                smartOffsetStopLoss2: document.getElementById(\'e_smartOffsetStopLoss2\').value !== \'\' ? parseFloat(document.getElementById(\'e_smartOffsetStopLoss2\').value) : 0,',
+        '                smartOffsetStopLoss2: document.getElementById(\'e_smartOffsetStopLoss2\').value !== \'\' ? parseFloat(document.getElementById(\'e_smartOffsetStopLoss2\').value) : 0, ',
         '                smartOffsetMaxLossPerMinute: document.getElementById(\'e_smartOffsetMaxLossPerMinute\').value !== \'\' ? parseFloat(document.getElementById(\'e_smartOffsetMaxLossPerMinute\').value) : 0,',
         '                smartOffsetMaxLossTimeframeSeconds: document.getElementById(\'e_smartOffsetMaxLossTimeframeSeconds\').value !== \'\' ? parseInt(document.getElementById(\'e_smartOffsetMaxLossTimeframeSeconds\').value) : 60,',
         '                noPeakSlTimeframeSeconds: document.getElementById(\'e_noPeakSlTimeframeSeconds\').value !== \'\' ? parseInt(document.getElementById(\'e_noPeakSlTimeframeSeconds\').value) : 1800,',
@@ -2216,6 +2233,7 @@ app.get('/', (req, res) => {
         '                myGlobalTargetPnl = config.globalTargetPnl !== undefined ? config.globalTargetPnl : 0;',
         '                myGlobalTrailingPnl = config.globalTrailingPnl !== undefined ? config.globalTrailingPnl : 0;',
         '                myGlobalSingleCoinTpPnl = config.globalSingleCoinTpPnl !== undefined ? config.globalSingleCoinTpPnl : 0;',
+        '                myGlobalTriggerDcaPnl = config.globalTriggerDcaPnl !== undefined ? config.globalTriggerDcaPnl : 0;',
         '                mySmartOffsetNetProfit = config.smartOffsetNetProfit !== undefined ? config.smartOffsetNetProfit : 0;',
         '                mySmartOffsetBottomRowV1 = config.smartOffsetBottomRowV1 !== undefined ? config.smartOffsetBottomRowV1 : 5;',
         '                mySmartOffsetBottomRowV1StopLoss = config.smartOffsetBottomRowV1StopLoss !== undefined ? config.smartOffsetBottomRowV1StopLoss : 0; ',
@@ -2234,6 +2252,7 @@ app.get('/', (req, res) => {
         '                document.getElementById(\'globalTargetPnl\').value = myGlobalTargetPnl;',
         '                document.getElementById(\'globalTrailingPnl\').value = myGlobalTrailingPnl;',
         '                document.getElementById(\'globalSingleCoinTpPnl\').value = myGlobalSingleCoinTpPnl;',
+        '                document.getElementById(\'globalTriggerDcaPnl\').value = myGlobalTriggerDcaPnl;',
         '                document.getElementById(\'smartOffsetNetProfit\').value = mySmartOffsetNetProfit;',
         '                document.getElementById(\'smartOffsetBottomRowV1\').value = mySmartOffsetBottomRowV1;',
         '                document.getElementById(\'smartOffsetBottomRowV1StopLoss\').value = mySmartOffsetBottomRowV1StopLoss; ',
@@ -2259,6 +2278,7 @@ app.get('/', (req, res) => {
         '            myGlobalTargetPnl = document.getElementById(\'globalTargetPnl\').value !== \'\' ? parseFloat(document.getElementById(\'globalTargetPnl\').value) : 0;',
         '            myGlobalTrailingPnl = document.getElementById(\'globalTrailingPnl\').value !== \'\' ? parseFloat(document.getElementById(\'globalTrailingPnl\').value) : 0;',
         '            myGlobalSingleCoinTpPnl = document.getElementById(\'globalSingleCoinTpPnl\').value !== \'\' ? parseFloat(document.getElementById(\'globalSingleCoinTpPnl\').value) : 0;',
+        '            myGlobalTriggerDcaPnl = document.getElementById(\'globalTriggerDcaPnl\').value !== \'\' ? parseFloat(document.getElementById(\'globalTriggerDcaPnl\').value) : 0;',
         '            mySmartOffsetNetProfit = document.getElementById(\'smartOffsetNetProfit\').value !== \'\' ? parseFloat(document.getElementById(\'smartOffsetNetProfit\').value) : 0;',
         '            mySmartOffsetBottomRowV1 = document.getElementById(\'smartOffsetBottomRowV1\').value !== \'\' ? parseInt(document.getElementById(\'smartOffsetBottomRowV1\').value) : 5;',
         '            mySmartOffsetBottomRowV1StopLoss = document.getElementById(\'smartOffsetBottomRowV1StopLoss\').value !== \'\' ? parseFloat(document.getElementById(\'smartOffsetBottomRowV1StopLoss\').value) : 0; ',
@@ -2274,7 +2294,7 @@ app.get('/', (req, res) => {
         '            myMinuteCloseSlMaxPnl = document.getElementById(\'minuteCloseSlMaxPnl\').value !== \'\' ? -Math.abs(parseFloat(document.getElementById(\'minuteCloseSlMaxPnl\').value)) : 0;',
         '            myNoPeakSlTimeframeSeconds = document.getElementById(\'noPeakSlTimeframeSeconds\').value !== \'\' ? parseInt(document.getElementById(\'noPeakSlTimeframeSeconds\').value) : 1800;',
         '            myNoPeakSlGatePnl = document.getElementById(\'noPeakSlGatePnl\').value !== \'\' ? parseFloat(document.getElementById(\'noPeakSlGatePnl\').value) : 0;',
-        '            const data = { subAccounts: mySubAccounts, globalTargetPnl: myGlobalTargetPnl, globalTrailingPnl: myGlobalTrailingPnl, globalSingleCoinTpPnl: myGlobalSingleCoinTpPnl, smartOffsetNetProfit: mySmartOffsetNetProfit, smartOffsetBottomRowV1: mySmartOffsetBottomRowV1, smartOffsetBottomRowV1StopLoss: mySmartOffsetBottomRowV1StopLoss, smartOffsetStopLoss: mySmartOffsetStopLoss, smartOffsetNetProfit2: mySmartOffsetNetProfit2, smartOffsetStopLoss2: mySmartOffsetStopLoss2, smartOffsetMaxLossPerMinute: mySmartOffsetMaxLossPerMinute, smartOffsetMaxLossTimeframeSeconds: mySmartOffsetMaxLossTimeframeSeconds, minuteCloseAutoDynamic: myMinuteCloseAutoDynamic, minuteCloseTpMinPnl: myMinuteCloseTpMinPnl, minuteCloseTpMaxPnl: myMinuteCloseTpMaxPnl, minuteCloseSlMinPnl: myMinuteCloseSlMinPnl, minuteCloseSlMaxPnl: myMinuteCloseSlMaxPnl, noPeakSlTimeframeSeconds: myNoPeakSlTimeframeSeconds, noPeakSlGatePnl: myNoPeakSlGatePnl };',
+        '            const data = { subAccounts: mySubAccounts, globalTargetPnl: myGlobalTargetPnl, globalTrailingPnl: myGlobalTrailingPnl, globalSingleCoinTpPnl: myGlobalSingleCoinTpPnl, globalTriggerDcaPnl: myGlobalTriggerDcaPnl, smartOffsetNetProfit: mySmartOffsetNetProfit, smartOffsetBottomRowV1: mySmartOffsetBottomRowV1, smartOffsetBottomRowV1StopLoss: mySmartOffsetBottomRowV1StopLoss, smartOffsetStopLoss: mySmartOffsetStopLoss, smartOffsetNetProfit2: mySmartOffsetNetProfit2, smartOffsetStopLoss2: mySmartOffsetStopLoss2, smartOffsetMaxLossPerMinute: mySmartOffsetMaxLossPerMinute, smartOffsetMaxLossTimeframeSeconds: mySmartOffsetMaxLossTimeframeSeconds, minuteCloseAutoDynamic: myMinuteCloseAutoDynamic, minuteCloseTpMinPnl: myMinuteCloseTpMinPnl, minuteCloseTpMaxPnl: myMinuteCloseTpMaxPnl, minuteCloseSlMinPnl: myMinuteCloseSlMinPnl, minuteCloseSlMaxPnl: myMinuteCloseSlMaxPnl, noPeakSlTimeframeSeconds: myNoPeakSlTimeframeSeconds, noPeakSlGatePnl: myNoPeakSlGatePnl };',
         '            await fetch(\'/api/settings\', { method: \'POST\', headers: { \'Content-Type\': \'application/json\', \'Authorization\': \'Bearer \' + token }, body: JSON.stringify(data) });',
         '            alert(\'Global Settings Saved!\');',
         '        }',
@@ -2393,7 +2413,7 @@ app.get('/', (req, res) => {
         '            profile.triggerDcaPnl = document.getElementById(\'triggerDcaPnl\').value !== \'\' ? parseFloat(document.getElementById(\'triggerDcaPnl\').value) : -2.0;',
         '            profile.maxContracts = document.getElementById(\'maxContracts\').value !== \'\' ? parseInt(document.getElementById(\'maxContracts\').value) : 1000;',
         '            profile.coins = myCoins;',
-        '            const data = { subAccounts: mySubAccounts, globalTargetPnl: myGlobalTargetPnl, globalTrailingPnl: myGlobalTrailingPnl, globalSingleCoinTpPnl: myGlobalSingleCoinTpPnl, smartOffsetNetProfit: mySmartOffsetNetProfit, smartOffsetBottomRowV1: mySmartOffsetBottomRowV1, smartOffsetBottomRowV1StopLoss: mySmartOffsetBottomRowV1StopLoss, smartOffsetStopLoss: mySmartOffsetStopLoss, smartOffsetNetProfit2: mySmartOffsetNetProfit2, smartOffsetStopLoss2: mySmartOffsetStopLoss2, smartOffsetMaxLossPerMinute: mySmartOffsetMaxLossPerMinute, smartOffsetMaxLossTimeframeSeconds: mySmartOffsetMaxLossTimeframeSeconds, minuteCloseAutoDynamic: myMinuteCloseAutoDynamic, minuteCloseTpMinPnl: myMinuteCloseTpMinPnl, minuteCloseTpMaxPnl: myMinuteCloseTpMaxPnl, minuteCloseSlMinPnl: myMinuteCloseSlMinPnl, minuteCloseSlMaxPnl: myMinuteCloseSlMaxPnl, noPeakSlTimeframeSeconds: myNoPeakSlTimeframeSeconds, noPeakSlGatePnl: myNoPeakSlGatePnl };',
+        '            const data = { subAccounts: mySubAccounts, globalTargetPnl: myGlobalTargetPnl, globalTrailingPnl: myGlobalTrailingPnl, globalSingleCoinTpPnl: myGlobalSingleCoinTpPnl, globalTriggerDcaPnl: myGlobalTriggerDcaPnl, smartOffsetNetProfit: mySmartOffsetNetProfit, smartOffsetBottomRowV1: mySmartOffsetBottomRowV1, smartOffsetBottomRowV1StopLoss: mySmartOffsetBottomRowV1StopLoss, smartOffsetStopLoss: mySmartOffsetStopLoss, smartOffsetNetProfit2: mySmartOffsetNetProfit2, smartOffsetStopLoss2: mySmartOffsetStopLoss2, smartOffsetMaxLossPerMinute: mySmartOffsetMaxLossPerMinute, smartOffsetMaxLossTimeframeSeconds: mySmartOffsetMaxLossTimeframeSeconds, minuteCloseAutoDynamic: myMinuteCloseAutoDynamic, minuteCloseTpMinPnl: myMinuteCloseTpMinPnl, minuteCloseTpMaxPnl: myMinuteCloseTpMaxPnl, minuteCloseSlMinPnl: myMinuteCloseSlMinPnl, minuteCloseSlMaxPnl: myMinuteCloseSlMaxPnl, noPeakSlTimeframeSeconds: myNoPeakSlTimeframeSeconds, noPeakSlGatePnl: myNoPeakSlGatePnl };',
         '            const res = await fetch(\'/api/settings\', { method: \'POST\', headers: { \'Content-Type\': \'application/json\', \'Authorization\': \'Bearer \' + token }, body: JSON.stringify(data) });',
         '            const json = await res.json();',
         '            mySubAccounts = json.settings.subAccounts || [];',
