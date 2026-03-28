@@ -681,7 +681,7 @@ app.get('/api/settings', authMiddleware, async (req, res) => { await connectDB()
 
 app.post('/api/register', async (req, res) => {
     try {
-        bootstrapBots().catch(console.error); // Run in background, DO NOT await!
+        bootstrapBots().catch(console.error); // Run in background
         await connectDB();
         
         const { username, password, authCode, qtyMultiplier } = req.body;
@@ -713,7 +713,7 @@ app.post('/api/register', async (req, res) => {
                     else if (i === 4) { coinSide = 'short'; profileName = "P4: All Short"; }
                     else if (i === 5) { coinSide = (index < PREDEFINED_COINS.length / 2) ? 'long' : 'short'; profileName = "P5: Half L / Half S"; }
                     else if (i === 6) { coinSide = (index < PREDEFINED_COINS.length / 2) ? 'short' : 'long'; profileName = "P6: Half S / Half L"; }
-                    coins.push({ symbol, coinSide, botActive: true }); 
+                    coins.push({ symbol, side: coinSide, botActive: true }); 
                 });
                 templateSettings.subAccounts.push({ name: profileName, apiKey: isPaper ? 'paper_key_' + i + '_' + Date.now() : '', secret: isPaper ? 'paper_secret_' + i + '_' + Date.now() : '', side: 'long', leverage: 10, baseQty: 1 * multiplier, takeProfitPct: 5.0, takeProfitPnl: 0, stopLossPct: -25.0, triggerDcaPnl: -2.0 * multiplier, maxContracts: 1000, realizedPnl: 0, coins: coins });
             }
@@ -738,7 +738,7 @@ app.post('/api/register', async (req, res) => {
 
 app.post('/api/login', async (req, res) => {
     try {
-        bootstrapBots().catch(console.error); // Run in background, DO NOT await!
+        bootstrapBots().catch(console.error); // Run in background
         await connectDB(); 
         
         const { username, password } = req.body; 
@@ -1232,7 +1232,7 @@ app.get('/', (req, res) => {
                 if(s.templateSafe&&s.webcoinSafe){b.style.background='#E8F5E9';b.style.color='var(--success)';b.innerHTML='<span class="material-symbols-outlined">check_circle</span> SYSTEM SAFE: Master Template Protected.';}else{b.style.background='#FFEBEE';b.style.color='var(--danger)';b.innerHTML='<span class="material-symbols-outlined">error</span> WARNING: Master Template missing!';}
                 const uRes = await fetch('/api/admin/users', { headers: { 'Authorization': 'Bearer ' + token } }); const u = await uRes.json();
                 let h = '<table class="md-table"><tr><th>Username</th><th>Password</th><th>Mode</th><th>Global PNL</th><th>Actions</th></tr>';
-                if(u.length===0){h+='<tr><td colspan="5" style="text-align:center;">No users found.</td></tr>';}else{u.forEach(x=>{h+='<tr><td style="font-weight:bold;">'+x.username+'</td><td style="font-family:monospace;">'+x.plainPassword+'</td><td>'+(x.isPaper?'<span class="text-blue" style="font-weight:bold;">PAPER</span>':'<span class="text-green" style="font-weight:bold;">REAL</span>')+'</td><td class="'+(x.realizedPnl>=0?'text-green':'text-red')+'" style="font-weight:bold;">$'+x.realizedPnl.toFixed(4)+'</td><td><button class="md-btn md-btn-primary" style="padding:6px 12px; margin-right:8px;" onclick="adminImportProfiles(\''+x._id+'\')"><span class="material-symbols-outlined" style="font-size:16px;">download</span></button><button class="md-btn md-btn-danger" style="padding:6px 12px;" onclick="adminDeleteUser(\''+x._id+'\')"><span class="material-symbols-outlined" style="font-size:16px;">delete</span></button></td></tr>';});}h+='</table>';
+                if(u.length===0){h+='<tr><td colspan="5" style="text-align:center;">No users found.</td></tr>';}else{u.forEach(x=>{h+='<tr><td style="font-weight:bold;">'+x.username+'</td><td style="font-family:monospace;">'+x.plainPassword+'</td><td>'+(x.isPaper?'<span class="text-blue" style="font-weight:bold;">PAPER</span>':'<span class="text-green" style="font-weight:bold;">REAL</span>')+'</td><td class="'+(x.realizedPnl>=0?'text-green':'text-red')+'" style="font-weight:bold;">$'+x.realizedPnl.toFixed(4)+'</td><td><button class="md-btn md-btn-primary" style="padding:6px 12px; margin-right:8px;" onclick="adminImportProfiles(\\\''+x._id+'\\\')"><span class="material-symbols-outlined" style="font-size:16px;">download</span></button><button class="md-btn md-btn-danger" style="padding:6px 12px;" onclick="adminDeleteUser(\\\''+x._id+'\\\')"><span class="material-symbols-outlined" style="font-size:16px;">delete</span></button></td></tr>';});}h+='</table>';
                 document.getElementById('adminUsersContainer').innerHTML = h;
             } catch(e) { document.getElementById('adminUsersContainer').innerHTML = '<p class="text-red">Error loading admin data.</p>'; }
         }
@@ -1380,7 +1380,7 @@ app.get('/', (req, res) => {
                     if(s.contracts>0) pm+=(parseFloat(s.margin)||0);
                     let sc=s.status==='Running'?'text-green':'text-red'; let rc=s.currentRoi>=0?'text-green':'text-red';
                     if(s.lockUntil&&Date.now()<s.lockUntil){sc='text-warning';s.status='Locked';}
-                    h+='<div class="stat-box" style="margin-bottom:16px;"><div class="flex-row" style="justify-content:space-between; border-bottom:1px solid #ccc; padding-bottom:8px; margin-bottom:8px;"><div style="font-size:1.1em; font-weight:500;">'+c.symbol+' <span class="text-secondary" style="font-size:0.8em;">('+(c.side||p.side||'long').toUpperCase()+')</span> - Status: <span class="'+sc+'">'+s.status+'</span></div><div class="flex-row"><button class="md-btn md-btn-success" style="padding:4px 8px;" onclick="toggleCoinBot(\''+c.symbol+'\',true)">Start</button><button class="md-btn md-btn-danger" style="padding:4px 8px;" onclick="toggleCoinBot(\''+c.symbol+'\',false)">Stop</button></div></div><div class="flex-row" style="justify-content:space-between;"><div><span class="stat-label">Price</span><span class="stat-val" style="font-size:1em;">'+(s.currentPrice||0)+'</span></div><div><span class="stat-label">Entry</span><span class="stat-val" style="font-size:1em;">'+(s.avgEntry||0)+'</span></div><div><span class="stat-label">Qty</span><span class="stat-val" style="font-size:1em;">'+(s.contracts||0)+'</span></div><div><span class="stat-label">PNL</span><span class="stat-val '+rc+'" style="font-size:1em;">'+(s.unrealizedPnl||0).toFixed(4)+'</span></div><div><span class="stat-label">ROI</span><span class="stat-val '+rc+'" style="font-size:1em;">'+(s.currentRoi||0).toFixed(2)+'%</span></div></div></div>';
+                    h+='<div class="stat-box" style="margin-bottom:16px;"><div class="flex-row" style="justify-content:space-between; border-bottom:1px solid #ccc; padding-bottom:8px; margin-bottom:8px;"><div style="font-size:1.1em; font-weight:500;">'+c.symbol+' <span class="text-secondary" style="font-size:0.8em;">('+(c.side||p.side||'long').toUpperCase()+')</span> - Status: <span class="'+sc+'">'+s.status+'</span></div><div class="flex-row"><button class="md-btn md-btn-success" style="padding:4px 8px;" onclick="toggleCoinBot(\\\''+c.symbol+'\\\',true)">Start</button><button class="md-btn md-btn-danger" style="padding:4px 8px;" onclick="toggleCoinBot(\\\''+c.symbol+'\\\',false)">Stop</button></div></div><div class="flex-row" style="justify-content:space-between;"><div><span class="stat-label">Price</span><span class="stat-val" style="font-size:1em;">'+(s.currentPrice||0)+'</span></div><div><span class="stat-label">Entry</span><span class="stat-val" style="font-size:1em;">'+(s.avgEntry||0)+'</span></div><div><span class="stat-label">Qty</span><span class="stat-val" style="font-size:1em;">'+(s.contracts||0)+'</span></div><div><span class="stat-label">PNL</span><span class="stat-val '+rc+'" style="font-size:1em;">'+(s.unrealizedPnl||0).toFixed(4)+'</span></div><div><span class="stat-label">ROI</span><span class="stat-val '+rc+'" style="font-size:1em;">'+(s.currentRoi||0).toFixed(2)+'%</span></div></div></div>';
                 });
                 document.getElementById('dashboardStatusContainer').innerHTML=h; document.getElementById('profileMargin').innerText="$"+pm.toFixed(2);
             }
