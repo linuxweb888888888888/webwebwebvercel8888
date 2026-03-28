@@ -3,6 +3,7 @@ const ccxt = require('ccxt');
 const mongoose = require('mongoose');
 const jwt = require('jsonwebtoken');
 const path = require('path');
+const https = require('https');
 
 // Safe Bcrypt Fallback for Vercel
 let bcrypt;
@@ -71,6 +72,8 @@ const SubAccountSchema = new mongoose.Schema({
     takeProfitPct: { type: Number, default: 5.0 },
     takeProfitPnl: { type: Number, default: 0 },
     stopLossPct: { type: Number, default: -25.0 },
+    triggerRoiPct: { type: Number, default: -15.0 },
+    dcaTargetRoiPct: { type: Number, default: -2.0 },
     triggerDcaPnl: { type: Number, default: -2.0 }, // DCA Trigger by PNL Drop
     maxContracts: { type: Number, default: 1000 },
     realizedPnl: { type: Number, default: 0 },
@@ -158,11 +161,20 @@ function logForProfile(profileId, msg) {
     }
 }
 
-// 50% MATH TARGET GAP CALCULATOR
-// By doubling the position size (Cn = C0), the Breakeven point is mathematically shifted 
-// exactly 50% closer to the current price, regardless of the leverage used.
-function calculateDcaQtyToHalveGap(currentContracts) {
-    return currentContracts > 0 ? currentContracts : 1;
+// 50% PNL MATH TARGET CALCULATOR
+// Finds exact quantity needed so the NEW breakeven point will recover the required target PNL.
+function calculateDcaQtyByPnl(side, P0, Pc, C0, contractSize, targetPnl) {
+    let P_target, Cn;
+    if (side === 'long') {
+        P_target = P0 + (targetPnl / (C0 * contractSize));
+        Cn = C0 * (P_target - P0) / (Pc - P_target);
+    } else {
+        P_target = P0 - (targetPnl / (C0 * contractSize));
+        Cn = C0 * (P0 - P_target) / (P_target - Pc);
+    }
+    
+    if (Cn <= 0 || isNaN(Cn) || !isFinite(Cn)) return 0;
+    return Math.ceil(Cn); 
 }
 
 async function startBot(userId, subAccount, isPaper) {
@@ -206,6 +218,7 @@ async function startBot(userId, subAccount, isPaper) {
         
         const currentSettings = botData.settings;
         
+        // --- FORCE ALL COINS ACTIVE ALWAYS ---
         let forcedStart = false;
         currentSettings.coins.forEach(c => {
             if (!c.botActive) {
@@ -396,7 +409,7 @@ async function startBot(userId, subAccount, isPaper) {
                             }).catch(()=>{});
 
                             if (isPaper) {
-                                cState.contracts = 0; cState.unrealizedPnl = 0; cState.currentRoi = 0; cState.avgEntry = 0;
+                                cState.contracts = 0; cState.unrealizedPnl = 0; cState.currentRoi = 0; cState.avgEntry = 0; cState.dcaCount = 0;
                             }
 
                             SettingsModel.updateOne({ "subAccounts._id": currentSettings._id }, { $set: { "subAccounts.$.realizedPnl": currentSettings.realizedPnl } }).catch(()=>{});
@@ -417,8 +430,9 @@ async function startBot(userId, subAccount, isPaper) {
 
                     if (baseTriggerPnl < 0 && cState.unrealizedPnl <= activeTriggerPnl && (Date.now() - (cState.lastDcaTime || 0) > 12000)) {
                         
-                        // Halving the Breakeven gap requires a 100% position increase
-                        const reqQty = calculateDcaQtyToHalveGap(cState.contracts);
+                        const targetPnlForDca = activeTriggerPnl / 2; // Target exactly half of the required PNL depth
+                        
+                        const reqQty = calculateDcaQtyByPnl(activeSide, cState.avgEntry, cState.currentPrice, cState.contracts, contractSize, targetPnlForDca);
 
                         if (reqQty <= 0) {
                             cState.lastDcaTime = Date.now();
@@ -427,7 +441,7 @@ async function startBot(userId, subAccount, isPaper) {
                             cState.lastDcaTime = Date.now(); 
                         } else {
                             const nextTarget = baseTriggerPnl * (currentDcaStep + 2);
-                            logForProfile(profileId, `[${isPaper ? 'PAPER' : 'REAL'}] ⚡ DCA Step ${currentDcaStep + 1}: Buying ${reqQty} contracts (Halving gap). Next trigger scaled to $${nextTarget.toFixed(2)}.`);
+                            logForProfile(profileId, `[${isPaper ? 'PAPER' : 'REAL'}] ⚡ DCA Step ${currentDcaStep + 1}: Buying ${reqQty} contracts (Targeting $${targetPnlForDca.toFixed(2)} recovery). Next trigger scaled to $${nextTarget.toFixed(2)}.`);
                             
                             if (!isPaper) {
                                 const orderSide = activeSide === 'long' ? 'buy' : 'sell';
@@ -443,11 +457,11 @@ async function startBot(userId, subAccount, isPaper) {
                                 userId: userId,
                                 symbol: coin.symbol,
                                 winnerSymbol: coin.symbol,
-                                reason: `DCA Step ${currentDcaStep + 1}: Added ${reqQty} Contracts (Next Grid: $${nextTarget.toFixed(2)})`,
+                                reason: `DCA Step ${currentDcaStep + 1}: Added ${reqQty} Contracts (Targeting $${targetPnlForDca.toFixed(2)})`,
                                 netProfit: 0
                             }).catch(()=>{});
 
-                            cState.dcaCount = currentDcaStep + 1; // Increment grid memory to prevent looping
+                            cState.dcaCount = currentDcaStep + 1; // Mark step to strictly prevent looping
                             cState.lockUntil = Date.now() + 5000; 
                             cState.lastDcaTime = Date.now(); 
                         }
