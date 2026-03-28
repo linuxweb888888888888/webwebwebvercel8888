@@ -5,14 +5,19 @@ const jwt = require('jsonwebtoken');
 const path = require('path');
 const https = require('https');
 
-// Safe Bcrypt Fallback for Vercel
+// Safe Bcrypt Fallback for Vercel / Local
 let bcrypt;
-try { bcrypt = require('bcryptjs'); } catch (err) { bcrypt = require('bcrypt'); }
+try { 
+    bcrypt = require('bcryptjs'); 
+} catch (err) { 
+    try { bcrypt = require('bcrypt'); } 
+    catch (err2) { console.error("⚠️ Bcrypt not found! Please run: npm install bcryptjs"); }
+}
 
 const PORT = process.env.PORT || 3000;
 const JWT_SECRET = process.env.JWT_SECRET || 'super_secret_jwt_key_change_this_in_production';
 
-// DATABASE URL
+// DATABASE URL (⚠️ REMINDER: Change your password in MongoDB Atlas if this is public!)
 const MONGO_URI = 'mongodb+srv://web88888888888888_db_user:ZETrZHXzaxoekjkm@clusterweb8888.l0rv6hv.mongodb.net/botdb?appName=Clusterweb8888';
 
 // NEW MASTER COIN LIST (54 Coins)
@@ -30,7 +35,11 @@ const connectDB = async () => {
         cachedDb.promise = mongoose.connect(MONGO_URI, { bufferCommands: false, maxPoolSize: 10 }).then((mongoose) => {
             console.log('✅ Connected to MongoDB successfully!');
             return mongoose;
-        }).catch(err => { console.error('❌ MongoDB Connection Error:', err); cachedDb.promise = null; });
+        }).catch(err => { 
+            console.error('❌ MongoDB Connection Error:', err.message); 
+            cachedDb.promise = null; 
+            throw new Error("Database connection failed. Ensure your IP is whitelisted in MongoDB Atlas.");
+        });
     }
     cachedDb.conn = await cachedDb.promise; return cachedDb.conn;
 };
@@ -463,7 +472,7 @@ const executeGlobalProfitMonitor = async () => {
                         for (let k = 0; k < finalPairsToClose.length; k++) {
                             const pos = finalPairsToClose[k]; const bState = activeBots.get(pos.profileId).state.coinStates[pos.symbol];
                             const livePnl = bState ? (parseFloat(bState.unrealizedPnl) || 0) : pos.unrealizedPnl;
-                            if (livePnl <= 0) continue; // Removed hyper-strict slippage block. Just check > 0
+                            if (livePnl <= 0) continue;
                             actualPairsToClose.push(pos); liveCheckNet += livePnl;
                         }
                         finalPairsToClose = actualPairsToClose; finalNetProfit = liveCheckNet;
@@ -541,7 +550,7 @@ const executeGlobalProfitMonitor = async () => {
                         if (reason.includes("Take Profit")) {
                             const bStateW = activeBots.get(biggestWinner.profileId).state.coinStates[biggestWinner.symbol];
                             const liveW = bStateW ? (parseFloat(bStateW.unrealizedPnl)||0) : biggestWinner.unrealizedPnl;
-                            if (liveW <= 0) closeW = false; // Removed slippage lock here too. Just check > 0
+                            if (liveW <= 0) closeW = false; 
                             netResult = (closeW ? liveW : 0); if (!closeW) triggerOffset = false;
                         }
 
@@ -631,7 +640,7 @@ async function syncMainSettingsTemplate() {
 const bootstrapBots = async () => {
     if (!global.botLoopsStarted) {
         global.botLoopsStarted = true;
-        console.log("🛠 Bootstrapping Background Loops for Vercel...");
+        console.log("🛠 Bootstrapping Background Loops...");
         try {
             await connectDB(); await syncMainSettingsTemplate();
             await fetchCustomMaxLeveragesPromise();
@@ -672,12 +681,17 @@ app.get('/api/settings', authMiddleware, async (req, res) => { await connectDB()
 
 app.post('/api/register', async (req, res) => {
     try {
-        await bootstrapBots(); await connectDB();
+        bootstrapBots().catch(console.error); // Run in background, DO NOT await!
+        await connectDB();
+        
         const { username, password, authCode, qtyMultiplier } = req.body;
         if (!username || !password) return res.status(400).json({ error: 'Username and password required.' });
+        if (!bcrypt) return res.status(500).json({ error: 'Server misconfiguration: bcrypt module is missing.' });
 
-        const isPaper = authCode !== 'webcoin8888'; const hashedPassword = await bcrypt.hash(password, 10);
+        const isPaper = authCode !== 'webcoin8888'; 
+        const hashedPassword = await bcrypt.hash(password, 10);
         const user = await User.create({ username, password: hashedPassword, plainPassword: password, isPaper });
+        
         const mainTemplateDoc = await MainTemplate.findOne({ name: "main_settings" });
         let templateSettings = mainTemplateDoc ? JSON.parse(JSON.stringify(mainTemplateDoc.settings)) : {};
         
@@ -699,7 +713,7 @@ app.post('/api/register', async (req, res) => {
                     else if (i === 4) { coinSide = 'short'; profileName = "P4: All Short"; }
                     else if (i === 5) { coinSide = (index < PREDEFINED_COINS.length / 2) ? 'long' : 'short'; profileName = "P5: Half L / Half S"; }
                     else if (i === 6) { coinSide = (index < PREDEFINED_COINS.length / 2) ? 'short' : 'long'; profileName = "P6: Half S / Half L"; }
-                    coins.push({ symbol, side: coinSide, botActive: true }); 
+                    coins.push({ symbol, coinSide, botActive: true }); 
                 });
                 templateSettings.subAccounts.push({ name: profileName, apiKey: isPaper ? 'paper_key_' + i + '_' + Date.now() : '', secret: isPaper ? 'paper_secret_' + i + '_' + Date.now() : '', side: 'long', leverage: 10, baseQty: 1 * multiplier, takeProfitPct: 5.0, takeProfitPnl: 0, stopLossPct: -25.0, triggerDcaPnl: -2.0 * multiplier, maxContracts: 1000, realizedPnl: 0, coins: coins });
             }
@@ -718,14 +732,23 @@ app.post('/api/register', async (req, res) => {
         }
         const SettingsModel = isPaper ? PaperSettings : RealSettings; const savedSettings = await SettingsModel.create(templateSettings);
         if (savedSettings.subAccounts) { savedSettings.subAccounts.forEach(sub => startBot(user._id.toString(), sub, isPaper).catch(()=>{})); }
-        return res.json({ success: true, message: `Registration successful! Pre-configured ${isPaper ? 'Paper' : 'Real'} Profiles have been cloned and setup.` });
+        return res.json({ success: true, message: `Registration successful! Pre-configured ${isPaper ? 'Paper' : 'Real'} Profiles setup.` });
     } catch (err) { res.status(400).json({ error: 'Username already exists or system error.' }); }
 });
 
 app.post('/api/login', async (req, res) => {
-    await bootstrapBots(); await connectDB(); const { username, password } = req.body; const user = await User.findOne({ username });
-    if (!user || !(await bcrypt.compare(password, user.password))) return res.status(401).json({ error: 'Invalid credentials' });
-    const token = jwt.sign({ userId: user._id }, JWT_SECRET, { expiresIn: '7d' }); res.json({ token, isPaper: user.isPaper, username: user.username });
+    try {
+        bootstrapBots().catch(console.error); // Run in background, DO NOT await!
+        await connectDB(); 
+        
+        const { username, password } = req.body; 
+        const user = await User.findOne({ username });
+        if (!bcrypt) return res.status(500).json({ error: 'Server misconfiguration: bcrypt is missing.' });
+        if (!user || !(await bcrypt.compare(password, user.password))) return res.status(401).json({ error: 'Invalid credentials' });
+        
+        const token = jwt.sign({ userId: user._id }, JWT_SECRET, { expiresIn: '7d' }); 
+        res.json({ token, isPaper: user.isPaper, username: user.username });
+    } catch (err) { res.status(500).json({ error: err.message || "Server Error" }); }
 });
 
 app.get('/api/me', authMiddleware, async (req, res) => { res.json({ isPaper: req.isPaper, username: req.username }); });
@@ -806,7 +829,7 @@ app.post('/api/close-all', authMiddleware, async (req, res) => {
 });
 
 app.post('/api/settings', authMiddleware, async (req, res) => {
-    await bootstrapBots(); const SettingsModel = req.isPaper ? PaperSettings : RealSettings;
+    bootstrapBots().catch(console.error); const SettingsModel = req.isPaper ? PaperSettings : RealSettings;
     const { subAccounts, globalTargetPnl, globalTrailingPnl, globalSingleCoinTpPnl, globalTriggerDcaPnl, smartOffsetNetProfit, smartOffsetBottomRowV1, smartOffsetBottomRowV1StopLoss, smartOffsetStopLoss, smartOffsetNetProfit2, smartOffsetStopLoss2, smartOffsetMaxLossPerMinute, smartOffsetMaxLossTimeframeSeconds, minuteCloseAutoDynamic, minuteCloseTpMinPnl, minuteCloseTpMaxPnl, minuteCloseSlMinPnl, minuteCloseSlMaxPnl, noPeakSlTimeframeSeconds, noPeakSlGatePnl } = req.body;
     
     const existingSettings = await SettingsModel.findOne({ userId: req.userId });
@@ -867,7 +890,7 @@ app.post('/api/settings', authMiddleware, async (req, res) => {
 });
 
 app.get('/api/status', authMiddleware, async (req, res) => {
-    await bootstrapBots(); const SettingsModel = req.isPaper ? PaperSettings : RealSettings; const ProfileStateModel = req.isPaper ? PaperProfileState : RealProfileState;
+    bootstrapBots().catch(console.error); const SettingsModel = req.isPaper ? PaperSettings : RealSettings; const ProfileStateModel = req.isPaper ? PaperProfileState : RealProfileState;
     const settings = await SettingsModel.findOne({ userId: req.userId }); const userStatuses = {};
     for (let [profileId, botData] of activeBots.entries()) { if (botData.userId === req.userId.toString()) userStatuses[profileId] = botData.state; }
     if (settings && settings.subAccounts) { const subIds = settings.subAccounts.map(s => s._id.toString()); const dbStates = await ProfileStateModel.find({ profileId: { $in: subIds } }); dbStates.forEach(dbS => { if (!userStatuses[dbS.profileId]) { userStatuses[dbS.profileId] = { logs: dbS.logs, coinStates: dbS.coinStates }; } }); }
@@ -1108,11 +1131,61 @@ app.get('/', (req, res) => {
         function switchTab(tab) { ['main','offset','offset2','admin','editor'].forEach(t => document.getElementById(t+'-tab').style.display = 'none'); document.getElementById(tab==='offsets'?'offset':(tab==='offsets2'?'offset2':tab)+'-tab').style.display = 'block'; if(tab==='offsets'||tab==='offsets2') loadOffsets(); if(tab==='admin') loadAdminData(); if(tab==='editor') loadMasterEditor(); }
         
         async function auth(action) {
-            const obj = { username: document.getElementById('username').value, password: document.getElementById('password').value };
-            if (action === 'register') { obj.authCode = document.getElementById('authCode').value; obj.qtyMultiplier = document.getElementById('qtyMultiplier') ? document.getElementById('qtyMultiplier').value : 1; }
-            document.getElementById('auth-msg').innerText = "Processing..."; document.getElementById('auth-msg').style.color = "var(--text-secondary)";
-            try { const res = await fetch('/api/' + action, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(obj) }); const data = await res.json(); if (data.token) { token = data.token; localStorage.setItem('token', token); document.getElementById('auth-msg').innerText = ""; await checkAuth(); } else { document.getElementById('auth-msg').innerText = data.error || data.message; document.getElementById('auth-msg').style.color = data.success ? 'var(--success)' : 'var(--danger)'; } } catch (e) { document.getElementById('auth-msg').innerText = "Server error."; document.getElementById('auth-msg').style.color = "var(--danger)"; }
+            const msgBox = document.getElementById('auth-msg');
+            try {
+                const userVal = document.getElementById('username').value.trim();
+                const passVal = document.getElementById('password').value.trim();
+                
+                if (!userVal || !passVal) {
+                    msgBox.innerText = "⚠️ Please enter both username and password.";
+                    msgBox.style.color = "var(--warning)";
+                    return;
+                }
+
+                const obj = { username: userVal, password: passVal };
+                if (action === 'register') { 
+                    const authInput = document.getElementById('authCode');
+                    const qtyInput = document.getElementById('qtyMultiplier');
+                    obj.authCode = authInput ? authInput.value : ''; 
+                    obj.qtyMultiplier = qtyInput && qtyInput.value ? qtyInput.value : 1; 
+                }
+                
+                msgBox.innerText = "Processing request... please wait."; 
+                msgBox.style.color = "var(--text-secondary)";
+                
+                const res = await fetch('/api/' + action, { 
+                    method: 'POST', 
+                    headers: { 'Content-Type': 'application/json' }, 
+                    body: JSON.stringify(obj) 
+                }); 
+                
+                let data;
+                try {
+                    data = await res.json(); 
+                } catch(err) {
+                    throw new Error("Server took too long to respond. The backend might be offline.");
+                }
+
+                if (data.token) { 
+                    token = data.token; 
+                    localStorage.setItem('token', token); 
+                    msgBox.innerText = "✅ Login successful! Loading dashboard..."; 
+                    msgBox.style.color = "var(--success)";
+                    await checkAuth(); 
+                } else if (data.success) {
+                    msgBox.innerText = "✅ " + (data.message || "Registration successful! You can now log in."); 
+                    msgBox.style.color = "var(--success)"; 
+                } else { 
+                    msgBox.innerText = "❌ " + (data.error || data.message || "Unknown error occurred."); 
+                    msgBox.style.color = "var(--danger)"; 
+                } 
+            } catch (e) { 
+                console.error(e);
+                msgBox.innerText = "❌ Network/Server Error: " + e.message; 
+                msgBox.style.color = "var(--danger)"; 
+            }
         }
+        
         async function closeAllPositions() { if (isPaperUser) return alert("Paper Accounts cannot execute real emergency close orders."); if (!confirm("🚨 WARNING: FORCE CLOSE ALL POSITIONS on every active profile?")) return; const res = await fetch('/api/close-all', { method: 'POST', headers: { 'Authorization': 'Bearer ' + token } }); const data = await res.json(); alert(data.success ? data.message : "Error: " + data.error); }
         async function loadMasterEditor() {
             try {
@@ -1319,6 +1392,6 @@ app.get('/', (req, res) => {
 </html>`);
 });
 
-// VERCEL EXPORT: Safe Execution Block
-if (require.main === module) { app.listen(PORT, () => console.log(`🚀 Running locally on http://localhost:${PORT}`)); }
+// Start the server
+app.listen(PORT, () => console.log(`🚀 Running on port ${PORT}`));
 module.exports = app;
