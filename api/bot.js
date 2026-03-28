@@ -589,10 +589,7 @@ function stopBot(profileId) {
         console.log(`[Profile: ${profileId}] ⏹ Bot Stopped.`);
     }
 }
-```
 
-### Part 2 (Paste this immediately beneath Part 1)
-```javascript
 // =========================================================================
 // 4. BACKGROUND TASKS (DUAL-MODE)
 // =========================================================================
