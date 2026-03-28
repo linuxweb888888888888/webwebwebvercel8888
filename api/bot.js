@@ -227,15 +227,6 @@ app.get('/api/admin/editor-data', authMw, adminMw, async (req, res) => { res.jso
 app.post('/api/settings', authMw, async (req, res) => { const Model = req.isPaper ? PaperSettings : RealSettings; const updated = await Model.findOneAndUpdate({ userId: req.userId }, { $set: req.body }, { returnDocument: 'after', upsert: true }); res.json({ success: true, settings: updated }); });
 app.post('/api/master/global', authMw, adminMw, async (req, res) => { res.json({ success: true, message: "Saved" }); });
 app.post('/api/master/profile/:index', authMw, adminMw, async (req, res) => { res.json({ success: true, message: "Saved" }); });
-PART 2: Frontend UI & Start Script
-
-Paste this part directly below Part 1 in the same file. Notice that I fixed the quote escaping so you will no longer get unexpected token: string literal errors!
-
-code
-JavaScript
-download
-content_copy
-expand_less
 // ==========================================
 // 7. FRONTEND UI (MATERIAL DESIGN)
 // ==========================================
