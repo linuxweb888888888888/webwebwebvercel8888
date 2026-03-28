@@ -3,7 +3,6 @@ const ccxt = require('ccxt');
 const mongoose = require('mongoose');
 const jwt = require('jsonwebtoken');
 const path = require('path');
-const https = require('https');
 
 // Safe Bcrypt Fallback for Vercel
 let bcrypt;
@@ -72,8 +71,7 @@ const SubAccountSchema = new mongoose.Schema({
     takeProfitPct: { type: Number, default: 5.0 },
     takeProfitPnl: { type: Number, default: 0 },
     stopLossPct: { type: Number, default: -25.0 },
-    triggerRoiPct: { type: Number, default: -15.0 },
-    dcaTargetRoiPct: { type: Number, default: -2.0 },
+    triggerDcaPnl: { type: Number, default: -2.0 }, // NEW: DCA Trigger by PNL
     maxContracts: { type: Number, default: 1000 },
     realizedPnl: { type: Number, default: 0 },
     coins: [CoinSettingSchema]
@@ -84,7 +82,7 @@ const SettingsSchema = new mongoose.Schema({
     qtyMultiplier: { type: Number, default: 1 },
     globalTargetPnl: { type: Number, default: 0 },       
     globalTrailingPnl: { type: Number, default: 0 },   
-    globalSingleCoinTpPnl: { type: Number, default: 0 }, // NEW GLOBAL SETTING
+    globalSingleCoinTpPnl: { type: Number, default: 0 }, 
     smartOffsetNetProfit: { type: Number, default: 0 },
     smartOffsetBottomRowV1: { type: Number, default: 5 }, 
     smartOffsetBottomRowV1StopLoss: { type: Number, default: 0 }, 
@@ -159,16 +157,17 @@ function logForProfile(profileId, msg) {
     }
 }
 
-function calculateDcaQty(side, P0, Pc, C0, leverage, targetRoiPct) {
-    const R = targetRoiPct / 100;
-    let Pnew, Cn;
+// NEW PNL-BASED DCA MATH: Targets a new breakeven price equivalent to hitting 'targetPnl'
+function calculateDcaQtyByPnl(side, P0, Pc, C0, contractSize, targetPnl) {
+    let P_target, Cn;
     if (side === 'long') {
-        Pnew = Pc / (1 + (R / leverage));
-        Cn = C0 * (P0 - Pnew) / (Pnew - Pc);
+        P_target = P0 + (targetPnl / (C0 * contractSize));
+        Cn = C0 * (P_target - P0) / (Pc - P_target);
     } else {
-        Pnew = Pc / (1 - (R / leverage));
-        Cn = C0 * (Pnew - P0) / (Pc - Pnew);
+        P_target = P0 - (targetPnl / (C0 * contractSize));
+        Cn = C0 * (P0 - P_target) / (P_target - Pc);
     }
+    
     if (Cn <= 0 || isNaN(Cn) || !isFinite(Cn)) return 0;
     return Math.ceil(Cn); 
 }
@@ -336,7 +335,6 @@ async function startBot(userId, subAccount, isPaper) {
                             cState.margin = (cState.avgEntry * cState.contracts * contractSize) / activeLeverage;
                         }
 
-                        // PRECISE EXCHANGE LOG: Opening Position
                         const OffsetModel = isPaper ? PaperOffsetRecord : RealOffsetRecord;
                         OffsetModel.create({
                             userId: userId,
@@ -413,9 +411,13 @@ async function startBot(userId, subAccount, isPaper) {
                         }
                     }
 
-                    // 3. DCA TRIGGER
-                    if (cState.currentRoi <= currentSettings.triggerRoiPct && (Date.now() - (cState.lastDcaTime || 0) > 12000)) {
-                        const reqQty = calculateDcaQty(activeSide, cState.avgEntry, cState.currentPrice, cState.contracts, activeLeverage, currentSettings.dcaTargetRoiPct);
+                    // 3. DCA PNL TRIGGER (Math target = 50% recovery)
+                    const triggerPnlTarget = parseFloat(currentSettings.triggerDcaPnl) || -2.0;
+
+                    if (triggerPnlTarget < 0 && cState.unrealizedPnl <= triggerPnlTarget && (Date.now() - (cState.lastDcaTime || 0) > 12000)) {
+                        
+                        const targetPnlForDca = triggerPnlTarget / 2; // Auto-target exactly half the PNL
+                        const reqQty = calculateDcaQtyByPnl(activeSide, cState.avgEntry, cState.currentPrice, cState.contracts, contractSize, targetPnlForDca);
 
                         if (reqQty <= 0) {
                             cState.lastDcaTime = Date.now();
@@ -423,7 +425,7 @@ async function startBot(userId, subAccount, isPaper) {
                             logForProfile(profileId, `[${isPaper ? 'PAPER' : 'REAL'}] 🛡️ DCA Safety Triggered. Max contracts reached.`);
                             cState.lastDcaTime = Date.now(); 
                         } else {
-                            logForProfile(profileId, `[${isPaper ? 'PAPER' : 'REAL'}] ⚡ Executing DCA: Buying ${reqQty} contracts at ~${cState.currentPrice}`);
+                            logForProfile(profileId, `[${isPaper ? 'PAPER' : 'REAL'}] ⚡ Executing DCA on PNL drop to $${cState.unrealizedPnl.toFixed(4)}. Buying ${reqQty} contracts (Targeting $${targetPnlForDca.toFixed(4)} recovery).`);
                             
                             if (!isPaper) {
                                 const orderSide = activeSide === 'long' ? 'buy' : 'sell';
@@ -434,13 +436,12 @@ async function startBot(userId, subAccount, isPaper) {
                                 cState.avgEntry = totalValue / cState.contracts;
                             }
 
-                            // PRECISE EXCHANGE LOG: DCA Addition
                             const OffsetModel = isPaper ? PaperOffsetRecord : RealOffsetRecord;
                             OffsetModel.create({
                                 userId: userId,
                                 symbol: coin.symbol,
                                 winnerSymbol: coin.symbol,
-                                reason: `DCA Added ${reqQty} Contracts (ROI dropped to ${currentSettings.triggerRoiPct}%)`,
+                                reason: `DCA Added ${reqQty} Contracts (PNL Drop below $${triggerPnlTarget.toFixed(2)})`,
                                 netProfit: 0
                             }).catch(()=>{});
 
@@ -1179,72 +1180,6 @@ app.get('/api/ping', async (req, res) => {
     res.status(200).json({ success: true, message: 'Bot is awake', timestamp: new Date().toISOString(), activeProfiles: activeBots.size });
 });
 
-// ELEVENLABS PROXY (KEEPS API KEY SAFE)
-app.post('/api/tts', authMiddleware, (req, res) => {
-    try {
-        if (!req.body.text) return res.status(400).json({ error: "No text provided" });
-
-        const ELEVENLABS_API_KEY = 'sk_791cb61d631f20abdcf8d560dd2d442260d9943aae2b30a2';
-        
-        // "Sarah" - Precise, Clear, Natural Female Voice (Works perfectly on Free Tier)
-        const VOICE_ID = 'EXAVITQu4vr4xnSDxMaL'; 
-
-        const payload = JSON.stringify({
-            text: req.body.text,
-            model_id: 'eleven_multilingual_v2',
-            voice_settings: { stability: 0.5, similarity_boost: 0.75 }
-        });
-
-        const options = {
-            hostname: 'api.elevenlabs.io',
-            path: `/v1/text-to-speech/${VOICE_ID}`,
-            method: 'POST',
-            headers: {
-                'xi-api-key': ELEVENLABS_API_KEY,
-                'Content-Type': 'application/json',
-                'Accept': 'audio/mpeg',
-                'Content-Length': Buffer.byteLength(payload)
-            }
-        };
-
-        // Streaming Request fixes Vercel Node issues and Memory limits
-        const request = https.request(options, (response) => {
-            if (response.statusCode !== 200) {
-                let errorData = '';
-                response.on('data', chunk => errorData += chunk);
-                response.on('end', () => {
-                    console.error('ElevenLabs API Error:', response.statusCode, errorData);
-                    let errMsg = 'Status ' + response.statusCode;
-                    try {
-                        const parsed = JSON.parse(errorData);
-                        if (parsed.detail && parsed.detail.status === 'quota_exceeded') {
-                            errMsg = 'API Quota Exceeded (Out of Characters). You need a new API key.';
-                        } else if (parsed.detail && parsed.detail.message) {
-                            errMsg = parsed.detail.message;
-                        }
-                    } catch(e) {}
-                    res.status(500).json({ error: errMsg });
-                });
-                return;
-            }
-
-            res.set('Content-Type', 'audio/mpeg');
-            response.pipe(res);
-        });
-
-        request.on('error', (e) => {
-            console.error('TTS Request Error:', e);
-            res.status(500).json({ error: 'Network error reaching ElevenLabs: ' + e.message });
-        });
-
-        request.write(payload);
-        request.end();
-    } catch (err) {
-        console.error('TTS Proxy Error:', err);
-        res.status(500).json({ error: 'Internal TTS Proxy Error: ' + err.message });
-    }
-});
-
 app.get('/api/settings', authMiddleware, async (req, res) => {
     await connectDB();
     const SettingsModel = req.isPaper ? PaperSettings : RealSettings;
@@ -1313,8 +1248,7 @@ app.post('/api/register', async (req, res) => {
                     takeProfitPct: 5.0,
                     takeProfitPnl: 0,
                     stopLossPct: -25.0,
-                    triggerRoiPct: -15.0,
-                    dcaTargetRoiPct: -2.0,
+                    triggerDcaPnl: -2.0 * multiplier,
                     maxContracts: 1000,
                     realizedPnl: 0,
                     coins: coins
@@ -1325,6 +1259,7 @@ app.post('/api/register', async (req, res) => {
                 delete sub._id;
                 sub.realizedPnl = 0;
                 sub.baseQty = (sub.baseQty !== undefined ? sub.baseQty : 1) * multiplier;
+                sub.triggerDcaPnl = sub.triggerDcaPnl !== undefined ? sub.triggerDcaPnl : -2.0 * multiplier;
                 if (isPaper) { sub.apiKey = 'paper_key_' + i + '_' + Date.now(); sub.secret = 'paper_secret_' + i + '_' + Date.now(); }
                 if (sub.coins) { sub.coins = sub.coins.map(c => { delete c._id; c.botActive = c.botActive !== undefined ? c.botActive : true; return c; }); }
                 return sub;
@@ -1394,8 +1329,9 @@ app.post('/api/admin/users/:id/import', authMiddleware, adminMiddleware, async (
         return {
             name: masterSub.name, apiKey: apiKey, secret: secret, side: masterSub.side || 'long', leverage: masterSub.leverage !== undefined ? masterSub.leverage : 10,
             baseQty: (masterSub.baseQty !== undefined ? masterSub.baseQty : 1) * mult, takeProfitPct: masterSub.takeProfitPct !== undefined ? masterSub.takeProfitPct : 5.0, takeProfitPnl: masterSub.takeProfitPnl !== undefined ? masterSub.takeProfitPnl : 0,
-            stopLossPct: masterSub.stopLossPct !== undefined ? masterSub.stopLossPct : -25.0, triggerRoiPct: masterSub.triggerRoiPct !== undefined ? masterSub.triggerRoiPct : -15.0,
-            dcaTargetRoiPct: masterSub.dcaTargetRoiPct !== undefined ? masterSub.dcaTargetRoiPct : -2.0, maxContracts: masterSub.maxContracts !== undefined ? masterSub.maxContracts : 1000,
+            stopLossPct: masterSub.stopLossPct !== undefined ? masterSub.stopLossPct : -25.0, 
+            triggerDcaPnl: masterSub.triggerDcaPnl !== undefined ? masterSub.triggerDcaPnl : -2.0, 
+            maxContracts: masterSub.maxContracts !== undefined ? masterSub.maxContracts : 1000,
             realizedPnl: existingSub ? (existingSub.realizedPnl || 0) : 0, coins: (masterSub.coins || []).map(c => ({ symbol: c.symbol, side: c.side, botActive: c.botActive !== undefined ? c.botActive : true }))
         };
     });
@@ -1488,8 +1424,7 @@ app.post('/api/settings', authMiddleware, async (req, res) => {
     }
 
     subAccounts.forEach(sub => {
-        if (sub.triggerRoiPct > 0) sub.triggerRoiPct = -sub.triggerRoiPct;
-        if (sub.dcaTargetRoiPct > 0) sub.dcaTargetRoiPct = -sub.dcaTargetRoiPct;
+        if (sub.triggerDcaPnl > 0) sub.triggerDcaPnl = -sub.triggerDcaPnl;
         if (sub.stopLossPct > 0) sub.stopLossPct = -sub.stopLossPct;
         if (sub.takeProfitPnl === undefined) sub.takeProfitPnl = 0;
         sub.leverage = 10; 
@@ -1591,7 +1526,7 @@ app.post('/api/settings', authMiddleware, async (req, res) => {
                     const newSub = {
                         name: masterSub.name, apiKey: existingUserSub.apiKey || '', secret: existingUserSub.secret || '', side: masterSub.side,
                         leverage: masterSub.leverage, baseQty: (masterSub.baseQty || 1) * mult, takeProfitPct: masterSub.takeProfitPct, takeProfitPnl: masterSub.takeProfitPnl, stopLossPct: masterSub.stopLossPct,
-                        triggerRoiPct: masterSub.triggerRoiPct, dcaTargetRoiPct: masterSub.dcaTargetRoiPct, maxContracts: masterSub.maxContracts,
+                        triggerDcaPnl: masterSub.triggerDcaPnl, maxContracts: masterSub.maxContracts,
                         realizedPnl: existingUserSub.realizedPnl || 0, coins: masterSub.coins.map(c => ({ symbol: c.symbol, side: c.side, botActive: c.botActive !== undefined ? c.botActive : true }))
                     };
                     if (existingUserSub._id) newSub._id = existingUserSub._id;
@@ -1656,10 +1591,7 @@ app.get('/api/status', authMiddleware, async (req, res) => {
         currentMinuteLoss = arr.reduce((sum, r) => sum + r.amount, 0);
     }
 
-    // Pass the most recent offsets to the frontend for TTS
-    const recentOffsets = await OffsetModel.find({ userId: req.userId }).sort({ timestamp: -1 }).limit(5);
-
-    res.json({ states: userStatuses, subAccounts: settings ? settings.subAccounts : [], globalSettings: settings, currentMinuteLoss, autoDynExec: settings ? settings.autoDynamicLastExecution : null, recentOffsets });
+    res.json({ states: userStatuses, subAccounts: settings ? settings.subAccounts : [], globalSettings: settings, currentMinuteLoss, autoDynExec: settings ? settings.autoDynamicLastExecution : null });
 });
 
 app.get('/api/offsets', authMiddleware, async (req, res) => {
@@ -1819,7 +1751,6 @@ app.get('/', (req, res) => {
         '                <button class="md-btn md-btn-text nav-btn" id="nav-main" onclick="switchTab(\'main\')"><span class="material-symbols-outlined">dashboard</span> Dashboard</button>',
         '                <button class="md-btn md-btn-text nav-btn" id="nav-offsets" onclick="switchTab(\'offsets\')"><span class="material-symbols-outlined">call_merge</span> V1 Offsets</button>',
         '                <button class="md-btn md-btn-text nav-btn" id="nav-offsets2" onclick="switchTab(\'offsets2\')"><span class="material-symbols-outlined">alt_route</span> V2 Offsets</button>',
-        '                <button class="md-btn md-btn-text" id="audioToggle" onclick="toggleAudio()"><span class="material-symbols-outlined" id="audioIcon">volume_off</span> Audio Alerts</button>',
         '                <button class="md-btn md-btn-text" style="color:var(--text-secondary);" onclick="logout()"><span class="material-symbols-outlined">logout</span> Logout</button>',
         '            </div>',
         '        </div>',
@@ -1857,7 +1788,6 @@ app.get('/', (req, res) => {
         '                <div class="md-card">',
         '                    <h2 class="md-card-header text-green" style="justify-content:space-between; width:100%;">',
         '                        <span><span class="material-symbols-outlined">history</span> Executed Trade History</span>',
-        '                        <button class="md-btn md-btn-text" onclick="speakLatestTrade()"><span class="material-symbols-outlined">play_circle</span> Listen to Latest</button>',
         '                    </h2>',
         '                    <div id="offsetTableContainer">Loading historical offset data...</div>',
         '                </div>',
@@ -1883,7 +1813,6 @@ app.get('/', (req, res) => {
         '                <div class="md-card">',
         '                    <h2 class="md-card-header text-green" style="justify-content:space-between; width:100%;">',
         '                        <span><span class="material-symbols-outlined">history</span> Executed Trade History</span>',
-        '                        <button class="md-btn md-btn-text" onclick="speakLatestTrade()"><span class="material-symbols-outlined">play_circle</span> Listen to Latest</button>',
         '                    </h2>',
         '                    <div id="offsetTableContainer2">Loading historical offset data...</div>',
         '                </div>',
@@ -1992,10 +1921,13 @@ app.get('/', (req, res) => {
         '                            </div>',
         '                            <div class="flex-row">',
         '                                <div style="flex:1"><label>Stop Loss (%)</label><input type="number" step="0.1" id="stopLossPct"></div>',
-        '                                <div style="flex:1"><label>Trigger DCA (%)</label><input type="number" step="0.1" id="triggerRoiPct"></div>',
+        '                                <div style="flex:1">',
+        '                                    <label>Trigger DCA PNL ($)</label>',
+        '                                    <input type="number" step="0.0001" id="triggerDcaPnl" placeholder="e.g. -2.00">',
+        '                                    <p style="font-size:0.7em; margin-top:2px;">(Targets 50% recovery of this value)</p>',
+        '                                </div>',
         '                            </div>',
         '                            <div class="flex-row">',
-        '                                <div style="flex:1"><label>Math Target ROI (%)</label><input type="number" step="0.1" id="dcaTargetRoiPct"></div>',
         '                                <div style="flex:1"><label>Max Safety Contracts</label><input type="number" id="maxContracts"></div>',
         '                            </div>',
         '                            <h3 style="margin-top:30px;"><span class="material-symbols-outlined" style="vertical-align:middle;">toll</span> Coins Configuration</h3>',
@@ -2055,62 +1987,6 @@ app.get('/', (req, res) => {
         '        let myNoPeakSlGatePnl = 0;',
         '        let currentProfileIndex = -1;',
         '        let myCoins = [];',
-        '        let audioEnabled = false;',
-        '        let seenOffsets = new Set();',
-        '        let isFirstLoad = true;',
-        '        let latestTradeToSpeak = "No trades have been executed yet.";',
-        '        let audioQueue = [];',
-        '        let isPlayingAudio = false;',
-        '        async function processAudioQueue() {',
-        '            if (isPlayingAudio || audioQueue.length === 0) return;',
-        '            isPlayingAudio = true;',
-        '            const textToSpeak = audioQueue.shift();',
-        '            if (!textToSpeak || textToSpeak.trim() === "") { isPlayingAudio = false; processAudioQueue(); return; }',
-        '            try {',
-        '                const res = await fetch(\'/api/tts\', {',
-        '                    method: \'POST\',',
-        '                    headers: { ',
-        '                        \'Content-Type\': \'application/json\',',
-        '                        \'Authorization\': \'Bearer \' + token',
-        '                    },',
-        '                    body: JSON.stringify({ text: textToSpeak })',
-        '                });',
-        '                if (res.ok) {',
-        '                    const blob = await res.blob();',
-        '                    const audioUrl = URL.createObjectURL(blob);',
-        '                    const audio = new Audio(audioUrl);',
-        '                    audio.onended = () => { isPlayingAudio = false; processAudioQueue(); };',
-        '                    audio.onerror = (e) => { console.error("Audio Playback Error:", e); isPlayingAudio = false; processAudioQueue(); };',
-        '                    audio.play().catch(err => { console.error("Browser blocked audio:", err); isPlayingAudio = false; processAudioQueue(); });',
-        '                } else {',
-        '                    let errMsg = "Unknown Error";',
-        '                    try {',
-        '                        const errData = await res.json();',
-        '                        errMsg = errData.error || errMsg;',
-        '                    } catch(e) { errMsg = "Server responded with 500"; }',
-        '                    alert("ElevenLabs TTS Error: " + errMsg);',
-        '                    isPlayingAudio = false; processAudioQueue(); ',
-        '                }',
-        '            } catch (e) { console.error(\'TTS Network Error:\', e); alert("TTS Request failed. Check server logs."); isPlayingAudio = false; processAudioQueue(); }',
-        '        }',
-        '        function toggleAudio() {',
-        '            audioEnabled = !audioEnabled;',
-        '            document.getElementById(\'audioIcon\').innerText = audioEnabled ? \'volume_up\' : \'volume_off\';',
-        '            if (audioEnabled) { audioQueue.push("Audio alerts enabled."); processAudioQueue(); }',
-        '        }',
-        '        function speakText(text) {',
-        '            if (!audioEnabled) return;',
-        '            let cleanText = text.replace(/[🛒⚡🛑🔥⚠️⚖️📈🌍❌🔄🛡️]/g, \'\');',
-        '            audioQueue.push(cleanText);',
-        '            processAudioQueue();',
-        '        }',
-        '        function speakLatestTrade() {',
-        '            if (!audioEnabled) {',
-        '                audioEnabled = true;',
-        '                document.getElementById(\'audioIcon\').innerText = \'volume_up\';',
-        '            }',
-        '            speakText(latestTradeToSpeak);',
-        '        }',
         '        const PREDEFINED_COINS = ["TON", "AXS", "APT", "FIL", "ETHFI", "BERA", "MASK", "TIA", "DASH", "GIGGLE", "BSV", "OP", "TAO", "SSV", "YFI"];',
         '        async function checkAuth() {',
         '            if (statusInterval) { clearInterval(statusInterval); statusInterval = null; }',
@@ -2233,8 +2109,8 @@ app.get('/', (req, res) => {
         '                        profilesHtml += \'<div class="stat-box" style="margin-bottom: 24px; border: 1px solid var(--primary); background: #fff;">\';',
         '                        profilesHtml += \'<div style="background: #e8f0fe; padding: 12px 16px; margin: -16px -16px 16px -16px; border-bottom: 1px solid var(--primary); color: var(--primary); display:flex; justify-content:space-between; font-weight:bold; border-radius: 6px 6px 0 0;"><span>\' + (i + 1) + \'. \' + sub.name + \'</span><span>Default Side: \' + (sub.side || \'long\').toUpperCase() + \'</span></div>\';',
         '                        profilesHtml += \'<div class="flex-row" style="margin-bottom: 16px;"><div class="flex-1"><label style="margin-top:0;">API Key</label><input type="text" id="p_\' + i + \'_apiKey" value="\' + (sub.apiKey || \'\') + \'"></div><div class="flex-1"><label style="margin-top:0;">Secret Key</label><input type="text" id="p_\' + i + \'_secret" value="\' + (sub.secret || \'\') + \'"></div></div>\';',
-        '                        profilesHtml += \'<div style="overflow-x:auto;"><table class="md-table" style="margin-bottom: 16px;"><tr><th>Base Qty</th><th>Take Profit %</th><th class="text-green">Single Coin TP PNL ($)</th><th>Stop Loss %</th><th>DCA Trigger %</th><th>Target ROI %</th><th>Max Contracts</th></tr>\';',
-        '                        profilesHtml += \'<tr><td><input type="number" step="1" id="p_\' + i + \'_baseQty" value="\' + (sub.baseQty !== undefined ? sub.baseQty : 1) + \'"></td><td><input type="number" step="0.1" id="p_\' + i + \'_takeProfitPct" value="\' + (sub.takeProfitPct !== undefined ? sub.takeProfitPct : 5.0) + \'"></td><td><input type="number" step="0.0001" id="p_\' + i + \'_takeProfitPnl" value="\' + (sub.takeProfitPnl !== undefined ? sub.takeProfitPnl : 0) + \'"></td><td><input type="number" step="0.1" id="p_\' + i + \'_stopLossPct" value="\' + (sub.stopLossPct !== undefined ? sub.stopLossPct : -25.0) + \'"></td><td><input type="number" step="0.1" id="p_\' + i + \'_triggerRoiPct" value="\' + (sub.triggerRoiPct !== undefined ? sub.triggerRoiPct : -15.0) + \'"></td><td><input type="number" step="0.1" id="p_\' + i + \'_dcaTargetRoiPct" value="\' + (sub.dcaTargetRoiPct !== undefined ? sub.dcaTargetRoiPct : -2.0) + \'"></td><td><input type="number" step="1" id="p_\' + i + \'_maxContracts" value="\' + (sub.maxContracts !== undefined ? sub.maxContracts : 1000) + \'"></td></tr></table></div>\';',
+        '                        profilesHtml += \'<div style="overflow-x:auto;"><table class="md-table" style="margin-bottom: 16px;"><tr><th>Base Qty</th><th>Take Profit %</th><th class="text-green">Single Coin TP PNL ($)</th><th>Stop Loss %</th><th>Trigger DCA PNL ($)</th><th>Max Contracts</th></tr>\';',
+        '                        profilesHtml += \'<tr><td><input type="number" step="1" id="p_\' + i + \'_baseQty" value="\' + (sub.baseQty !== undefined ? sub.baseQty : 1) + \'"></td><td><input type="number" step="0.1" id="p_\' + i + \'_takeProfitPct" value="\' + (sub.takeProfitPct !== undefined ? sub.takeProfitPct : 5.0) + \'"></td><td><input type="number" step="0.0001" id="p_\' + i + \'_takeProfitPnl" value="\' + (sub.takeProfitPnl !== undefined ? sub.takeProfitPnl : 0) + \'"></td><td><input type="number" step="0.1" id="p_\' + i + \'_stopLossPct" value="\' + (sub.stopLossPct !== undefined ? sub.stopLossPct : -25.0) + \'"></td><td><input type="number" step="0.0001" id="p_\' + i + \'_triggerDcaPnl" value="\' + (sub.triggerDcaPnl !== undefined ? sub.triggerDcaPnl : -2.0) + \'"></td><td><input type="number" step="1" id="p_\' + i + \'_maxContracts" value="\' + (sub.maxContracts !== undefined ? sub.maxContracts : 1000) + \'"></td></tr></table></div>\';',
         '                        profilesHtml += \'<p style="margin-bottom: 8px;"><strong>Active Coins Trading (\' + activeCoins.length + \'):</strong></p><div style="margin-bottom: 16px;">\' + (coinHtml || \'<span class="text-secondary">No active coins</span>\') + \'</div>\';',
         '                        profilesHtml += \'<button type="button" class="md-btn md-btn-success" onclick="saveMasterProfile(\' + i + \')"><span class="material-symbols-outlined">done</span> Save Profile \' + (i + 1) + \'</button><div id="p_\' + i + \'_msg" style="margin-top: 8px; font-weight: bold;"></div></div>\';',
         '                    });',
@@ -2273,8 +2149,7 @@ app.get('/', (req, res) => {
         '                takeProfitPct: document.getElementById(\'p_\' + index + \'_takeProfitPct\').value !== \'\' ? parseFloat(document.getElementById(\'p_\' + index + \'_takeProfitPct\').value) : 5.0,',
         '                takeProfitPnl: document.getElementById(\'p_\' + index + \'_takeProfitPnl\').value !== \'\' ? parseFloat(document.getElementById(\'p_\' + index + \'_takeProfitPnl\').value) : 0,',
         '                stopLossPct: document.getElementById(\'p_\' + index + \'_stopLossPct\').value !== \'\' ? parseFloat(document.getElementById(\'p_\' + index + \'_stopLossPct\').value) : -25.0,',
-        '                triggerRoiPct: document.getElementById(\'p_\' + index + \'_triggerRoiPct\').value !== \'\' ? parseFloat(document.getElementById(\'p_\' + index + \'_triggerRoiPct\').value) : -15.0,',
-        '                dcaTargetRoiPct: document.getElementById(\'p_\' + index + \'_dcaTargetRoiPct\').value !== \'\' ? parseFloat(document.getElementById(\'p_\' + index + \'_dcaTargetRoiPct\').value) : -2.0,',
+        '                triggerDcaPnl: document.getElementById(\'p_\' + index + \'_triggerDcaPnl\').value !== \'\' ? parseFloat(document.getElementById(\'p_\' + index + \'_triggerDcaPnl\').value) : -2.0,',
         '                maxContracts: document.getElementById(\'p_\' + index + \'_maxContracts\').value !== \'\' ? parseInt(document.getElementById(\'p_\' + index + \'_maxContracts\').value) : 1000',
         '            };',
         '            const msgDiv = document.getElementById(\'p_\' + index + \'_msg\');',
@@ -2416,7 +2291,7 @@ app.get('/', (req, res) => {
         '            const key = document.getElementById(\'newSubKey\').value.trim();',
         '            const secret = document.getElementById(\'newSubSecret\').value.trim();',
         '            if(!name || !key || !secret) return alert("Fill all fields!");',
-        '            mySubAccounts.push({ name, apiKey: key, secret: secret, side: \'long\', leverage: 10, baseQty: 1, takeProfitPct: 5.0, takeProfitPnl: 0, stopLossPct: -25.0, triggerRoiPct: -15.0, dcaTargetRoiPct: -2.0, maxContracts: 1000, realizedPnl: 0, coins: [] });',
+        '            mySubAccounts.push({ name, apiKey: key, secret: secret, side: \'long\', leverage: 10, baseQty: 1, takeProfitPct: 5.0, takeProfitPnl: 0, stopLossPct: -25.0, triggerDcaPnl: -2.0, maxContracts: 1000, realizedPnl: 0, coins: [] });',
         '            await saveSettings(true);',
         '            document.getElementById(\'newSubName\').value = \'\'; document.getElementById(\'newSubKey\').value = \'\'; document.getElementById(\'newSubSecret\').value = \'\';',
         '            renderSubAccounts();',
@@ -2440,8 +2315,7 @@ app.get('/', (req, res) => {
         '                document.getElementById(\'takeProfitPct\').value = profile.takeProfitPct !== undefined ? profile.takeProfitPct : 5.0;',
         '                document.getElementById(\'takeProfitPnl\').value = profile.takeProfitPnl !== undefined ? profile.takeProfitPnl : 0;',
         '                document.getElementById(\'stopLossPct\').value = profile.stopLossPct !== undefined ? profile.stopLossPct : -25.0; ',
-        '                document.getElementById(\'triggerRoiPct\').value = profile.triggerRoiPct !== undefined ? profile.triggerRoiPct : -15.0;',
-        '                document.getElementById(\'dcaTargetRoiPct\').value = profile.dcaTargetRoiPct !== undefined ? profile.dcaTargetRoiPct : -2.0;',
+        '                document.getElementById(\'triggerDcaPnl\').value = profile.triggerDcaPnl !== undefined ? profile.triggerDcaPnl : -2.0;',
         '                document.getElementById(\'maxContracts\').value = profile.maxContracts !== undefined ? profile.maxContracts : 1000;',
         '                myCoins = profile.coins || [];',
         '                renderCoinsSettings();',
@@ -2516,8 +2390,7 @@ app.get('/', (req, res) => {
         '            profile.takeProfitPct = document.getElementById(\'takeProfitPct\').value !== \'\' ? parseFloat(document.getElementById(\'takeProfitPct\').value) : 5.0;',
         '            profile.takeProfitPnl = document.getElementById(\'takeProfitPnl\').value !== \'\' ? parseFloat(document.getElementById(\'takeProfitPnl\').value) : 0;',
         '            profile.stopLossPct = document.getElementById(\'stopLossPct\').value !== \'\' ? parseFloat(document.getElementById(\'stopLossPct\').value) : -25.0;',
-        '            profile.triggerRoiPct = document.getElementById(\'triggerRoiPct\').value !== \'\' ? parseFloat(document.getElementById(\'triggerRoiPct\').value) : -15.0;',
-        '            profile.dcaTargetRoiPct = document.getElementById(\'dcaTargetRoiPct\').value !== \'\' ? parseFloat(document.getElementById(\'dcaTargetRoiPct\').value) : -2.0;',
+        '            profile.triggerDcaPnl = document.getElementById(\'triggerDcaPnl\').value !== \'\' ? parseFloat(document.getElementById(\'triggerDcaPnl\').value) : -2.0;',
         '            profile.maxContracts = document.getElementById(\'maxContracts\').value !== \'\' ? parseInt(document.getElementById(\'maxContracts\').value) : 1000;',
         '            profile.coins = myCoins;',
         '            const data = { subAccounts: mySubAccounts, globalTargetPnl: myGlobalTargetPnl, globalTrailingPnl: myGlobalTrailingPnl, globalSingleCoinTpPnl: myGlobalSingleCoinTpPnl, smartOffsetNetProfit: mySmartOffsetNetProfit, smartOffsetBottomRowV1: mySmartOffsetBottomRowV1, smartOffsetBottomRowV1StopLoss: mySmartOffsetBottomRowV1StopLoss, smartOffsetStopLoss: mySmartOffsetStopLoss, smartOffsetNetProfit2: mySmartOffsetNetProfit2, smartOffsetStopLoss2: mySmartOffsetStopLoss2, smartOffsetMaxLossPerMinute: mySmartOffsetMaxLossPerMinute, smartOffsetMaxLossTimeframeSeconds: mySmartOffsetMaxLossTimeframeSeconds, minuteCloseAutoDynamic: myMinuteCloseAutoDynamic, minuteCloseTpMinPnl: myMinuteCloseTpMinPnl, minuteCloseTpMaxPnl: myMinuteCloseTpMaxPnl, minuteCloseSlMinPnl: myMinuteCloseSlMinPnl, minuteCloseSlMaxPnl: myMinuteCloseSlMaxPnl, noPeakSlTimeframeSeconds: myNoPeakSlTimeframeSeconds, noPeakSlGatePnl: myNoPeakSlGatePnl };',
@@ -2589,32 +2462,6 @@ app.get('/', (req, res) => {
         '                    }',
         '                }',
         '            }',
-        '            if (data.recentOffsets && data.recentOffsets.length > 0) {',
-        '                const latestOffset = data.recentOffsets[0];',
-        '                const symLatest = latestOffset.symbol ? latestOffset.symbol.replace(\'/USDT:USDT\', \'\') : \'Unknown Pair\';',
-        '                const netLatest = parseFloat(latestOffset.netProfit) || 0;',
-        '                const pWordLatest = netLatest >= 0 ? "profit" : "loss";',
-        '                const cleanReasonLatest = latestOffset.reason ? latestOffset.reason.replace(/\\([^)]+\\)/g, \'\').trim() : \'\';',
-        '                let textToAssign = \'Trade event on \' + symLatest + \'. \' + cleanReasonLatest + \'.\';',
-        '                if (netLatest !== 0) textToAssign += \' Net \' + pWordLatest + \' of \' + Math.abs(netLatest).toFixed(4) + \' dollars.\';',
-        '                latestTradeToSpeak = textToAssign;',
-        '                for (let i = data.recentOffsets.length - 1; i >= 0; i--) {',
-        '                    const offset = data.recentOffsets[i];',
-        '                    if (!seenOffsets.has(offset._id)) {',
-        '                        seenOffsets.add(offset._id);',
-        '                        if (!isFirstLoad) {',
-        '                            const loopSym = offset.symbol ? offset.symbol.replace(\'/USDT:USDT\', \'\') : \'Unknown Pair\';',
-        '                            const loopNet = parseFloat(offset.netProfit) || 0;',
-        '                            const loopPWord = loopNet >= 0 ? "profit" : "loss";',
-        '                            const loopReason = offset.reason ? offset.reason.replace(/\\([^)]+\\)/g, \'\').trim() : \'\';',
-        '                            let loopText = \'Trade event on \' + loopSym + \'. \' + loopReason + \'.\';',
-        '                            if (loopNet !== 0) loopText += \' Net \' + loopPWord + \' of \' + Math.abs(loopNet).toFixed(4) + \' dollars.\';',
-        '                            speakText(loopText);',
-        '                        }',
-        '                    }',
-        '                }',
-        '            } else if (isFirstLoad) { latestTradeToSpeak = "No trades have been executed yet."; }',
-        '            if (isFirstLoad) isFirstLoad = false;',
         '            document.getElementById(\'topGlobalMargin\').innerText = "$" + globalMarginUsed.toFixed(2);',
         '            const timeframeSec = globalSet.smartOffsetMaxLossTimeframeSeconds !== undefined ? globalSet.smartOffsetMaxLossTimeframeSeconds : 60;',
         '            const maxLossPerMin = globalSet.smartOffsetMaxLossPerMinute || 0;',
