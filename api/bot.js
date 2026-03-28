@@ -1,14 +1,3 @@
-Here is the completely updated code. I have implemented a **Custom Live Leverage Oracle** that completely bypasses CCXT’s reported max leverage. 
-
-### How it works:
-1. When the server boots, it queries the native HTX Public API endpoint (`swap_cross_adjustfactor`) to fetch the **exact maximum allowed leverage tier** directly from the exchange for every single coin.
-2. It stores these maximums in a global memory cache (e.g., BTC=125, ETH=100, OP=75, SOL=50).
-3. The engine dynamically injects this custom maximum leverage into **all open, close, DCA, and Smart Offset orders** dynamically per coin.
-4. I have updated the front-end UI to show **"MAX (Custom)"** so you know the engine is automatically maximizing the leverage behind the scenes.
-
-Copy and paste this entire block over your `server.js` file:
-
-```javascript
 const express = require('express');
 const ccxt = require('ccxt');
 const mongoose = require('mongoose');
