@@ -3,7 +3,6 @@ const ccxt = require('ccxt');
 const mongoose = require('mongoose');
 const jwt = require('jsonwebtoken');
 const path = require('path');
-const https = require('https');
 
 // Safe Bcrypt Fallback for Vercel
 let bcrypt;
@@ -72,9 +71,7 @@ const SubAccountSchema = new mongoose.Schema({
     takeProfitPct: { type: Number, default: 5.0 },
     takeProfitPnl: { type: Number, default: 0 },
     stopLossPct: { type: Number, default: -25.0 },
-    triggerRoiPct: { type: Number, default: -15.0 },
-    dcaTargetRoiPct: { type: Number, default: -2.0 },
-    triggerDcaPnl: { type: Number, default: -2.0 },
+    triggerDcaPnl: { type: Number, default: -2.0 }, // DCA Trigger by PNL Drop
     maxContracts: { type: Number, default: 1000 },
     realizedPnl: { type: Number, default: 0 },
     coins: [CoinSettingSchema]
@@ -86,7 +83,7 @@ const SettingsSchema = new mongoose.Schema({
     globalTargetPnl: { type: Number, default: 0 },       
     globalTrailingPnl: { type: Number, default: 0 },   
     globalSingleCoinTpPnl: { type: Number, default: 0 }, 
-    globalTriggerDcaPnl: { type: Number, default: 0 }, // NEW GLOBAL SETTING
+    globalTriggerDcaPnl: { type: Number, default: 0 }, // Global Override
     smartOffsetNetProfit: { type: Number, default: 0 },
     smartOffsetBottomRowV1: { type: Number, default: 5 }, 
     smartOffsetBottomRowV1StopLoss: { type: Number, default: 0 }, 
@@ -161,19 +158,11 @@ function logForProfile(profileId, msg) {
     }
 }
 
-// NEW PNL-BASED DCA MATH: Targets a new breakeven price equivalent to hitting 'targetPnl'
-function calculateDcaQtyByPnl(side, P0, Pc, C0, contractSize, targetPnl) {
-    let P_target, Cn;
-    if (side === 'long') {
-        P_target = P0 + (targetPnl / (C0 * contractSize));
-        Cn = C0 * (P_target - P0) / (Pc - P_target);
-    } else {
-        P_target = P0 - (targetPnl / (C0 * contractSize));
-        Cn = C0 * (P0 - P_target) / (P_target - Pc);
-    }
-    
-    if (Cn <= 0 || isNaN(Cn) || !isFinite(Cn)) return 0;
-    return Math.ceil(Cn); 
+// 50% MATH TARGET GAP CALCULATOR
+// By doubling the position size (Cn = C0), the Breakeven point is mathematically shifted 
+// exactly 50% closer to the current price, regardless of the leverage used.
+function calculateDcaQtyToHalveGap(currentContracts) {
+    return currentContracts > 0 ? currentContracts : 1;
 }
 
 async function startBot(userId, subAccount, isPaper) {
@@ -217,7 +206,6 @@ async function startBot(userId, subAccount, isPaper) {
         
         const currentSettings = botData.settings;
         
-        // --- FORCE ALL COINS ACTIVE ALWAYS ---
         let forcedStart = false;
         currentSettings.coins.forEach(c => {
             if (!c.botActive) {
@@ -264,7 +252,8 @@ async function startBot(userId, subAccount, isPaper) {
                     const contractSize = (market && market.contractSize) ? market.contractSize : 1;
 
                     if (!state.coinStates[coin.symbol]) {
-                        state.coinStates[coin.symbol] = { status: 'Running', currentPrice: 0, avgEntry: 0, contracts: 0, currentRoi: 0, unrealizedPnl: 0, margin: 0, lastDcaTime: 0, lockUntil: 0 };
+                        // Added dcaCount to strictly prevent infinite loops on static PNLs
+                        state.coinStates[coin.symbol] = { status: 'Running', currentPrice: 0, avgEntry: 0, contracts: 0, currentRoi: 0, unrealizedPnl: 0, margin: 0, lastDcaTime: 0, lockUntil: 0, dcaCount: 0 };
                     }
 
                     let cState = state.coinStates[coin.symbol];
@@ -282,6 +271,7 @@ async function startBot(userId, subAccount, isPaper) {
                         const pos = positions.find(p => p.symbol === coin.symbol && p.side === activeSide);
                         cState.contracts = pos ? pos.contracts : 0;
                         cState.avgEntry = pos ? pos.entryPrice : 0;
+                        if (cState.contracts === 0) cState.dcaCount = 0; // Reset DCA step on close
                         
                         let grossPnl = 0;
                         if (pos) {
@@ -302,6 +292,7 @@ async function startBot(userId, subAccount, isPaper) {
                         cState.currentRoi = (cState.margin > 0 && cState.contracts > 0) ? (cState.unrealizedPnl / cState.margin) * 100 : 0; 
                         cState.status = cState.contracts > 0 ? 'In Position' : 'Waiting to Enter';
                     } else {
+                        if (cState.contracts === 0) cState.dcaCount = 0; // Reset DCA step on close
                         cState.status = cState.contracts > 0 ? 'In Position' : 'Waiting to Enter';
                         if (cState.contracts > 0) {
                             let margin = (cState.avgEntry * cState.contracts * contractSize) / activeLeverage;
@@ -392,6 +383,7 @@ async function startBot(userId, subAccount, isPaper) {
                             }
 
                             cState.lockUntil = Date.now() + 5000;
+                            cState.dcaCount = 0; // Wipe step memory
                             currentSettings.realizedPnl = (currentSettings.realizedPnl || 0) + currentPnl;
                             
                             const OffsetModel = isPaper ? PaperOffsetRecord : RealOffsetRecord;
@@ -415,15 +407,18 @@ async function startBot(userId, subAccount, isPaper) {
                         }
                     }
 
-                    // 3. DCA PNL TRIGGER (Math target = 50% recovery)
+                    // 3. DCA PNL STEP GRID TRIGGER (Prevents Infinite Looping)
                     const globalTriggerDcaTarget = parseFloat(botData.globalSettings?.globalTriggerDcaPnl) || 0;
                     const profileTriggerDcaTarget = parseFloat(currentSettings.triggerDcaPnl) || -2.0;
-                    const triggerPnlTarget = globalTriggerDcaTarget < 0 ? globalTriggerDcaTarget : profileTriggerDcaTarget;
+                    const baseTriggerPnl = globalTriggerDcaTarget < 0 ? globalTriggerDcaTarget : profileTriggerDcaTarget;
+                    
+                    const currentDcaStep = cState.dcaCount || 0;
+                    const activeTriggerPnl = baseTriggerPnl * (currentDcaStep + 1); // Step 1: -$2, Step 2: -$4, etc.
 
-                    if (triggerPnlTarget < 0 && cState.unrealizedPnl <= triggerPnlTarget && (Date.now() - (cState.lastDcaTime || 0) > 12000)) {
+                    if (baseTriggerPnl < 0 && cState.unrealizedPnl <= activeTriggerPnl && (Date.now() - (cState.lastDcaTime || 0) > 12000)) {
                         
-                        const targetPnlForDca = triggerPnlTarget / 2; // Auto-target exactly half the PNL
-                        const reqQty = calculateDcaQtyByPnl(activeSide, cState.avgEntry, cState.currentPrice, cState.contracts, contractSize, targetPnlForDca);
+                        // Halving the Breakeven gap requires a 100% position increase
+                        const reqQty = calculateDcaQtyToHalveGap(cState.contracts);
 
                         if (reqQty <= 0) {
                             cState.lastDcaTime = Date.now();
@@ -431,7 +426,8 @@ async function startBot(userId, subAccount, isPaper) {
                             logForProfile(profileId, `[${isPaper ? 'PAPER' : 'REAL'}] 🛡️ DCA Safety Triggered. Max contracts reached.`);
                             cState.lastDcaTime = Date.now(); 
                         } else {
-                            logForProfile(profileId, `[${isPaper ? 'PAPER' : 'REAL'}] ⚡ Executing DCA on PNL drop to $${cState.unrealizedPnl.toFixed(4)}. Buying ${reqQty} contracts (Targeting $${targetPnlForDca.toFixed(4)} recovery).`);
+                            const nextTarget = baseTriggerPnl * (currentDcaStep + 2);
+                            logForProfile(profileId, `[${isPaper ? 'PAPER' : 'REAL'}] ⚡ DCA Step ${currentDcaStep + 1}: Buying ${reqQty} contracts (Halving gap). Next trigger scaled to $${nextTarget.toFixed(2)}.`);
                             
                             if (!isPaper) {
                                 const orderSide = activeSide === 'long' ? 'buy' : 'sell';
@@ -447,10 +443,11 @@ async function startBot(userId, subAccount, isPaper) {
                                 userId: userId,
                                 symbol: coin.symbol,
                                 winnerSymbol: coin.symbol,
-                                reason: `DCA Added ${reqQty} Contracts (PNL Drop below $${triggerPnlTarget.toFixed(2)})`,
+                                reason: `DCA Step ${currentDcaStep + 1}: Added ${reqQty} Contracts (Next Grid: $${nextTarget.toFixed(2)})`,
                                 netProfit: 0
                             }).catch(()=>{});
 
+                            cState.dcaCount = currentDcaStep + 1; // Increment grid memory to prevent looping
                             cState.lockUntil = Date.now() + 5000; 
                             cState.lastDcaTime = Date.now(); 
                         }
@@ -592,10 +589,11 @@ const executeOneMinuteCloser = async () => {
                                     lever_rate: cw.subAccount.leverage || 10 
                                 });
                             } else {
-                                cw.cState.contracts = 0; cw.cState.unrealizedPnl = 0; cw.cState.currentRoi = 0; cw.cState.avgEntry = 0;
+                                cw.cState.contracts = 0; cw.cState.unrealizedPnl = 0; cw.cState.currentRoi = 0; cw.cState.avgEntry = 0; cw.cState.dcaCount = 0;
                             }
                             
                             cw.cState.lockUntil = Date.now() + 5000;
+                            cw.cState.dcaCount = 0;
                             cw.subAccount.realizedPnl = (cw.subAccount.realizedPnl || 0) + cw.pnl;
                             SettingsModel.updateOne({ "subAccounts._id": cw.subAccount._id }, { $set: { "subAccounts.$.realizedPnl": cw.subAccount.realizedPnl } }).catch(()=>{});
                             successCount++;
@@ -863,10 +861,10 @@ const executeGlobalProfitMonitor = async () => {
                                         });
                                     } else {
                                         const bState = bData.state.coinStates[pos.symbol];
-                                        if (bState) { bState.contracts = 0; bState.unrealizedPnl = 0; bState.avgEntry = 0; }
+                                        if (bState) { bState.contracts = 0; bState.unrealizedPnl = 0; bState.avgEntry = 0; bState.dcaCount = 0; }
                                     }
                                     const bState = bData.state.coinStates[pos.symbol];
-                                    if (bState) bState.lockUntil = Date.now() + 5000;
+                                    if (bState) { bState.lockUntil = Date.now() + 5000; bState.dcaCount = 0; }
                                     
                                     if (pos.unrealizedPnl >= 0) totalWinnerPnl += pos.unrealizedPnl;
                                     pos.subAccount.realizedPnl = (pos.subAccount.realizedPnl || 0) + pos.unrealizedPnl;
@@ -971,10 +969,10 @@ const executeGlobalProfitMonitor = async () => {
                                             });
                                         } else {
                                             const bStateW = bData.state.coinStates[biggestWinner.symbol];
-                                            if (bStateW) { bStateW.contracts = 0; bStateW.unrealizedPnl = 0; bStateW.avgEntry = 0; }
+                                            if (bStateW) { bStateW.contracts = 0; bStateW.unrealizedPnl = 0; bStateW.avgEntry = 0; bStateW.dcaCount = 0; }
                                         }
                                         const bStateW = bData.state.coinStates[biggestWinner.symbol];
-                                        if (bStateW) bStateW.lockUntil = Date.now() + 5000;
+                                        if (bStateW) { bStateW.lockUntil = Date.now() + 5000; bStateW.dcaCount = 0; }
                                         
                                         biggestWinner.subAccount.realizedPnl = (biggestWinner.subAccount.realizedPnl || 0) + biggestWinner.unrealizedPnl;
                                         await SettingsModel.updateOne({ "subAccounts._id": biggestWinner.subAccount._id }, { $set: { "subAccounts.$.realizedPnl": biggestWinner.subAccount.realizedPnl } }).catch(()=>{});
@@ -1050,9 +1048,13 @@ const executeGlobalProfitMonitor = async () => {
                                             bData.state.coinStates[pos.symbol].contracts = 0;
                                             bData.state.coinStates[pos.symbol].unrealizedPnl = 0;
                                             bData.state.coinStates[pos.symbol].avgEntry = 0;
+                                            bData.state.coinStates[pos.symbol].dcaCount = 0;
                                         }
                                     }
-                                    if (bData.state.coinStates[pos.symbol]) bData.state.coinStates[pos.symbol].lockUntil = Date.now() + 5000;
+                                    if (bData.state.coinStates[pos.symbol]) {
+                                        bData.state.coinStates[pos.symbol].lockUntil = Date.now() + 5000;
+                                        bData.state.coinStates[pos.symbol].dcaCount = 0;
+                                    }
                                     
                                     pos.subAccount.realizedPnl = (pos.subAccount.realizedPnl || 0) + pos.unrealizedPnl;
                                     await SettingsModel.updateOne({ "subAccounts._id": pos.subAccount._id }, { $set: { "subAccounts.$.realizedPnl": pos.subAccount.realizedPnl } }).catch(()=>{});
