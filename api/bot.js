@@ -1,3 +1,14 @@
+Here is the completely updated code. I have implemented a **Custom Live Leverage Oracle** that completely bypasses CCXT’s reported max leverage. 
+
+### How it works:
+1. When the server boots, it queries the native HTX Public API endpoint (`swap_cross_adjustfactor`) to fetch the **exact maximum allowed leverage tier** directly from the exchange for every single coin.
+2. It stores these maximums in a global memory cache (e.g., BTC=125, ETH=100, OP=75, SOL=50).
+3. The engine dynamically injects this custom maximum leverage into **all open, close, DCA, and Smart Offset orders** dynamically per coin.
+4. I have updated the front-end UI to show **"MAX (Custom)"** so you know the engine is automatically maximizing the leverage behind the scenes.
+
+Copy and paste this entire block over your `server.js` file:
+
+```javascript
 const express = require('express');
 const ccxt = require('ccxt');
 const mongoose = require('mongoose');
@@ -89,7 +100,7 @@ const SettingsSchema = new mongoose.Schema({
     globalTargetPnl: { type: Number, default: 0 },       
     globalTrailingPnl: { type: Number, default: 0 },   
     globalSingleCoinTpPnl: { type: Number, default: 0 }, 
-    globalTriggerDcaPnl: { type: Number, default: 0 }, // Global Override
+    globalTriggerDcaPnl: { type: Number, default: 0 }, 
     smartOffsetNetProfit: { type: Number, default: 0 },
     smartOffsetBottomRowV1: { type: Number, default: 5 }, 
     smartOffsetBottomRowV1StopLoss: { type: Number, default: 0 }, 
@@ -114,7 +125,6 @@ const SettingsSchema = new mongoose.Schema({
     autoDynamicLastExecution: { type: Object, default: null }
 });
 
-// UNIVERSAL HISTORY SCHEMA
 const OffsetRecordSchema = new mongoose.Schema({
     userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
     symbol: { type: String }, 
@@ -140,7 +150,6 @@ const MainTemplateSchema = new mongoose.Schema({
     settings: { type: Object, required: true }
 });
 
-// MULTI-MODE DB COLLECTIONS
 const RealSettings = mongoose.models.Settings || mongoose.model('Settings', SettingsSchema, 'settings');
 const PaperSettings = mongoose.models.PaperSettings || mongoose.model('PaperSettings', SettingsSchema, 'paper_settings');
 const RealOffsetRecord = mongoose.models.OffsetRecord || mongoose.model('OffsetRecord', OffsetRecordSchema, 'offset_records');
@@ -149,6 +158,67 @@ const RealProfileState = mongoose.models.ProfileState || mongoose.model('Profile
 const PaperProfileState = mongoose.models.PaperProfileState || mongoose.model('PaperProfileState', ProfileStateSchema, 'paper_profile_states');
 const MainTemplate = mongoose.models.MainTemplate || mongoose.model('MainTemplate', MainTemplateSchema, 'main_settings_template');
 
+
+// ==========================================
+// CUSTOM LIVE LEVERAGE CHECK ORACLE
+// ==========================================
+global.customMaxLeverages = {};
+
+function fetchCustomMaxLeveragesPromise() {
+    return new Promise((resolve) => {
+        console.log("🔍 Fetching Custom Max Leverages from HTX Public API...");
+        const req = https.get('https://api.hbdm.com/linear-swap-api/v1/swap_cross_adjustfactor', (res) => {
+            let body = '';
+            res.on('data', chunk => body += chunk);
+            res.on('end', () => {
+                try {
+                    const parsed = JSON.parse(body);
+                    if (parsed && parsed.data) {
+                        parsed.data.forEach(item => {
+                            const symbol = item.contract_code.replace('-', '/') + ':USDT';
+                            let maxL = 1;
+                            if (item.list && item.list.length > 0) {
+                                item.list.forEach(tier => {
+                                    if (tier.lever_rate && tier.lever_rate > maxL) {
+                                        maxL = tier.lever_rate;
+                                    }
+                                });
+                            }
+                            global.customMaxLeverages[symbol] = maxL;
+                        });
+                        console.log(`✅ Custom Max Leverages Synced! (Loaded ${Object.keys(global.customMaxLeverages).length} coins directly from HTX API)`);
+                        if (global.customMaxLeverages['BTC/USDT:USDT']) {
+                            console.log(`👉 Live Verify - BTC Max Leverage: ${global.customMaxLeverages['BTC/USDT:USDT']}x`);
+                        }
+                    }
+                } catch (e) { 
+                    console.error("Leverage Parse Error:", e.message); 
+                }
+                resolve();
+            });
+        });
+        
+        req.on('error', (e) => {
+            console.error("Leverage Req Error:", e.message);
+            resolve(); 
+        });
+        
+        req.setTimeout(10000, () => {
+            req.destroy();
+            resolve();
+        });
+    });
+}
+
+function getLeverageForCoin(symbol) {
+    if (global.customMaxLeverages && global.customMaxLeverages[symbol]) {
+        return global.customMaxLeverages[symbol];
+    }
+    // Deep fallback if the API is unreachable entirely
+    if (symbol.includes('BTC')) return 125;
+    if (symbol.includes('ETH')) return 100;
+    return 20; // General safe default for altcoins
+}
 
 // ==========================================
 // GLOBAL PRICE ORACLE (BINANCE + HTX)
@@ -163,7 +233,6 @@ const htxOracle = new ccxt.htx({ options: { defaultType: 'swap' }, enableRateLim
 function startPriceOracle() {
     console.log("🔮 Starting Global Price Oracle (Binance + HTX)...");
     
-    // Fast Fetch (Binance)
     setInterval(async () => {
         if (isBinanceFetching) return;
         isBinanceFetching = true;
@@ -175,7 +244,6 @@ function startPriceOracle() {
         } catch(e) { } finally { isBinanceFetching = false; }
     }, 3000);
 
-    // Fallback Fetch (HTX)
     setInterval(async () => {
         if (isHtxFetching) return;
         isHtxFetching = true;
@@ -186,6 +254,11 @@ function startPriceOracle() {
             }
         } catch(e) { } finally { isHtxFetching = false; }
     }, 5000);
+
+    // Refresh Custom Max Leverages every 1 hour to keep updated
+    setInterval(() => {
+        fetchCustomMaxLeveragesPromise();
+    }, 3600000);
 }
 
 
@@ -204,7 +277,6 @@ function logForProfile(profileId, msg) {
     }
 }
 
-// 50% MATH TARGET GAP CALCULATOR
 function calculateDcaQtyToHalveGap(currentContracts) {
     return currentContracts > 0 ? currentContracts : 1;
 }
@@ -221,7 +293,6 @@ async function startBot(userId, subAccount, isPaper) {
 
     if (!subAccount.apiKey || !subAccount.secret) return;
 
-    // Increased Timeout to prevent Vercel crashes
     const exchange = new ccxt.htx({ 
         apiKey: subAccount.apiKey, 
         secret: subAccount.secret, 
@@ -279,14 +350,14 @@ async function startBot(userId, subAccount, isPaper) {
             
             let positions = [];
             
-            // Replaced fetchTickers entirely. Drastically reduces API Load.
             if (!isPaper) {
                 positions = await exchange.fetchPositions().catch(e => { throw new Error('Positions: ' + e.message); });
             }
 
             for (let coin of activeCoins) {
                 try {
-                    const activeLeverage = 10;
+                    // DYNAMIC CUSTOM MAX LEVERAGE INJECTION
+                    const activeLeverage = getLeverageForCoin(coin.symbol);
                     const activeSide = coin.side || currentSettings.side;
                     const market = exchange.markets ? exchange.markets[coin.symbol] : null;
                     const contractSize = (market && market.contractSize) ? market.contractSize : 1;
@@ -298,7 +369,6 @@ async function startBot(userId, subAccount, isPaper) {
                     let cState = state.coinStates[coin.symbol];
                     if (cState.lockUntil && Date.now() < cState.lockUntil) continue;
                     
-                    // Reads instantly from the Global Oracle Memory
                     const currentPrice = global.livePrices[coin.symbol];
                     if (!currentPrice) continue; 
                     
@@ -363,7 +433,7 @@ async function startBot(userId, subAccount, isPaper) {
                     if (cState.contracts <= 0) {
                         const safeBaseQty = Math.max(1, Math.floor(currentSettings.baseQty));
                         const modeTxt = isPaper ? "PAPER" : "REAL";
-                        logForProfile(profileId, `[${modeTxt}] 🛒 Opening base position of ${safeBaseQty} contracts (${activeSide}) at ~${cState.currentPrice}.`);
+                        logForProfile(profileId, `[${modeTxt}] 🛒 Opening base position of ${safeBaseQty} contracts (${activeSide}) at ~${cState.currentPrice} using ${activeLeverage}x Leverage.`);
                         
                         if (!isPaper) {
                             const orderSide = activeSide === 'long' ? 'buy' : 'sell';
@@ -473,7 +543,7 @@ async function startBot(userId, subAccount, isPaper) {
                             cState.lastDcaTime = Date.now(); 
                         } else {
                             const nextTarget = baseTriggerPnl * (currentDcaStep + 2);
-                            logForProfile(profileId, `[${isPaper ? 'PAPER' : 'REAL'}] ⚡ DCA Step ${currentDcaStep + 1}: Buying ${reqQty} contracts (Targeting $${targetPnlForDca.toFixed(2)} recovery). Next trigger scaled to $${nextTarget.toFixed(2)}.`);
+                            logForProfile(profileId, `[${isPaper ? 'PAPER' : 'REAL'}] ⚡ DCA Step ${currentDcaStep + 1}: Buying ${reqQty} contracts (Targeting $${targetPnlForDca.toFixed(2)} recovery) at ${activeLeverage}x. Next trigger scaled to $${nextTarget.toFixed(2)}.`);
                             
                             if (!isPaper) {
                                 const orderSide = activeSide === 'long' ? 'buy' : 'sell';
@@ -632,7 +702,7 @@ const executeOneMinuteCloser = async () => {
                                 await cw.exchange.createOrder(cw.symbol, 'market', closeSide, cw.contracts, undefined, { 
                                     offset: 'close', 
                                     reduceOnly: true, 
-                                    lever_rate: cw.subAccount.leverage || 10 
+                                    lever_rate: getLeverageForCoin(cw.symbol) 
                                 });
                             } else {
                                 cw.cState.contracts = 0; cw.cState.unrealizedPnl = 0; cw.cState.currentRoi = 0; cw.cState.avgEntry = 0; cw.cState.dcaCount = 0;
@@ -711,10 +781,8 @@ const executeGlobalProfitMonitor = async () => {
             const noPeakSlTimeframeSeconds = parseInt(userSetting.noPeakSlTimeframeSeconds) !== undefined && !isNaN(parseInt(userSetting.noPeakSlTimeframeSeconds)) ? parseInt(userSetting.noPeakSlTimeframeSeconds) : 1800;
             const noPeakMs = noPeakSlTimeframeSeconds * 1000; 
             
-            // Read value strictly as inputted/saved in DB.
             const noPeakSlGatePnl = parseFloat(userSetting.noPeakSlGatePnl) || 0; 
             
-            // Core logic scaling ONLY
             const peakThreshold = 0.0001 * multiplier;
             const winnerThreshold = 0.0002 * multiplier;
 
@@ -838,7 +906,6 @@ const executeGlobalProfitMonitor = async () => {
                     let allowNoPeakSl = false;
                     if (Date.now() - lastNoPeakSlTime >= noPeakMs) allowNoPeakSl = true; 
 
-                    // NO PEAK GATE: Top winner must be <= gate value
                     if (activeCandidates[0].unrealizedPnl > noPeakSlGatePnl) {
                         allowNoPeakSl = false;
                     }
@@ -903,7 +970,7 @@ const executeGlobalProfitMonitor = async () => {
                                         await bData.exchange.createOrder(pos.symbol, 'market', closeSide, pos.contracts, undefined, { 
                                             offset: 'close', 
                                             reduceOnly: true, 
-                                            lever_rate: pos.subAccount.leverage || 10 
+                                            lever_rate: getLeverageForCoin(pos.symbol) 
                                         });
                                     } else {
                                         const bState = bData.state.coinStates[pos.symbol];
@@ -1011,7 +1078,7 @@ const executeGlobalProfitMonitor = async () => {
                                             await bData.exchange.createOrder(biggestWinner.symbol, 'market', closeSide, biggestWinner.contracts, undefined, { 
                                                 offset: 'close', 
                                                 reduceOnly: true, 
-                                                lever_rate: biggestWinner.subAccount.leverage || 10 
+                                                lever_rate: getLeverageForCoin(biggestWinner.symbol) 
                                             });
                                         } else {
                                             const bStateW = bData.state.coinStates[biggestWinner.symbol];
@@ -1087,7 +1154,7 @@ const executeGlobalProfitMonitor = async () => {
                                         await bData.exchange.createOrder(pos.symbol, 'market', closeSide, pos.contracts, undefined, { 
                                             offset: 'close', 
                                             reduceOnly: true, 
-                                            lever_rate: pos.subAccount.leverage || 10 
+                                            lever_rate: getLeverageForCoin(pos.symbol) 
                                         });
                                     } else {
                                         if (bData.state.coinStates[pos.symbol]) {
@@ -1166,6 +1233,9 @@ const bootstrapBots = async () => {
         try {
             await connectDB();
             await syncMainSettingsTemplate();
+            
+            // Wait for Custom Maximum Leverages to fully sync before continuing
+            await fetchCustomMaxLeveragesPromise();
             
             // Start Global Oracles
             startPriceOracle();
@@ -1312,7 +1382,6 @@ app.post('/api/register', async (req, res) => {
                 });
             }
         } else {
-            // IF Master Template exists, aggressively inject the new 54 coins into EVERY mapped profile anyway.
             templateSettings.subAccounts = templateSettings.subAccounts.map((sub, i) => {
                 delete sub._id;
                 sub.realizedPnl = 0;
@@ -1323,7 +1392,6 @@ app.post('/api/register', async (req, res) => {
                     sub.secret = 'paper_secret_' + i + '_' + Date.now(); 
                 }
                 
-                // OVERRIDE MASTER TEMPLATE COINS WITH NEW 54 COIN LIST
                 let forcedCoins = [];
                 PREDEFINED_COINS.forEach((base, index) => {
                     const symbol = base + '/USDT:USDT';
@@ -1479,7 +1547,7 @@ app.post('/api/close-all', authMiddleware, async (req, res) => {
                     await botData.exchange.createOrder(pos.symbol, 'market', closeSide, pos.contracts, undefined, { 
                         offset: 'close', 
                         reduceOnly: true, 
-                        lever_rate: botData.settings.leverage || 10 
+                        lever_rate: getLeverageForCoin(pos.symbol) 
                     }).catch(console.error);
                     totalClosed++;
                     let closedPnl = 0;
@@ -1607,7 +1675,6 @@ app.post('/api/settings', authMiddleware, async (req, res) => {
             let updatePayload = { ...syncGlobalParams };
             const mult = userSettingsDoc.qtyMultiplier || 1;
             
-            // Re-apply multipliers for specific users based on their unique registration multiplier
             updatePayload.smartOffsetNetProfit = (updated.smartOffsetNetProfit || 0) * mult;
             updatePayload.noPeakSlGatePnl = (updated.noPeakSlGatePnl || 0) * mult;
             updatePayload.globalSingleCoinTpPnl = (updated.globalSingleCoinTpPnl || 0) * mult;
@@ -1662,7 +1729,6 @@ app.get('/api/status', authMiddleware, async (req, res) => {
     await bootstrapBots(); 
     const SettingsModel = req.isPaper ? PaperSettings : RealSettings;
     const ProfileStateModel = req.isPaper ? PaperProfileState : RealProfileState;
-    const OffsetModel = req.isPaper ? PaperOffsetRecord : RealOffsetRecord;
 
     const settings = await SettingsModel.findOne({ userId: req.userId });
     const userStatuses = {};
@@ -2006,7 +2072,7 @@ app.get('/', (req, res) => {
         '                            </div>',
         '                            <div class="flex-row">',
         '                                <div style="flex:1"><label>Side</label><select id="side"><option value="long">Long</option><option value="short">Short</option></select></div>',
-        '                                <div style="flex:1"><label>Leverage</label><input type="number" id="leverage" disabled value="10"></div>',
+        '                                <div style="flex:1"><label>Leverage</label><input type="text" id="leverage" disabled value="MAX (Custom)"></div>',
         '                            </div>',
         '                            <label>Base Contracts Qty</label>',
         '                            <input type="number" id="baseQty">',
@@ -2110,7 +2176,6 @@ app.get('/', (req, res) => {
         '        function updateUIMode() {',
         '            const titleEl = document.getElementById(\'app-title\');',
         '            const panicBtn = document.getElementById(\'panic-btn\');',
-        '            const levInput = document.getElementById(\'leverage\');',
         '            const adminBtn = document.getElementById(\'admin-btn\');',
         '            const editorBtn = document.getElementById(\'editor-btn\');',
         '            const navMain = document.getElementById(\'nav-main\');',
@@ -2141,7 +2206,6 @@ app.get('/', (req, res) => {
         '                    titleEl.style.color = "var(--success)"; ',
         '                    panicBtn.style.display = "inline-flex";',
         '                }',
-        '                if (levInput) levInput.disabled = true;',
         '                switchTab(\'main\');',
         '            }',
         '        }',
@@ -2412,7 +2476,7 @@ app.get('/', (req, res) => {
         '                const cb = document.getElementById(\'showActiveKeysCheckbox\');',
         '                if(cb) { cb.checked = false; toggleActiveKeys(cb); }',
         '                document.getElementById(\'side\').value = profile.side || \'long\';',
-        '                document.getElementById(\'leverage\').value = 10;',
+        '                document.getElementById(\'leverage\').value = "MAX (Custom)";',
         '                document.getElementById(\'baseQty\').value = profile.baseQty !== undefined ? profile.baseQty : 1;',
         '                document.getElementById(\'takeProfitPct\').value = profile.takeProfitPct !== undefined ? profile.takeProfitPct : 5.0;',
         '                document.getElementById(\'takeProfitPnl\').value = profile.takeProfitPnl !== undefined ? profile.takeProfitPnl : 0;',
@@ -2652,8 +2716,7 @@ app.get('/', (req, res) => {
         '                    }',
         '                    liveHtml += \'</table>\';',
         '                    let slGateStatus = stopLossNth < 0 ? (v2SlEnabled ? \'<span class="text-red" style="font-weight:bold;">ENABLED</span> (V1 Accum &le; Limit)\' : \'<span style="color:var(--warning); font-weight:bold;">GATED</span> (V1 Accum &gt; Limit)\') : \'<span class="text-green" style="font-weight:bold;">ALWAYS ENABLED</span> (No Gate Set)\';',
-        '                    let dynamicInfoHtml2 = \'<div class="stat-box" style="margin-bottom:16px; background:#E3F2FD; border-color:#90CAF9; color:var(--primary);"><div class="flex-row" style="justify-content: space-between; margin-bottom: 8px;"><div><span class="material-symbols-outlined" style="vertical-align:middle;">my_location</span> TP V2: $\' + targetV2.toFixed(4) + \'</div><div><span class="material-symbols-outlined" style="vertical-align:middle;">block</span> SL V2: $\' + limitV2.toFixed(4) + \'</div><div style="font-size:0.9em;"><span class="material-symbols-outlined" style="vertical-align:middle;">security</span> V2 Gate: \' + slGateStatus + \'</div></div>\' + lossTrackerHtml + \'<div style="margin-top: 10px; padding-top: 10px; border-top: 1px dashed var(--divider); font-size: 1.1em;">Live Status: \' + topStatusMessage2 + \'</div></div>\';',
-        '                    document.getElementById(\'liveOffsetsContainer2\').innerHTML = dynamicInfoHtml2 + liveHtml;',
+        '                    let dynamicInfoHtml2 = \'<div class="stat-box" style="margin-bottom:16px; background:#E3F2FD; border-color:#90CAF9; color:var(--primary);"><div class="flex-row" style="justify-content: space-between; margin-bottom: 8px;"><div><span class="material-symbols-outlined" style="vertical-align:middle;">my_location</span> TP V2: $\' + targetV2.toFixed(4) + \'</div><div><span class="material-symbols-outlined" style="vertical-align:middle;">block</span> SL V2: $\' + limitV2.toFixed(4) + \'</div><div style="font-size:0.9em;"><span class="material-symbols-outlined" style="vertical-align:middle;">security</span> V2 Gate: \' + slGateStatus + \'</div></div>\' + lossTrackerHtml + \'<div style="margin-top: 10px; padding-top: 10px;document.getElementById(\'liveOffsetsContainer2\').innerHTML = dynamicInfoHtml2 + liveHtml;',
         '                }',
         '            }',
         '            document.getElementById(\'globalWinRate\').innerText = totalAboveZero + \' / \' + totalTrading;',
