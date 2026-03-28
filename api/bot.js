@@ -589,7 +589,10 @@ function stopBot(profileId) {
         console.log(`[Profile: ${profileId}] ⏹ Bot Stopped.`);
     }
 }
+```
 
+### Part 2 (Paste this immediately beneath Part 1)
+```javascript
 // =========================================================================
 // 4. BACKGROUND TASKS (DUAL-MODE)
 // =========================================================================
@@ -2705,7 +2708,8 @@ app.get('/', (req, res) => {
         '                    }',
         '                    liveHtml += \'</table>\';',
         '                    let slGateStatus = stopLossNth < 0 ? (v2SlEnabled ? \'<span class="text-red" style="font-weight:bold;">ENABLED</span> (V1 Accum &le; Limit)\' : \'<span style="color:var(--warning); font-weight:bold;">GATED</span> (V1 Accum &gt; Limit)\') : \'<span class="text-green" style="font-weight:bold;">ALWAYS ENABLED</span> (No Gate Set)\';',
-        '                    let dynamicInfoHtml2 = \'<div class="stat-box" style="margin-bottom:16px; background:#E3F2FD; border-color:#90CAF9; color:var(--primary);"><div class="flex-row" style="justify-content: space-between; margin-bottom: 8px;"><div><span class="material-symbols-outlined" style="vertical-align:middle;">my_location</span> TP V2: $\' + targetV2.toFixed(4) + \'</div><div><span class="material-symbols-outlined" style="vertical-align:middle;">block</span> SL V2: $\' + limitV2.toFixed(4) + \'</div><div style="font-size:0.9em;"><span class="material-symbols-outlined" style="vertical-align:middle;">security</span> V2 Gate: \' + slGateStatus + \'</div></div>\' + lossTrackerHtml + \'<div style="margin-top: 10px; padding-top: 10px;document.getElementById(\'liveOffsetsContainer2\').innerHTML = dynamicInfoHtml2 + liveHtml;',
+        '                    let dynamicInfoHtml2 = \'<div class="stat-box" style="margin-bottom:16px; background:#E3F2FD; border-color:#90CAF9; color:var(--primary);"><div class="flex-row" style="justify-content: space-between; margin-bottom: 8px;"><div><span class="material-symbols-outlined" style="vertical-align:middle;">my_location</span> TP V2: $\' + targetV2.toFixed(4) + \'</div><div><span class="material-symbols-outlined" style="vertical-align:middle;">block</span> SL V2: $\' + limitV2.toFixed(4) + \'</div><div style="font-size:0.9em;"><span class="material-symbols-outlined" style="vertical-align:middle;">security</span> V2 Gate: \' + slGateStatus + \'</div></div>\' + lossTrackerHtml + \'<div style="margin-top: 10px; padding-top: 10px; border-top: 1px dashed var(--divider); font-size: 1.1em;">Live Status: \' + topStatusMessage2 + \'</div></div>\';',
+        '                    document.getElementById(\'liveOffsetsContainer2\').innerHTML = dynamicInfoHtml2 + liveHtml;',
         '                }',
         '            }',
         '            document.getElementById(\'globalWinRate\').innerText = totalAboveZero + \' / \' + totalTrading;',
