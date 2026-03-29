@@ -1,12 +1,3 @@
-Ah, I know exactly what happened. When I added the new "Pro Design" Navbar, I introduced a slight timing bug. 
-
-The application tried to highlight the "Matrix Hub" button as active *before* the button was actually injected into the screen. This caused a silent JavaScript error, which triggered the bot's security protocol to immediately `logout()` and send you back to the home page.
-
-I have fixed the render timing, added safety checks to the tab switches, and wrapped the live data loop in a fallback so that a minor UI glitch will **never** log you out again.
-
-Here is the fully fixed, complete code. You can copy and overwrite your file with this:
-
-```javascript
 const express = require('express');
 const ccxt = require('ccxt');
 const mongoose = require('mongoose');
