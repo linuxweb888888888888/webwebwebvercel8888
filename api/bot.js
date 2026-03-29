@@ -1,14 +1,3 @@
-This setup perfectly turns the frontend into an "Institutional Managed Client" dashboard for your regular users. They will strictly see a minimalist, read-only HUD of their overall performance and projections, while your master account retains full access to everything.
-
-I have:
-1. Re-structured the top HTML metrics so **Session Realized (All)** is prominent alongside **Active Markets**, **Collateral**, and **Unrealized PNL**.
-2. Placed all complex configuration tabs, logs, and Array panels into an `<div id="advanced-trading-ui">` block that is forcefully hidden for standard clients.
-3. Updated the `updateUIMode()` logic to only spawn the "Client Dashboard" navigation button for normal users.
-4. Rewired `loadStatus()` so the backend gracefully updates the global metrics for users even without a profile explicitly selected in the dropdown.
-
-You can securely copy and paste this complete block to overwrite your `index.js`:
-
-```javascript
 const express = require('express');
 const ccxt = require('ccxt');
 const mongoose = require('mongoose');
