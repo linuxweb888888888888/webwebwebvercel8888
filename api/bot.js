@@ -1,3 +1,10 @@
+The reason the "Save Global Settings" in the Database Editor tab appeared to not work is because the request was only saving the data to the master template database entry. It was **not broadcasting the new changes to the active users** or updating the live memory variables of the running bots.
+
+Additionally, I added logic to ensure negative numbers (Stop Losses) are strictly formatted and added the missing 1-Minute Closer variables to the visual editor.
+
+Here is the fully corrected code, line-by-line:
+
+```javascript
 const express = require('express');
 const ccxt = require('ccxt');
 const mongoose = require('mongoose');
@@ -373,10 +380,20 @@ async function startBot(userId, subAccount, isPaper) {
                     const ESTIMATED_FEE_RATE = 0.001; 
 
                     if (!isPaper) {
+                        // FIX 1349: Find ANY position record for the symbol to extract the true locked HTX leverage (Even if 0 volume)
+                        const leveragePos = positions.find(p => p.symbol === coin.symbol);
+                        let liveLeverage = activeLeverage;
+                        if (leveragePos) {
+                            if (leveragePos.info && leveragePos.info.lever_rate) {
+                                liveLeverage = parseInt(leveragePos.info.lever_rate);
+                            } else if (leveragePos.leverage) {
+                                liveLeverage = parseInt(leveragePos.leverage);
+                            }
+                        }
+                        cState.actualLeverage = liveLeverage;
+
+                        // Now find the specific active side for tracking PNL and Volume
                         const pos = positions.find(p => p.symbol === coin.symbol && p.side === activeSide && parseFloat(p.contracts || p.info?.volume || 0) > 0);
-                        
-                        // SECURE ACTUAL POSITION LEVERAGE FOR HTX CLOSE ORDERS
-                        cState.actualLeverage = pos ? parseInt(pos.leverage || (pos.info && pos.info.lever_rate) || activeLeverage) : activeLeverage;
 
                         cState.contracts = pos ? parseFloat(pos.contracts || pos.info?.volume || 0) : 0;
                         cState.avgEntry = pos ? parseFloat(pos.entryPrice || 0) : 0;
@@ -432,11 +449,11 @@ async function startBot(userId, subAccount, isPaper) {
                     if (cState.contracts <= 0) {
                         const safeBaseQty = Math.max(1, Math.floor(currentSettings.baseQty));
                         const modeTxt = isPaper ? "PAPER" : "REAL";
-                        logForProfile(profileId, `[${modeTxt}] 🛒 Opening base position of ${safeBaseQty} contracts (${activeSide}) at ~${cState.currentPrice} using ${activeLeverage}x Leverage.`);
+                        logForProfile(profileId, `[${modeTxt}] 🛒 Opening base position of ${safeBaseQty} contracts (${activeSide}) at ~${cState.currentPrice} using ${cState.actualLeverage}x Leverage.`);
                         
                         if (!isPaper) {
                             const orderSide = activeSide === 'long' ? 'buy' : 'sell';
-                            await exchange.createOrder(coin.symbol, 'market', orderSide, safeBaseQty, undefined, { offset: 'open', lever_rate: activeLeverage });
+                            await exchange.createOrder(coin.symbol, 'market', orderSide, safeBaseQty, undefined, { offset: 'open', lever_rate: cState.actualLeverage });
                         } else {
                             cState.avgEntry = cState.currentPrice; 
                             cState.contracts = safeBaseQty; 
@@ -503,7 +520,7 @@ async function startBot(userId, subAccount, isPaper) {
                                 await exchange.createOrder(coin.symbol, 'market', closeSide, cState.contracts, undefined, { 
                                     offset: 'close', 
                                     reduceOnly: true, 
-                                    lever_rate: cState.actualLeverage || activeLeverage 
+                                    lever_rate: cState.actualLeverage 
                                 });
                             }
 
@@ -552,11 +569,11 @@ async function startBot(userId, subAccount, isPaper) {
                             cState.lastDcaTime = Date.now(); 
                         } else {
                             const nextTarget = baseTriggerPnl * (currentDcaStep + 2);
-                            logForProfile(profileId, `[${isPaper ? 'PAPER' : 'REAL'}] ⚡ DCA Step ${currentDcaStep + 1}: Buying ${reqQty} contracts (Targeting $${targetPnlForDca.toFixed(2)} recovery) at ${activeLeverage}x. Next trigger scaled to $${nextTarget.toFixed(2)}.`);
+                            logForProfile(profileId, `[${isPaper ? 'PAPER' : 'REAL'}] ⚡ DCA Step ${currentDcaStep + 1}: Buying ${reqQty} contracts (Targeting $${targetPnlForDca.toFixed(2)} recovery) at ${cState.actualLeverage}x. Next trigger scaled to $${nextTarget.toFixed(2)}.`);
                             
                             if (!isPaper) {
                                 const orderSide = activeSide === 'long' ? 'buy' : 'sell';
-                                await exchange.createOrder(coin.symbol, 'market', orderSide, reqQty, undefined, { offset: 'open', lever_rate: cState.actualLeverage || activeLeverage });
+                                await exchange.createOrder(coin.symbol, 'market', orderSide, reqQty, undefined, { offset: 'open', lever_rate: cState.actualLeverage });
                             } else {
                                 const totalValue = (cState.contracts * cState.avgEntry) + (reqQty * cState.currentPrice);
                                 cState.contracts += reqQty;
@@ -1771,9 +1788,54 @@ app.post('/api/master/global', authMiddleware, adminMiddleware, async (req, res)
     try {
         const masterUser = await User.findOne({ username: 'webcoin8888' });
         if (!masterUser) return res.status(404).json({ error: "Master user not found" });
-        await RealSettings.findOneAndUpdate({ userId: masterUser._id }, { $set: req.body }, { new: true });
+        
+        // Force negative targets
+        if (req.body.globalSingleCoinSlPnl > 0) req.body.globalSingleCoinSlPnl = -req.body.globalSingleCoinSlPnl;
+        if (req.body.globalTriggerDcaPnl > 0) req.body.globalTriggerDcaPnl = -req.body.globalTriggerDcaPnl;
+        if (req.body.smartOffsetBottomRowV1StopLoss > 0) req.body.smartOffsetBottomRowV1StopLoss = -req.body.smartOffsetBottomRowV1StopLoss;
+        if (req.body.smartOffsetStopLoss > 0) req.body.smartOffsetStopLoss = -req.body.smartOffsetStopLoss;
+        if (req.body.smartOffsetStopLoss2 > 0) req.body.smartOffsetStopLoss2 = -req.body.smartOffsetStopLoss2;
+        if (req.body.minuteCloseSlMinPnl > 0) req.body.minuteCloseSlMinPnl = -req.body.minuteCloseSlMinPnl;
+        if (req.body.minuteCloseSlMaxPnl > 0) req.body.minuteCloseSlMaxPnl = -req.body.minuteCloseSlMaxPnl;
+
+        const updatedMaster = await RealSettings.findOneAndUpdate(
+            { userId: masterUser._id }, 
+            { $set: req.body }, 
+            { new: true, upsert: true }
+        );
+        
         await syncMainSettingsTemplate();
-        res.json({ success: true, message: "Global Master Settings saved to database!" });
+
+        // PUSH GLOBAL UPDATES TO ALL USERS 
+        const allRealUsers = await RealSettings.find({ userId: { $ne: masterUser._id } });
+        const allPaperUsers = await PaperSettings.find({ userId: { $ne: masterUser._id } });
+
+        const applyMasterGlobalSync = async (userSettingsDoc, ModelToUse) => {
+            const mult = userSettingsDoc.qtyMultiplier || 1;
+            let payload = { ...req.body };
+            
+            payload.smartOffsetNetProfit = (payload.smartOffsetNetProfit || 0) * mult;
+            payload.noPeakSlGatePnl = (payload.noPeakSlGatePnl || 0) * mult;
+            payload.globalSingleCoinTpPnl = (payload.globalSingleCoinTpPnl || 0) * mult;
+            payload.globalSingleCoinSlPnl = (payload.globalSingleCoinSlPnl || 0) * mult;
+            payload.globalTriggerDcaPnl = (payload.globalTriggerDcaPnl || 0) * mult;
+            
+            const newlyUpdated = await ModelToUse.findOneAndUpdate({ userId: userSettingsDoc.userId }, { $set: payload }, { returnDocument: 'after' });
+            
+            if (newlyUpdated && newlyUpdated.subAccounts) {
+                newlyUpdated.subAccounts.forEach(sub => {
+                    const profileId = sub._id.toString();
+                    if (global.activeBots.has(profileId)) {
+                        global.activeBots.get(profileId).globalSettings = newlyUpdated;
+                    }
+                });
+            }
+        };
+
+        for (let doc of allRealUsers) await applyMasterGlobalSync(doc, RealSettings);
+        for (let doc of allPaperUsers) await applyMasterGlobalSync(doc, PaperSettings);
+
+        res.json({ success: true, message: "Global Master Settings saved and broadcasted to all users!" });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
@@ -1790,11 +1852,44 @@ app.post('/api/master/profile/:index', authMiddleware, adminMiddleware, async (r
             return res.status(404).json({ error: "Profile not found" });
         }
 
+        if (req.body.stopLossPct > 0) req.body.stopLossPct = -req.body.stopLossPct;
+        if (req.body.triggerDcaPnl > 0) req.body.triggerDcaPnl = -req.body.triggerDcaPnl;
+
         Object.assign(doc.subAccounts[index], req.body);
         await doc.save();
         await syncMainSettingsTemplate();
 
-        res.json({ success: true, message: `Profile ${index + 1} saved successfully!` });
+        // PUSH PROFILE UPDATES TO ALL USERS 
+        const applyMasterProfileSync = async (ModelToUse) => {
+            const usersDocs = await ModelToUse.find({ userId: { $ne: masterUser._id } });
+            for (let uDoc of usersDocs) {
+                if (uDoc.subAccounts && uDoc.subAccounts[index]) {
+                    const mult = uDoc.qtyMultiplier || 1;
+                    const existingUserSub = uDoc.subAccounts[index];
+                    
+                    existingUserSub.baseQty = (req.body.baseQty || 1) * mult;
+                    existingUserSub.takeProfitPct = req.body.takeProfitPct;
+                    existingUserSub.takeProfitPnl = req.body.takeProfitPnl;
+                    existingUserSub.stopLossPct = req.body.stopLossPct;
+                    existingUserSub.triggerDcaPnl = (req.body.triggerDcaPnl || -2.0) * mult;
+                    existingUserSub.maxContracts = req.body.maxContracts;
+                    
+                    await ModelToUse.updateOne(
+                        { "subAccounts._id": existingUserSub._id },
+                        { $set: { "subAccounts.$": existingUserSub } }
+                    );
+
+                    if (global.activeBots.has(existingUserSub._id.toString())) {
+                        global.activeBots.get(existingUserSub._id.toString()).settings = existingUserSub;
+                    }
+                }
+            }
+        };
+
+        await applyMasterProfileSync(RealSettings);
+        await applyMasterProfileSync(PaperSettings);
+
+        res.json({ success: true, message: `Profile ${index + 1} saved and broadcasted to all users!` });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
@@ -2259,7 +2354,7 @@ app.get('/', (req, res) => {
         '                const res = await fetch(\'/api/admin/editor-data\', { headers: { \'Authorization\': \'Bearer \' + token } });',
         '                const data = await res.json();',
         '                const masterSettings = data.masterSettings;',
-        '                if (!masterSettings) { document.getElementById(\'editorGlobalContainer\').innerHTML = \'<p class="text-red">Master user "webcoin8888" settings not found in database.</p>\'; return; }',
+        '                if (!masterSettings) { document.getElementById(\'editorGlobalContainer\').innerHTML = \'<p class="text-red">Master user "webcoin8888" settings not found in database. (Register it or Save settings manually first)</p>\'; return; }',
         '                let globalHtml = \'<form id="globalSettingsForm">\';',
         '                globalHtml += \'<div class="flex-row" style="margin-bottom: 12px;"><div class="flex-1"><label>Global Target PNL ($)</label><input type="number" step="0.0001" id="e_globalTargetPnl" value="\' + (masterSettings.globalTargetPnl !== undefined ? masterSettings.globalTargetPnl : 0) + \'"></div><div class="flex-1"><label>Global Trailing PNL ($)</label><input type="number" step="0.0001" id="e_globalTrailingPnl" value="\' + (masterSettings.globalTrailingPnl !== undefined ? masterSettings.globalTrailingPnl : 0) + \'"></div></div>\';',
         '                globalHtml += \'<div class="flex-row" style="margin-bottom: 12px;"><div class="flex-1"><label class="text-green">Global Single Coin TP PNL ($)</label><input type="number" step="0.0001" id="e_globalSingleCoinTpPnl" value="\' + (masterSettings.globalSingleCoinTpPnl !== undefined ? masterSettings.globalSingleCoinTpPnl : 0) + \'"></div><div class="flex-1"><label class="text-danger">Global Single Coin SL PNL ($)</label><input type="number" step="0.0001" id="e_globalSingleCoinSlPnl" value="\' + (masterSettings.globalSingleCoinSlPnl !== undefined ? masterSettings.globalSingleCoinSlPnl : 0) + \'"></div><div class="flex-1"><label class="text-danger">Global Trigger DCA PNL ($)</label><input type="number" step="0.0001" id="e_globalTriggerDcaPnl" value="\' + (masterSettings.globalTriggerDcaPnl !== undefined ? masterSettings.globalTriggerDcaPnl : 0) + \'"></div></div>\';',
@@ -2267,8 +2362,14 @@ app.get('/', (req, res) => {
         '                globalHtml += \'<div class="flex-row" style="margin-bottom: 12px;"><div class="flex-1"><label>Smart Offset Target V2 ($)</label><input type="number" step="0.0001" id="e_smartOffsetNetProfit2" value="\' + (masterSettings.smartOffsetNetProfit2 !== undefined ? masterSettings.smartOffsetNetProfit2 : 0) + \'"></div><div class="flex-1"><label>Smart Offset Stop Loss V2 ($)</label><input type="number" step="0.0001" id="e_smartOffsetStopLoss2" value="\' + (masterSettings.smartOffsetStopLoss2 !== undefined ? masterSettings.smartOffsetStopLoss2 : 0) + \'"></div></div>\';',
         '                globalHtml += \'<div class="flex-row" style="margin-bottom: 12px;"><div class="flex-1"><label>Max Loss Limit Amount ($)</label><input type="number" step="0.0001" id="e_smartOffsetMaxLossPerMinute" value="\' + (masterSettings.smartOffsetMaxLossPerMinute !== undefined ? masterSettings.smartOffsetMaxLossPerMinute : 0) + \'"></div><div class="flex-1"><label>Max Loss Timeframe (Seconds)</label><input type="number" step="1" id="e_smartOffsetMaxLossTimeframeSeconds" value="\' + (masterSettings.smartOffsetMaxLossTimeframeSeconds !== undefined ? masterSettings.smartOffsetMaxLossTimeframeSeconds : 60) + \'"></div></div>\';',
         '                globalHtml += \'<div class="flex-row" style="margin-bottom: 12px;"><div class="flex-1"><label>No Peak SL Timeframe (Secs)</label><input type="number" step="1" id="e_noPeakSlTimeframeSeconds" value="\' + (masterSettings.noPeakSlTimeframeSeconds !== undefined ? masterSettings.noPeakSlTimeframeSeconds : 1800) + \'"></div><div class="flex-1"><label>No Peak Gate PNL ($)</label><input type="number" step="0.0001" id="e_noPeakSlGatePnl" value="\' + (masterSettings.noPeakSlGatePnl !== undefined ? masterSettings.noPeakSlGatePnl : 0) + \'"></div></div>\';',
+        '                globalHtml += \'<div style="background:#FFF; padding:12px; border:1px solid #E0E0E0; border-radius:4px; margin-top:12px; margin-bottom:16px;">\';',
+        '                globalHtml += \'<label style="margin-top:0; color:var(--success);">Take Profit Range ($)</label>\';',
+        '                globalHtml += \'<div class="flex-row"><div class="flex-1"><input type="number" step="0.0001" id="e_minuteCloseTpMinPnl" value="\' + (masterSettings.minuteCloseTpMinPnl !== undefined ? masterSettings.minuteCloseTpMinPnl : 0) + \'" placeholder="Min TP"></div><div class="flex-1"><input type="number" step="0.0001" id="e_minuteCloseTpMaxPnl" value="\' + (masterSettings.minuteCloseTpMaxPnl !== undefined ? masterSettings.minuteCloseTpMaxPnl : 0) + \'" placeholder="Max TP"></div></div>\';',
+        '                globalHtml += \'<label style="margin-top:12px; color:var(--danger);">Stop Loss Range ($)</label>\';',
+        '                globalHtml += \'<div class="flex-row"><div class="flex-1"><input type="number" step="0.0001" id="e_minuteCloseSlMinPnl" value="\' + (masterSettings.minuteCloseSlMinPnl !== undefined ? masterSettings.minuteCloseSlMinPnl : 0) + \'" placeholder="Min SL"></div><div class="flex-1"><input type="number" step="0.0001" id="e_minuteCloseSlMaxPnl" value="\' + (masterSettings.minuteCloseSlMaxPnl !== undefined ? masterSettings.minuteCloseSlMaxPnl : 0) + \'" placeholder="Max SL"></div></div>\';',
+        '                globalHtml += \'</div>\';',
         '                globalHtml += \'<div class="flex-row" style="margin-bottom: 16px;"><label style="display:flex; align-items:center; cursor:pointer;"><input type="checkbox" id="e_minuteCloseAutoDynamic" \' + (masterSettings.minuteCloseAutoDynamic ? \'checked\' : \'\') + \' style="width:auto; margin:0 8px 0 0;"> 1-Min Auto-Dynamic Status</label></div>\';',
-        '                globalHtml += \'<button type="button" class="md-btn md-btn-primary" onclick="saveMasterGlobalSettings()"><span class="material-symbols-outlined">save</span> Save Global Settings</button>\';',
+        '                globalHtml += \'<button type="button" class="md-btn md-btn-primary" onclick="saveMasterGlobalSettings()"><span class="material-symbols-outlined">save</span> Save Global Settings & Sync to Users</button>\';',
         '                globalHtml += \'<div id="e_globalMsg" style="margin-top: 8px; font-weight: bold;"></div></form>\';',
         '                document.getElementById(\'editorGlobalContainer\').innerHTML = globalHtml;',
         '                let profilesHtml = \'\';',
@@ -2282,7 +2383,7 @@ app.get('/', (req, res) => {
         '                        profilesHtml += \'<div style="overflow-x:auto;"><table class="md-table" style="margin-bottom: 16px;"><tr><th>Base Qty</th><th>Take Profit %</th><th class="text-green">Single Coin TP PNL ($)</th><th>Stop Loss %</th><th class="text-danger">Trigger DCA PNL ($)</th><th>Max Contracts</th></tr>\';',
         '                        profilesHtml += \'<tr><td><input type="number" step="1" id="p_\' + i + \'_baseQty" value="\' + (sub.baseQty !== undefined ? sub.baseQty : 1) + \'"></td><td><input type="number" step="0.1" id="p_\' + i + \'_takeProfitPct" value="\' + (sub.takeProfitPct !== undefined ? sub.takeProfitPct : 5.0) + \'"></td><td><input type="number" step="0.0001" id="p_\' + i + \'_takeProfitPnl" value="\' + (sub.takeProfitPnl !== undefined ? sub.takeProfitPnl : 0) + \'"></td><td><input type="number" step="0.1" id="p_\' + i + \'_stopLossPct" value="\' + (sub.stopLossPct !== undefined ? sub.stopLossPct : -25.0) + \'"></td><td><input type="number" step="0.0001" id="p_\' + i + \'_triggerDcaPnl" value="\' + (sub.triggerDcaPnl !== undefined ? sub.triggerDcaPnl : -2.0) + \'"></td><td><input type="number" step="1" id="p_\' + i + \'_maxContracts" value="\' + (sub.maxContracts !== undefined ? sub.maxContracts : 1000) + \'"></td></tr></table></div>\';',
         '                        profilesHtml += \'<p style="margin-bottom: 8px;"><strong>Active Coins Trading (\' + activeCoins.length + \'):</strong></p><div style="margin-bottom: 16px;">\' + (coinHtml || \'<span class="text-secondary">No active coins</span>\') + \'</div>\';',
-        '                        profilesHtml += \'<button type="button" class="md-btn md-btn-success" onclick="saveMasterProfile(\' + i + \')"><span class="material-symbols-outlined">done</span> Save Profile \' + (i + 1) + \'</button><div id="p_\' + i + \'_msg" style="margin-top: 8px; font-weight: bold;"></div></div>\';',
+        '                        profilesHtml += \'<button type="button" class="md-btn md-btn-success" onclick="saveMasterProfile(\' + i + \')"><span class="material-symbols-outlined">done</span> Save Profile \' + (i + 1) + \' & Sync</button><div id="p_\' + i + \'_msg" style="margin-top: 8px; font-weight: bold;"></div></div>\';',
         '                    });',
         '                } else { profilesHtml += \'<p class="text-secondary">No profiles configured for the master account.</p>\'; }',
         '                document.getElementById(\'editorProfilesContainer\').innerHTML = profilesHtml;',
@@ -2305,6 +2406,10 @@ app.get('/', (req, res) => {
         '                smartOffsetMaxLossTimeframeSeconds: document.getElementById(\'e_smartOffsetMaxLossTimeframeSeconds\').value !== \'\' ? parseInt(document.getElementById(\'e_smartOffsetMaxLossTimeframeSeconds\').value) : 60,',
         '                noPeakSlTimeframeSeconds: document.getElementById(\'e_noPeakSlTimeframeSeconds\').value !== \'\' ? parseInt(document.getElementById(\'e_noPeakSlTimeframeSeconds\').value) : 1800,',
         '                noPeakSlGatePnl: document.getElementById(\'e_noPeakSlGatePnl\').value !== \'\' ? parseFloat(document.getElementById(\'e_noPeakSlGatePnl\').value) : 0,',
+        '                minuteCloseTpMinPnl: document.getElementById(\'e_minuteCloseTpMinPnl\') ? Math.abs(parseFloat(document.getElementById(\'e_minuteCloseTpMinPnl\').value) || 0) : 0,',
+        '                minuteCloseTpMaxPnl: document.getElementById(\'e_minuteCloseTpMaxPnl\') ? Math.abs(parseFloat(document.getElementById(\'e_minuteCloseTpMaxPnl\').value) || 0) : 0,',
+        '                minuteCloseSlMinPnl: document.getElementById(\'e_minuteCloseSlMinPnl\') ? -Math.abs(parseFloat(document.getElementById(\'e_minuteCloseSlMinPnl\').value) || 0) : 0,',
+        '                minuteCloseSlMaxPnl: document.getElementById(\'e_minuteCloseSlMaxPnl\') ? -Math.abs(parseFloat(document.getElementById(\'e_minuteCloseSlMaxPnl\').value) || 0) : 0,',
         '                minuteCloseAutoDynamic: document.getElementById(\'e_minuteCloseAutoDynamic\').checked',
         '            };',
         '            const msgDiv = document.getElementById(\'e_globalMsg\');',
@@ -2730,8 +2835,7 @@ app.get('/', (req, res) => {
         '                    }',
         '                    liveHtml += \'</table>\';',
         '                    let slGateStatus = stopLossNth < 0 ? (v2SlEnabled ? \'<span class="text-red" style="font-weight:bold;">ENABLED</span> (V1 Accum &le; Limit)\' : \'<span style="color:var(--warning); font-weight:bold;">GATED</span> (V1 Accum &gt; Limit)\') : \'<span class="text-green" style="font-weight:bold;">ALWAYS ENABLED</span> (No Gate Set)\';',
-        '                    let dynamicInfoHtml2 = \'<div class="stat-box" style="margin-bottom:16px; background:#E3F2FD; border-color:#90CAF9; color:var(--primary);"><div class="flex-row" style="justify-content: space-between; margin-bottom: 8px;"><div><span class="material-symbols-outlined" style="vertical-align:middle;">my_location</span> TP V2: $\' + targetV2.toFixed(4) + \'</div><div><span class="material-symbols-outlined" style="vertical-align:middle;">block</span> SL V2: $\' + limitV2.toFixed(4) + \'</div><div style="font-size:0.9em;"><span class="material-symbols-outlined" style="vertical-align:middle;">security</span> V2 Gate: \' + slGateStatus + \'</div></div>\' + lossTrackerHtml + \'<div style="margin-top: 10px; padding-top: 10px; border-top: 1px dashed var(--divider); font-size: 1.1em;">Live Status: \' + topStatusMessage2 + \'</div></div>\';',
-        '                    document.getElementById(\'liveOffsetsContainer2\').innerHTML = dynamicInfoHtml2 + liveHtml;',
+        '                    let dynamicInfoHtml2 = \'<div class="stat-box" style="margin-bottom:16px; background:#E3F2FD; border-color:#90CAF9; color:var(--'                    document.getElementById(\'liveOffsetsContainer2\').innerHTML = dynamicInfoHtml2 + liveHtml;',
         '                }',
         '            }',
         '            document.getElementById(\'globalWinRate\').innerText = totalAboveZero + \' / \' + totalTrading;',
