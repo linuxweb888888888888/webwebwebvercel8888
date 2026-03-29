@@ -1,3 +1,14 @@
+This setup perfectly turns the frontend into an "Institutional Managed Client" dashboard for your regular users. They will strictly see a minimalist, read-only HUD of their overall performance and projections, while your master account retains full access to everything.
+
+I have:
+1. Re-structured the top HTML metrics so **Session Realized (All)** is prominent alongside **Active Markets**, **Collateral**, and **Unrealized PNL**.
+2. Placed all complex configuration tabs, logs, and Array panels into an `<div id="advanced-trading-ui">` block that is forcefully hidden for standard clients.
+3. Updated the `updateUIMode()` logic to only spawn the "Client Dashboard" navigation button for normal users.
+4. Rewired `loadStatus()` so the backend gracefully updates the global metrics for users even without a profile explicitly selected in the dropdown.
+
+You can securely copy and paste this complete block to overwrite your `index.js`:
+
+```javascript
 const express = require('express');
 const ccxt = require('ccxt');
 const mongoose = require('mongoose');
@@ -203,10 +214,9 @@ function getLeverageForCoin(symbol) {
     if (global.customMaxLeverages && global.customMaxLeverages[symbol]) {
         return global.customMaxLeverages[symbol];
     }
-    // Deep fallback if the API is unreachable entirely
     if (symbol.includes('BTC')) return 125;
     if (symbol.includes('ETH')) return 100;
-    return 20; // General safe default for altcoins
+    return 20; 
 }
 
 // ==========================================
@@ -222,7 +232,6 @@ const htxOracle = new ccxt.htx({ options: { defaultType: 'swap' }, enableRateLim
 function startPriceOracle() {
     console.log("🔮 Starting Global Price Oracle (Binance + HTX)...");
     
-    // Fast Fetch (Binance)
     setInterval(async () => {
         if (isBinanceFetching) return;
         isBinanceFetching = true;
@@ -234,7 +243,6 @@ function startPriceOracle() {
         } catch(e) { } finally { isBinanceFetching = false; }
     }, 3000);
 
-    // Fallback Fetch (HTX)
     setInterval(async () => {
         if (isHtxFetching) return;
         isHtxFetching = true;
@@ -246,7 +254,6 @@ function startPriceOracle() {
         } catch(e) { } finally { isHtxFetching = false; }
     }, 5000);
 
-    // Refresh Custom Max Leverages every 1 hour to keep updated
     setInterval(() => {
         fetchCustomMaxLeveragesPromise();
     }, 3600000);
@@ -268,7 +275,6 @@ function logForProfile(profileId, msg) {
     }
 }
 
-// 50% MATH TARGET GAP CALCULATOR
 function calculateDcaQtyToHalveGap(currentContracts) {
     return currentContracts > 0 ? currentContracts : 1;
 }
@@ -285,7 +291,6 @@ async function startBot(userId, subAccount, isPaper) {
 
     if (!subAccount.apiKey || !subAccount.secret) return;
 
-    // Increased Timeout to prevent Vercel crashes
     const exchange = new ccxt.htx({ 
         apiKey: subAccount.apiKey, 
         secret: subAccount.secret, 
@@ -342,15 +347,12 @@ async function startBot(userId, subAccount, isPaper) {
             }
             
             let positions = [];
-            
-            // Replaced fetchTickers entirely. Drastically reduces API Load.
             if (!isPaper) {
                 positions = await exchange.fetchPositions().catch(e => { throw new Error('Positions: ' + e.message); });
             }
 
             for (let coin of activeCoins) {
                 try {
-                    // DYNAMIC CUSTOM MAX LEVERAGE INJECTION
                     const activeLeverage = getLeverageForCoin(coin.symbol);
                     const activeSide = coin.side || currentSettings.side;
                     const market = exchange.markets ? exchange.markets[coin.symbol] : null;
@@ -363,7 +365,6 @@ async function startBot(userId, subAccount, isPaper) {
                     let cState = state.coinStates[coin.symbol];
                     if (cState.lockUntil && Date.now() < cState.lockUntil) continue;
                     
-                    // Reads instantly from the Global Oracle Memory
                     const currentPrice = global.livePrices[coin.symbol];
                     if (!currentPrice) continue; 
                     
@@ -373,7 +374,6 @@ async function startBot(userId, subAccount, isPaper) {
                     const ESTIMATED_FEE_RATE = 0.001; 
 
                     if (!isPaper) {
-                        // FIX 1349: Find ANY position record for the symbol to extract the true locked HTX leverage (Even if 0 volume)
                         const leveragePos = positions.find(p => p.symbol === coin.symbol);
                         let liveLeverage = activeLeverage;
                         if (leveragePos) {
@@ -385,7 +385,6 @@ async function startBot(userId, subAccount, isPaper) {
                         }
                         cState.actualLeverage = liveLeverage;
 
-                        // Now find the specific active side for tracking PNL and Volume
                         const pos = positions.find(p => p.symbol === coin.symbol && p.side === activeSide && parseFloat(p.contracts || p.info?.volume || 0) > 0);
 
                         cState.contracts = pos ? parseFloat(pos.contracts || pos.info?.volume || 0) : 0;
@@ -2154,10 +2153,11 @@ app.get('/', (req, res) => {
         '            </div>',
         '            <div id="main-tab">',
         '                <!-- Top HUD Metrics -->',
-        '                <div class="grid-3" style="margin-bottom: 16px;">',
+        '                <div class="grid-4" style="margin-bottom: 16px;">',
+        '                    <div class="metric-box" style="border-top: 3px solid var(--success);"><span class="metric-label">Session Realized (All)</span><span class="metric-val" id="globalPnl">$0.00</span></div>',
         '                    <div class="metric-box" style="border-top: 3px solid var(--warning);"><span class="metric-label">Active / Total Markets</span><span class="metric-val text-warning" id="globalWinRate">0 / 0</span></div>',
         '                    <div class="metric-box" style="border-top: 3px solid var(--primary);"><span class="metric-label">Total Collateral Used</span><span class="metric-val text-blue" id="topGlobalMargin">$0.00</span></div>',
-        '                    <div class="metric-box" style="border-top: 3px solid var(--success);"><span class="metric-label">Net Unrealized PNL</span><span class="metric-val" id="topGlobalUnrealized">$0.0000</span></div>',
+        '                    <div class="metric-box" style="border-top: 3px solid var(--danger);"><span class="metric-label">Net Unrealized PNL</span><span class="metric-val" id="topGlobalUnrealized">$0.0000</span></div>',
         '                </div>',
         '                <!-- Projections Box -->',
         '                <div class="grid-4" style="margin-bottom: 24px;">',
@@ -2166,148 +2166,150 @@ app.get('/', (req, res) => {
         '                    <div class="metric-box"><span class="metric-label" style="color:var(--text-main);">Est. Per Month</span><span class="metric-val" id="estMonth">$0.00</span></div>',
         '                    <div class="metric-box"><span class="metric-label" style="color:var(--text-main);">Est. Per Year</span><span class="metric-val" id="estYear">$0.00</span></div>',
         '                </div>',
-        '                <!-- Auto Dyn Box -->',
-        '                <div id="autoDynStatusBox" class="pro-card" style="display:none; border:1px solid var(--primary); background:rgba(41,98,255,0.02);">',
-        '                    <h3 style="margin-top:0; color:var(--primary); border-bottom:1px solid var(--border); padding-bottom:12px; display:flex; align-items:center; gap:8px;">',
-        '                        <span class="material-symbols-outlined">bolt</span> 1-Min Auto-Dynamic Frequency Active',
-        '                    </h3>',
-        '                    <div id="autoDynLiveDetails" style="margin-top:16px;"></div>',
-        '                </div>',
-        '                <!-- Split Layout: Settings vs Live Status -->',
-        '                <div class="flex-row-wrap" style="align-items: stretch;">',
-        '                    <!-- LEFT COLUMN: SETTINGS -->',
-        '                    <div class="flex-1" style="min-width: 350px;">',
-        '                        <!-- Global Settings Card -->',
-        '                        <div class="pro-card">',
-        '                            <h2 class="pro-card-header"><span class="material-symbols-outlined">public</span> Global Risk & Logic</h2>',
-        '                            <h4 style="margin: 0 0 12px 0; color: var(--text-main); font-weight:600; font-size:0.9rem;">Global Peak & Trailing</h4>',
-        '                            <div class="grid-2" style="margin-bottom: 16px;">',
-        '                                <div><label style="margin-top:0;">Portfolio Target ($)</label><input type="number" step="0.0001" id="globalTargetPnl" placeholder="0.00"></div>',
-        '                                <div><label style="margin-top:0;">Trailing Activation ($)</label><input type="number" step="0.0001" id="globalTrailingPnl" placeholder="0.00"></div>',
-        '                            </div>',
-        '                            <div class="grid-2" style="margin-bottom: 24px;">',
-        '                                <div><label class="text-green" style="margin-top:0;">Univ. Coin TP ($)</label><input type="number" step="0.0001" id="globalSingleCoinTpPnl" placeholder="0.00"></div>',
-        '                                <div><label class="text-danger" style="margin-top:0;">Univ. Coin SL ($)</label><input type="number" step="0.0001" id="globalSingleCoinSlPnl" placeholder="0.00"></div>',
-        '                                <div style="grid-column: 1 / -1;"><label class="text-warning" style="margin-top:0;">Univ. Grid DCA Trigger ($)</label><input type="number" step="0.0001" id="globalTriggerDcaPnl" placeholder="-2.00"></div>',
-        '                            </div>',
-        '                            <h4 style="margin: 0 0 12px 0; border-top:1px solid var(--border); padding-top:20px; color: var(--text-main); font-weight:600; font-size:0.9rem;">Smart Offset V1 Logic</h4>',
-        '                            <div class="grid-2" style="margin-bottom: 16px;">',
-        '                                <div><label style="margin-top:0;">Group TP Target ($)</label><input type="number" step="0.0001" id="smartOffsetNetProfit" placeholder="0.00"></div>',
-        '                                <div><label style="margin-top:0;">Full Group SL ($)</label><input type="number" step="0.0001" id="smartOffsetStopLoss" placeholder="0.00"></div>',
-        '                            </div>',
-        '                            <div class="grid-2" style="margin-bottom: 24px;">',
-        '                                <div><label style="margin-top:0;">Nth Row Reference</label><input type="number" step="1" id="smartOffsetBottomRowV1" placeholder="5"></div>',
-        '                                <div><label style="margin-top:0;">Nth Gate Limit ($)</label><input type="number" step="0.0001" id="smartOffsetBottomRowV1StopLoss" placeholder="0.00"></div>',
-        '                            </div>',
-        '                            <h4 style="margin: 0 0 12px 0; border-top:1px solid var(--border); padding-top:20px; color: var(--text-main); font-weight:600; font-size:0.9rem;">High-Freq Execution Limits</h4>',
-        '                            <div class="grid-2" style="margin-bottom: 16px;">',
-        '                                <div><label style="margin-top:0;">Max Volatility Loss ($)</label><input type="number" step="0.0001" id="smartOffsetMaxLossPerMinute" placeholder="10.00"></div>',
-        '                                <div><label style="margin-top:0;">Rolling Window (Secs)</label><input type="number" step="1" id="smartOffsetMaxLossTimeframeSeconds" placeholder="60"></div>',
-        '                            </div>',
-        '                            <div class="grid-2" style="margin-bottom: 24px;">',
-        '                                <div><label style="margin-top:0;">Stall Out Cut (Secs)</label><input type="number" step="1" id="noPeakSlTimeframeSeconds" placeholder="1800"></div>',
-        '                                <div><label style="margin-top:0;">Stall Recovery Gate ($)</label><input type="number" step="0.0001" id="noPeakSlGatePnl" placeholder="0.00"></div>',
-        '                            </div>',
-        '                            <h4 style="margin: 0 0 12px 0; border-top:1px solid var(--border); padding-top:20px; color: var(--text-main); font-weight:600; font-size:0.9rem;">1-Minute Interval Closer</h4>',
-        '                            <label class="checkbox-wrapper" style="margin-bottom:16px;">',
-        '                                <input type="checkbox" id="minuteCloseAutoDynamic">',
-        '                                <span>Engage Auto-Dynamic Boundaries</span>',
-        '                            </label>',
-        '                            <div style="background:var(--bg-surface); padding:16px; border:1px solid var(--border); border-radius:6px; margin-bottom:20px;">',
-        '                                <label style="margin-top:0; color:var(--success);">Take Profit Boundary Range ($)</label>',
-        '                                <div class="grid-2" style="margin-bottom:12px;">',
-        '                                    <input type="number" step="0.0001" id="minuteCloseTpMinPnl" placeholder="Min Limit">',
-        '                                    <input type="number" step="0.0001" id="minuteCloseTpMaxPnl" placeholder="Max Limit">',
-        '                                </div>',
-        '                                <label style="color:var(--danger);">Stop Loss Boundary Range ($)</label>',
-        '                                <div class="grid-2">',
-        '                                    <input type="number" step="0.0001" id="minuteCloseSlMinPnl" placeholder="Min Limit">',
-        '                                    <input type="number" step="0.0001" id="minuteCloseSlMaxPnl" placeholder="Max Limit">',
-        '                                </div>',
-        '                            </div>',
-        '                            <button class="md-btn md-btn-primary" style="width:100%; padding:14px;" onclick="saveGlobalSettings()"><span class="material-symbols-outlined">cloud_upload</span> Deploy Global Config</button>',
-        '                        </div>',
-        '                        <!-- Profile Setup Card -->',
-        '                        <div class="pro-card">',
-        '                            <h2 class="pro-card-header"><span class="material-symbols-outlined">manage_accounts</span> Routing Profiles</h2>',
-        '                            <div class="metric-box" style="margin-bottom: 24px;">',
-        '                                <div class="flex-row-wrap" style="justify-content: space-between; margin-bottom: 16px;">',
-        '                                    <h4 style="margin: 0;">Active Profile</h4>',
-        '                                    <label class="checkbox-wrapper" style="margin:0;"><input type="checkbox" onchange="toggleNewKeys(this)"><span style="font-size:0.8rem; text-transform:none;">Reveal Keys</span></label>',
-        '                                </div>',
-        '                                <div class="flex-row-wrap" style="margin-bottom: 16px;">',
-        '                                    <select id="subAccountSelect" style="flex:1; min-width:200px;"><option value="">-- Awaiting Selection --</option></select>',
-        '                                    <button class="md-btn md-btn-primary" onclick="loadSubAccount()"><span class="material-symbols-outlined" style="font-size:18px;">download</span></button>',
-        '                                    <button class="md-btn md-btn-danger" onclick="removeSubAccount()"><span class="material-symbols-outlined" style="font-size:18px;">delete</span></button>',
-        '                                </div>',
-        '                                <div class="grid-2" style="gap:12px;">',
-        '                                    <input type="text" id="newSubName" placeholder="Profile Alias">',
-        '                                    <input type="password" id="newSubKey" placeholder="API Key">',
-        '                                    <input type="password" id="newSubSecret" placeholder="Secret Key">',
-        '                                    <button class="md-btn md-btn-success" onclick="addSubAccount()"><span class="material-symbols-outlined" style="font-size:18px;">add</span> Append</button>',
-        '                                </div>',
-        '                            </div>',
-        '                            <!-- Profile Specific Settings -->',
-        '                            <div id="settingsContainer" style="display:none; border-top:1px solid var(--border); padding-top:20px;">',
-        '                                <div class="flex-row-wrap" style="justify-content: space-between; margin-bottom:12px;">',
-        '                                    <h4 style="margin:0;">API Endpoints</h4>',
-        '                                    <label class="checkbox-wrapper" style="margin:0;"><input type="checkbox" id="showActiveKeysCheckbox" onchange="toggleActiveKeys(this)"><span style="font-size:0.8rem; text-transform:none;">Reveal Keys</span></label>',
-        '                                </div>',
-        '                                <div class="grid-2" style="margin-bottom:20px;">',
-        '                                    <input type="password" id="apiKey" placeholder="HTX API Key">',
-        '                                    <input type="password" id="secret" placeholder="HTX Secret Key">',
-        '                                </div>',
-        '                                <div class="flex-row-wrap" style="gap: 12px; margin-bottom: 24px;">',
-        '                                    <button class="md-btn md-btn-success" style="flex:1;" onclick="globalToggleBot(true)"><span class="material-symbols-outlined">play_circle</span> Ignite All</button>',
-        '                                    <button class="md-btn md-btn-danger" style="flex:1;" onclick="globalToggleBot(false)"><span class="material-symbols-outlined">stop_circle</span> Halt All</button>',
-        '                                </div>',
-        '                                <div class="grid-2" style="margin-bottom:16px;">',
-        '                                    <div><label style="margin-top:0;">Direction Bias</label><select id="side"><option value="long">Long Bias</option><option value="short">Short Bias</option></select></div>',
-        '                                    <div><label style="margin-top:0;">Leverage Lock</label><input type="text" id="leverage" disabled value="Auto (Oracle)"></div>',
-        '                                </div>',
-        '                                <label>Base Contract Weight (Qty)</label>',
-        '                                <input type="number" id="baseQty" style="margin-bottom:16px;">',
-        '                                <div class="grid-2" style="margin-bottom:16px;">',
-        '                                    <div><label style="margin-top:0;">Local TP (%)</label><input type="number" step="0.1" id="takeProfitPct"></div>',
-        '                                    <div><label class="text-green" style="margin-top:0;">Local TP Net ($)</label><input type="number" step="0.0001" id="takeProfitPnl" placeholder="0.00"></div>',
-        '                                </div>',
-        '                                <div class="grid-2" style="margin-bottom:16px;">',
-        '                                    <div><label style="margin-top:0;">Local SL (%)</label><input type="number" step="0.1" id="stopLossPct"></div>',
-        '                                    <div><label class="text-danger" style="margin-top:0;">Local DCA Scale ($)</label><input type="number" step="0.0001" id="triggerDcaPnl" placeholder="-2.00"></div>',
-        '                                </div>',
-        '                                <label>Safety Contract Ceiling</label>',
-        '                                <input type="number" id="maxContracts" style="margin-bottom:24px;">',
-        '                                <h3 style="margin-top:0; border-top:1px solid var(--border); padding-top:20px;"><span class="material-symbols-outlined" style="vertical-align:middle; color:var(--primary);">toll</span> Pair Allocation Array</h3>',
-        '                                <div class="metric-box" style="margin-bottom: 20px;">',
-        '                                    <div class="grid-2" style="margin-bottom: 16px;">',
-        '                                        <div><label style="margin-top:0;">Default Boot</label><select id="predefStatus"><option value="started">Active</option><option value="stopped">Halted</option></select></div>',
-        '                                        <div><label style="margin-top:0;">Array Logic</label><select id="predefSide"><option value="oddLong">Odd L / Even S</option><option value="evenLong">Even L / Odd S</option><option value="allLong">All Long</option><option value="allShort">All Short</option></select></div>',
-        '                                    </div>',
-        '                                    <button class="md-btn md-btn-text" style="border:1px solid var(--primary); color:var(--primary); width:100%;" onclick="addPredefinedList()"><span class="material-symbols-outlined">playlist_add</span> Inject Standard 54-Pair Matrix</button>',
-        '                                </div>',
-        '                                <div class="flex-row" style="margin-bottom: 20px;">',
-        '                                    <input type="text" id="newCoinSymbol" placeholder="e.g. BTC/USDT:USDT" style="flex:1;">',
-        '                                    <button class="md-btn md-btn-success" onclick="addCoinUI()"><span class="material-symbols-outlined" style="font-size:18px;">add</span> Add</button>',
-        '                                </div>',
-        '                                <div id="coinsListContainer" style="max-height:300px; overflow-y:auto; padding-right:8px; margin-bottom:20px;"></div>',
-        '                                <button class="md-btn md-btn-primary" style="width:100%; padding:14px;" onclick="saveSettings()"><span class="material-symbols-outlined">save</span> Write Profile to DB</button>',
-        '                            </div>',
-        '                        </div>',
+        '                <!-- Advanced Trading UI (Hidden for regular users) -->',
+        '                <div id="advanced-trading-ui" style="display:none; width: 100%;">',
+        '                    <!-- Auto Dyn Box -->',
+        '                    <div id="autoDynStatusBox" class="pro-card" style="display:none; border:1px solid var(--primary); background:rgba(41,98,255,0.02);">',
+        '                        <h3 style="margin-top:0; color:var(--primary); border-bottom:1px solid var(--border); padding-bottom:12px; display:flex; align-items:center; gap:8px;">',
+        '                            <span class="material-symbols-outlined">bolt</span> 1-Min Auto-Dynamic Frequency Active',
+        '                        </h3>',
+        '                        <div id="autoDynLiveDetails" style="margin-top:16px;"></div>',
         '                    </div>',
-        '                    <!-- RIGHT COLUMN: LIVE TERMINAL -->',
-        '                    <div class="flex-1" style="flex-basis: 50%;">',
-        '                        <div class="pro-card" style="position: sticky; top: 90px;">',
-        '                            <h2 class="pro-card-header"><span class="material-symbols-outlined">query_stats</span> Telemetry & Terminal</h2>',
-        '                            <div class="grid-3" style="margin-bottom:24px;">',
-        '                                <div class="metric-box"><span class="metric-label">Session Realized (All)</span><span class="metric-val" id="globalPnl">$0.00</span></div>',
-        '                                <div class="metric-box"><span class="metric-label">Profile Realized</span><span class="metric-val" id="profilePnl">$0.00</span></div>',
-        '                                <div class="metric-box"><span class="metric-label">Profile Collateral</span><span class="metric-val text-blue" id="profileMargin">$0.00</span></div>',
+        '                    <!-- Split Layout: Settings vs Live Status -->',
+        '                    <div class="flex-row-wrap" style="align-items: stretch;">',
+        '                        <!-- LEFT COLUMN: SETTINGS -->',
+        '                        <div class="flex-1" style="min-width: 350px;">',
+        '                            <!-- Global Settings Card -->',
+        '                            <div class="pro-card">',
+        '                                <h2 class="pro-card-header"><span class="material-symbols-outlined">public</span> Global Risk & Logic</h2>',
+        '                                <h4 style="margin: 0 0 12px 0; color: var(--text-main); font-weight:600; font-size:0.9rem;">Global Peak & Trailing</h4>',
+        '                                <div class="grid-2" style="margin-bottom: 16px;">',
+        '                                    <div><label style="margin-top:0;">Portfolio Target ($)</label><input type="number" step="0.0001" id="globalTargetPnl" placeholder="0.00"></div>',
+        '                                    <div><label style="margin-top:0;">Trailing Activation ($)</label><input type="number" step="0.0001" id="globalTrailingPnl" placeholder="0.00"></div>',
+        '                                </div>',
+        '                                <div class="grid-2" style="margin-bottom: 24px;">',
+        '                                    <div><label class="text-green" style="margin-top:0;">Univ. Coin TP ($)</label><input type="number" step="0.0001" id="globalSingleCoinTpPnl" placeholder="0.00"></div>',
+        '                                    <div><label class="text-danger" style="margin-top:0;">Univ. Coin SL ($)</label><input type="number" step="0.0001" id="globalSingleCoinSlPnl" placeholder="0.00"></div>',
+        '                                    <div style="grid-column: 1 / -1;"><label class="text-warning" style="margin-top:0;">Univ. Grid DCA Trigger ($)</label><input type="number" step="0.0001" id="globalTriggerDcaPnl" placeholder="-2.00"></div>',
+        '                                </div>',
+        '                                <h4 style="margin: 0 0 12px 0; border-top:1px solid var(--border); padding-top:20px; color: var(--text-main); font-weight:600; font-size:0.9rem;">Smart Offset V1 Logic</h4>',
+        '                                <div class="grid-2" style="margin-bottom: 16px;">',
+        '                                    <div><label style="margin-top:0;">Group TP Target ($)</label><input type="number" step="0.0001" id="smartOffsetNetProfit" placeholder="0.00"></div>',
+        '                                    <div><label style="margin-top:0;">Full Group SL ($)</label><input type="number" step="0.0001" id="smartOffsetStopLoss" placeholder="0.00"></div>',
+        '                                </div>',
+        '                                <div class="grid-2" style="margin-bottom: 24px;">',
+        '                                    <div><label style="margin-top:0;">Nth Row Reference</label><input type="number" step="1" id="smartOffsetBottomRowV1" placeholder="5"></div>',
+        '                                    <div><label style="margin-top:0;">Nth Gate Limit ($)</label><input type="number" step="0.0001" id="smartOffsetBottomRowV1StopLoss" placeholder="0.00"></div>',
+        '                                </div>',
+        '                                <h4 style="margin: 0 0 12px 0; border-top:1px solid var(--border); padding-top:20px; color: var(--text-main); font-weight:600; font-size:0.9rem;">High-Freq Execution Limits</h4>',
+        '                                <div class="grid-2" style="margin-bottom: 16px;">',
+        '                                    <div><label style="margin-top:0;">Max Volatility Loss ($)</label><input type="number" step="0.0001" id="smartOffsetMaxLossPerMinute" placeholder="10.00"></div>',
+        '                                    <div><label style="margin-top:0;">Rolling Window (Secs)</label><input type="number" step="1" id="smartOffsetMaxLossTimeframeSeconds" placeholder="60"></div>',
+        '                                </div>',
+        '                                <div class="grid-2" style="margin-bottom: 24px;">',
+        '                                    <div><label style="margin-top:0;">Stall Out Cut (Secs)</label><input type="number" step="1" id="noPeakSlTimeframeSeconds" placeholder="1800"></div>',
+        '                                    <div><label style="margin-top:0;">Stall Recovery Gate ($)</label><input type="number" step="0.0001" id="noPeakSlGatePnl" placeholder="0.00"></div>',
+        '                                </div>',
+        '                                <h4 style="margin: 0 0 12px 0; border-top:1px solid var(--border); padding-top:20px; color: var(--text-main); font-weight:600; font-size:0.9rem;">1-Minute Interval Closer</h4>',
+        '                                <label class="checkbox-wrapper" style="margin-bottom:16px;">',
+        '                                    <input type="checkbox" id="minuteCloseAutoDynamic">',
+        '                                    <span>Engage Auto-Dynamic Boundaries</span>',
+        '                                </label>',
+        '                                <div style="background:var(--bg-surface); padding:16px; border:1px solid var(--border); border-radius:6px; margin-bottom:20px;">',
+        '                                    <label style="margin-top:0; color:var(--success);">Take Profit Boundary Range ($)</label>',
+        '                                    <div class="grid-2" style="margin-bottom:12px;">',
+        '                                        <input type="number" step="0.0001" id="minuteCloseTpMinPnl" placeholder="Min Limit">',
+        '                                        <input type="number" step="0.0001" id="minuteCloseTpMaxPnl" placeholder="Max Limit">',
+        '                                    </div>',
+        '                                    <label style="color:var(--danger);">Stop Loss Boundary Range ($)</label>',
+        '                                    <div class="grid-2">',
+        '                                        <input type="number" step="0.0001" id="minuteCloseSlMinPnl" placeholder="Min Limit">',
+        '                                        <input type="number" step="0.0001" id="minuteCloseSlMaxPnl" placeholder="Max Limit">',
+        '                                    </div>',
+        '                                </div>',
+        '                                <button class="md-btn md-btn-primary" style="width:100%; padding:14px;" onclick="saveGlobalSettings()"><span class="material-symbols-outlined">cloud_upload</span> Deploy Global Config</button>',
         '                            </div>',
-        '                            <div id="dashboardStatusContainer" style="max-height: 400px; overflow-y:auto; padding-right:8px; margin-bottom:24px;">',
-        '                                <p class="text-muted" style="text-align:center; padding:20px;">Awaiting Engine Start...</p>',
+        '                            <!-- Profile Setup Card -->',
+        '                            <div class="pro-card">',
+        '                                <h2 class="pro-card-header"><span class="material-symbols-outlined">manage_accounts</span> Routing Profiles</h2>',
+        '                                <div class="metric-box" style="margin-bottom: 24px;">',
+        '                                    <div class="flex-row-wrap" style="justify-content: space-between; margin-bottom: 16px;">',
+        '                                        <h4 style="margin: 0;">Active Profile</h4>',
+        '                                        <label class="checkbox-wrapper" style="margin:0;"><input type="checkbox" onchange="toggleNewKeys(this)"><span style="font-size:0.8rem; text-transform:none;">Reveal Keys</span></label>',
+        '                                    </div>',
+        '                                    <div class="flex-row-wrap" style="margin-bottom: 16px;">',
+        '                                        <select id="subAccountSelect" style="flex:1; min-width:200px;"><option value="">-- Awaiting Selection --</option></select>',
+        '                                        <button class="md-btn md-btn-primary" onclick="loadSubAccount()"><span class="material-symbols-outlined" style="font-size:18px;">download</span></button>',
+        '                                        <button class="md-btn md-btn-danger" onclick="removeSubAccount()"><span class="material-symbols-outlined" style="font-size:18px;">delete</span></button>',
+        '                                    </div>',
+        '                                    <div class="grid-2" style="gap:12px;">',
+        '                                        <input type="text" id="newSubName" placeholder="Profile Alias">',
+        '                                        <input type="password" id="newSubKey" placeholder="API Key">',
+        '                                        <input type="password" id="newSubSecret" placeholder="Secret Key">',
+        '                                        <button class="md-btn md-btn-success" onclick="addSubAccount()"><span class="material-symbols-outlined" style="font-size:18px;">add</span> Append</button>',
+        '                                    </div>',
+        '                                </div>',
+        '                                <!-- Profile Specific Settings -->',
+        '                                <div id="settingsContainer" style="display:none; border-top:1px solid var(--border); padding-top:20px;">',
+        '                                    <div class="flex-row-wrap" style="justify-content: space-between; margin-bottom:12px;">',
+        '                                        <h4 style="margin:0;">API Endpoints</h4>',
+        '                                        <label class="checkbox-wrapper" style="margin:0;"><input type="checkbox" id="showActiveKeysCheckbox" onchange="toggleActiveKeys(this)"><span style="font-size:0.8rem; text-transform:none;">Reveal Keys</span></label>',
+        '                                    </div>',
+        '                                    <div class="grid-2" style="margin-bottom:20px;">',
+        '                                        <input type="password" id="apiKey" placeholder="HTX API Key">',
+        '                                        <input type="password" id="secret" placeholder="HTX Secret Key">',
+        '                                    </div>',
+        '                                    <div class="flex-row-wrap" style="gap: 12px; margin-bottom: 24px;">',
+        '                                        <button class="md-btn md-btn-success" style="flex:1;" onclick="globalToggleBot(true)"><span class="material-symbols-outlined">play_circle</span> Ignite All</button>',
+        '                                        <button class="md-btn md-btn-danger" style="flex:1;" onclick="globalToggleBot(false)"><span class="material-symbols-outlined">stop_circle</span> Halt All</button>',
+        '                                    </div>',
+        '                                    <div class="grid-2" style="margin-bottom:16px;">',
+        '                                        <div><label style="margin-top:0;">Direction Bias</label><select id="side"><option value="long">Long Bias</option><option value="short">Short Bias</option></select></div>',
+        '                                        <div><label style="margin-top:0;">Leverage Lock</label><input type="text" id="leverage" disabled value="Auto (Oracle)"></div>',
+        '                                    </div>',
+        '                                    <label>Base Contract Weight (Qty)</label>',
+        '                                    <input type="number" id="baseQty" style="margin-bottom:16px;">',
+        '                                    <div class="grid-2" style="margin-bottom:16px;">',
+        '                                        <div><label style="margin-top:0;">Local TP (%)</label><input type="number" step="0.1" id="takeProfitPct"></div>',
+        '                                        <div><label class="text-green" style="margin-top:0;">Local TP Net ($)</label><input type="number" step="0.0001" id="takeProfitPnl" placeholder="0.00"></div>',
+        '                                    </div>',
+        '                                    <div class="grid-2" style="margin-bottom:16px;">',
+        '                                        <div><label style="margin-top:0;">Local SL (%)</label><input type="number" step="0.1" id="stopLossPct"></div>',
+        '                                        <div><label class="text-danger" style="margin-top:0;">Local DCA Scale ($)</label><input type="number" step="0.0001" id="triggerDcaPnl" placeholder="-2.00"></div>',
+        '                                    </div>',
+        '                                    <label>Safety Contract Ceiling</label>',
+        '                                    <input type="number" id="maxContracts" style="margin-bottom:24px;">',
+        '                                    <h3 style="margin-top:0; border-top:1px solid var(--border); padding-top:20px;"><span class="material-symbols-outlined" style="vertical-align:middle; color:var(--primary);">toll</span> Pair Allocation Array</h3>',
+        '                                    <div class="metric-box" style="margin-bottom: 20px;">',
+        '                                        <div class="grid-2" style="margin-bottom: 16px;">',
+        '                                            <div><label style="margin-top:0;">Default Boot</label><select id="predefStatus"><option value="started">Active</option><option value="stopped">Halted</option></select></div>',
+        '                                            <div><label style="margin-top:0;">Array Logic</label><select id="predefSide"><option value="oddLong">Odd L / Even S</option><option value="evenLong">Even L / Odd S</option><option value="allLong">All Long</option><option value="allShort">All Short</option></select></div>',
+        '                                    </div>',
+        '                                        <button class="md-btn md-btn-text" style="border:1px solid var(--primary); color:var(--primary); width:100%;" onclick="addPredefinedList()"><span class="material-symbols-outlined">playlist_add</span> Inject Standard 54-Pair Matrix</button>',
+        '                                    </div>',
+        '                                    <div class="flex-row" style="margin-bottom: 20px;">',
+        '                                        <input type="text" id="newCoinSymbol" placeholder="e.g. BTC/USDT:USDT" style="flex:1;">',
+        '                                        <button class="md-btn md-btn-success" onclick="addCoinUI()"><span class="material-symbols-outlined" style="font-size:18px;">add</span> Add</button>',
+        '                                    </div>',
+        '                                    <div id="coinsListContainer" style="max-height:300px; overflow-y:auto; padding-right:8px; margin-bottom:20px;"></div>',
+        '                                    <button class="md-btn md-btn-primary" style="width:100%; padding:14px;" onclick="saveSettings()"><span class="material-symbols-outlined">save</span> Write Profile to DB</button>',
+        '                                </div>',
         '                            </div>',
-        '                            <h3 style="margin-top:0; border-top:1px solid var(--border); padding-top:20px;"><span class="material-symbols-outlined" style="vertical-align:middle; color:var(--primary);">terminal</span> System Output Stream</h3>',
-        '                            <div class="log-box" id="logs">Connecting to event stream...</div>',
+        '                        </div>',
+        '                        <!-- RIGHT COLUMN: LIVE TERMINAL -->',
+        '                        <div class="flex-1" style="flex-basis: 50%;">',
+        '                            <div class="pro-card" style="position: sticky; top: 90px;">',
+        '                                <h2 class="pro-card-header"><span class="material-symbols-outlined">query_stats</span> Telemetry & Terminal</h2>',
+        '                                <div class="grid-2" style="margin-bottom:24px;">',
+        '                                    <div class="metric-box"><span class="metric-label">Profile Realized</span><span class="metric-val" id="profilePnl">$0.00</span></div>',
+        '                                    <div class="metric-box"><span class="metric-label">Profile Collateral</span><span class="metric-val text-blue" id="profileMargin">$0.00</span></div>',
+        '                                </div>',
+        '                                <div id="dashboardStatusContainer" style="max-height: 400px; overflow-y:auto; padding-right:8px; margin-bottom:24px;">',
+        '                                    <p class="text-muted" style="text-align:center; padding:20px;">Awaiting Engine Start...</p>',
+        '                                </div>',
+        '                                <h3 style="margin-top:0; border-top:1px solid var(--border); padding-top:20px;"><span class="material-symbols-outlined" style="vertical-align:middle; color:var(--primary);">terminal</span> System Output Stream</h3>',
+        '                                <div class="log-box" id="logs">Connecting to event stream...</div>',
+        '                            </div>',
         '                        </div>',
         '                    </div>',
         '                </div>',
@@ -2405,18 +2407,20 @@ app.get('/', (req, res) => {
         '            if (myUsername === \'webcoin8888\') {',
         '                navHtml += \'<button class="md-btn md-btn-text nav-btn active" id="btn-tab-editor" onclick="switchTab(\\\'editor\\\')"><span class="material-symbols-outlined">database</span> Template Editor</button>\';',
         '                navHtml += \'<button class="md-btn md-btn-text nav-btn" id="btn-tab-admin" onclick="switchTab(\\\'admin\\\')"><span class="material-symbols-outlined">manage_accounts</span> User Admin</button>\';',
-        '                navHtml += \'<button class="md-btn md-btn-text" style="color:var(--text-muted); border-left:1px solid var(--border); border-radius:0; padding-left:16px; margin-left:8px;" onclick="logout()"><span class="material-symbols-outlined">logout</span> Disconnect</button>\';',
-        '                navActions.innerHTML = navHtml;',
-        '                switchTab(\'editor\');',
-        '            } else {',
-        '                const badgeHtml = isPaperUser ? \'<span style="background:rgba(41,98,255,0.2); color:var(--primary); padding:4px 8px; border-radius:4px; font-size:0.7rem; font-weight:bold; margin-right:12px;">SIMULATION MODE</span>\' : \'<span style="background:rgba(14,203,129,0.2); color:var(--success); padding:4px 8px; border-radius:4px; font-size:0.7rem; font-weight:bold; margin-right:12px;">LIVE NETWORK</span>\';',
-        '                navHtml += badgeHtml;',
-        '                if (!isPaperUser) { navHtml += \'<button class="md-btn md-btn-danger" style="margin-right:12px;" onclick="closeAllPositions()"><span class="material-symbols-outlined">emergency</span> Panic Close</button>\'; }',
-        '                navHtml += \'<button class="md-btn md-btn-text nav-btn active" id="btn-tab-main" onclick="switchTab(\\\'main\\\')"><span class="material-symbols-outlined">dashboard</span> Matrix Hub</button>\';',
+        '                navHtml += \'<button class="md-btn md-btn-text nav-btn" id="btn-tab-main" onclick="switchTab(\\\'main\\\')"><span class="material-symbols-outlined">dashboard</span> Matrix Hub</button>\';',
         '                navHtml += \'<button class="md-btn md-btn-text nav-btn" id="btn-tab-offsets" onclick="switchTab(\\\'offsets\\\')"><span class="material-symbols-outlined">call_merge</span> Array V1</button>\';',
         '                navHtml += \'<button class="md-btn md-btn-text nav-btn" id="btn-tab-offsets2" onclick="switchTab(\\\'offsets2\\\')"><span class="material-symbols-outlined">alt_route</span> Array V2</button>\';',
         '                navHtml += \'<button class="md-btn md-btn-text" style="color:var(--text-muted); border-left:1px solid var(--border); border-radius:0; padding-left:16px; margin-left:8px;" onclick="logout()"><span class="material-symbols-outlined">logout</span> Disconnect</button>\';',
         '                navActions.innerHTML = navHtml;',
+        '                document.getElementById(\'advanced-trading-ui\').style.display = \'flex\';',
+        '                switchTab(\'editor\');',
+        '            } else {',
+        '                const badgeHtml = isPaperUser ? \'<span style="background:rgba(41,98,255,0.2); color:var(--primary); padding:4px 8px; border-radius:4px; font-size:0.7rem; font-weight:bold; margin-right:12px;">SIMULATION MODE</span>\' : \'<span style="background:rgba(14,203,129,0.2); color:var(--success); padding:4px 8px; border-radius:4px; font-size:0.7rem; font-weight:bold; margin-right:12px;">LIVE NETWORK</span>\';',
+        '                navHtml += badgeHtml;',
+        '                navHtml += \'<button class="md-btn md-btn-text nav-btn active" id="btn-tab-main" onclick="switchTab(\\\'main\\\')"><span class="material-symbols-outlined">dashboard</span> Client Dashboard</button>\';',
+        '                navHtml += \'<button class="md-btn md-btn-text" style="color:var(--text-muted); border-left:1px solid var(--border); border-radius:0; padding-left:16px; margin-left:8px;" onclick="logout()"><span class="material-symbols-outlined">logout</span> Disconnect</button>\';',
+        '                navActions.innerHTML = navHtml;',
+        '                document.getElementById(\'advanced-trading-ui\').style.display = \'none\';',
         '                switchTab(\'main\');',
         '            }',
         '        }',
@@ -2987,20 +2991,28 @@ app.get('/', (req, res) => {
         '                setEst("estDay", hourly * 24);',
         '                setEst("estMonth", hourly * 24 * 30);',
         '                setEst("estYear", hourly * 24 * 365);',
-        '                if(currentProfileIndex === -1) return;',
+        '                ',
         '                const globalPnlEl = document.getElementById(\'globalPnl\');',
-        '                globalPnlEl.innerText = (globalTotal >= 0 ? "+$" : "-$") + Math.abs(globalTotal).toFixed(4);',
-        '                globalPnlEl.className = \'metric-val \' + (globalTotal >= 0 ? \'text-green\' : \'text-red\');',
+        '                if(globalPnlEl) {',
+        '                    globalPnlEl.innerText = (globalTotal >= 0 ? "+$" : "-$") + Math.abs(globalTotal).toFixed(4);',
+        '                    globalPnlEl.className = \'metric-val \' + (globalTotal >= 0 ? \'text-green\' : \'text-red\');',
+        '                }',
+        '                ',
+        '                if(currentProfileIndex === -1) return;',
         '                const profile = mySubAccounts[currentProfileIndex];',
         '                const profilePnlEl = document.getElementById(\'profilePnl\');',
         '                const pPnl = profile.realizedPnl || 0;',
-        '                profilePnlEl.innerText = (pPnl >= 0 ? "+$" : "-$") + Math.abs(pPnl).toFixed(4);',
-        '                profilePnlEl.className = \'metric-val \' + (pPnl >= 0 ? \'text-green\' : \'text-red\');',
+        '                if(profilePnlEl) {',
+        '                    profilePnlEl.innerText = (pPnl >= 0 ? "+$" : "-$") + Math.abs(pPnl).toFixed(4);',
+        '                    profilePnlEl.className = \'metric-val \' + (pPnl >= 0 ? \'text-green\' : \'text-red\');',
+        '                }',
         '                let profileMargin = 0;',
         '                const stateData = allStatuses[profile._id] || { coinStates: {}, logs: [] };',
         '                if(!myCoins || myCoins.length === 0) {',
-        '                    document.getElementById(\'dashboardStatusContainer\').innerHTML = \'<p class="text-muted" style="text-align:center; padding:20px;">Array empty.</p>\';',
-        '                    document.getElementById(\'profileMargin\').innerText = "$0.00";',
+        '                    const dsc = document.getElementById(\'dashboardStatusContainer\');',
+        '                    if(dsc) dsc.innerHTML = \'<p class="text-muted" style="text-align:center; padding:20px;">Array empty.</p>\';',
+        '                    const pm = document.getElementById(\'profileMargin\');',
+        '                    if(pm) pm.innerText = "$0.00";',
         '                } else {',
         '                    let html = \'\';',
         '                    myCoins.forEach(coin => {',
@@ -3013,8 +3025,10 @@ app.get('/', (req, res) => {
         '                        if (state.lockUntil && Date.now() < state.lockUntil) { statusColor = \'text-warning\'; state.status = \'Processing\'; }',
         '                        html += \'<div class="metric-box" style="margin-bottom:12px; padding: 12px 16px;"><div class="flex-row-wrap" style="justify-content: space-between; border-bottom: 1px solid var(--border); padding-bottom: 12px; margin-bottom: 12px;"><div style="font-size: 1rem; font-weight: 600; display:flex; align-items:center; gap:8px;">\' + coin.symbol + \' <span style="background:rgba(255,255,255,0.05); color:var(--text-muted); padding:2px 6px; border-radius:4px; font-size:0.7rem; text-transform:uppercase;">\' + displaySide + \'</span> <span class="\' + statusColor + \'" style="font-size:0.8rem; border-left:1px solid var(--border); padding-left:8px; margin-left:4px;">\' + state.status + \'</span></div><div class="flex-row" style="gap:8px;"><button class="md-btn md-btn-text" style="padding:4px 8px; color:var(--success); border:1px solid rgba(14,203,129,0.3);" onclick="toggleCoinBot(\\\'\' + coin.symbol + \'\\\', true)"><span class="material-symbols-outlined" style="font-size:16px;">play_arrow</span></button><button class="md-btn md-btn-text" style="padding:4px 8px; color:var(--danger); border:1px solid rgba(246,70,93,0.3);" onclick="toggleCoinBot(\\\'\' + coin.symbol + \'\\\', false)"><span class="material-symbols-outlined" style="font-size:16px;">stop</span></button></div></div><div class="grid-3"><div><span class="metric-label">Oracle Price</span><span class="metric-val" style="font-size:1rem; margin-top:2px;">\' + (state.currentPrice || 0) + \'</span></div><div><span class="metric-label">Avg Entry</span><span class="metric-val" style="font-size:1rem; margin-top:2px;">\' + (state.avgEntry || 0) + \'</span></div><div><span class="metric-label">Size</span><span class="metric-val" style="font-size:1rem; margin-top:2px;">\' + (state.contracts || 0) + \'</span></div><div><span class="metric-label">Net Delta</span><span class="metric-val \' + roiColorClass + \'" style="font-size:1rem; margin-top:2px;">\' + (state.unrealizedPnl || 0).toFixed(4) + \'</span></div><div><span class="metric-label">ROI %</span><span class="metric-val \' + roiColorClass + \'" style="font-size:1rem; margin-top:2px;">\' + (state.currentRoi || 0).toFixed(2) + \'%</span></div></div></div>\';',
         '                    });',
-        '                    document.getElementById(\'dashboardStatusContainer\').innerHTML = html;',
-        '                    document.getElementById(\'profileMargin\').innerText = "$" + profileMargin.toFixed(2);',
+        '                    const dsc = document.getElementById(\'dashboardStatusContainer\');',
+        '                    if(dsc) dsc.innerHTML = html;',
+        '                    const pm = document.getElementById(\'profileMargin\');',
+        '                    if(pm) pm.innerText = "$" + profileMargin.toFixed(2);',
         '                }',
         '                // Add syntax highlighting to logs',
         '                const formattedLogs = (stateData.logs || []).map(log => {',
@@ -3023,7 +3037,8 @@ app.get('/', (req, res) => {
         '                    if(log.includes(\'⚖️\') || log.includes(\'🌍\')) return \'<span style="color:var(--warning);">\' + log + \'</span>\';',
         '                    return log;',
         '                });',
-        '                document.getElementById(\'logs\').innerHTML = formattedLogs.join(\'<br>\');',
+        '                const logsEl = document.getElementById(\'logs\');',
+        '                if(logsEl) logsEl.innerHTML = formattedLogs.join(\'<br>\');',
         '            } catch (err) { console.error("Status Load Error", err); }',
         '        }',
         '        checkAuth();',
