@@ -1751,6 +1751,7 @@ app.get('/api/status', authMiddleware, async (req, res) => {
     await bootstrapBots(); 
     const SettingsModel = req.isPaper ? PaperSettings : RealSettings;
     const ProfileStateModel = req.isPaper ? PaperProfileState : RealProfileState;
+    const OffsetModel = req.isPaper ? PaperOffsetRecord : RealOffsetRecord; 
 
     const settings = await SettingsModel.findOne({ userId: req.userId });
     const userStatuses = {};
@@ -1772,7 +1773,10 @@ app.get('/api/status', authMiddleware, async (req, res) => {
         currentMinuteLoss = arr.reduce((sum, r) => sum + r.amount, 0);
     }
 
-    res.json({ states: userStatuses, subAccounts: settings ? settings.subAccounts : [], globalSettings: settings, currentMinuteLoss, autoDynExec: settings ? settings.autoDynamicLastExecution : null });
+    const firstOffset = await OffsetModel.findOne({ userId: req.userId }).sort({ timestamp: 1 }).lean();
+    const startTime = firstOffset ? firstOffset.timestamp : null;
+
+    res.json({ states: userStatuses, subAccounts: settings ? settings.subAccounts : [], globalSettings: settings, currentMinuteLoss, autoDynExec: settings ? settings.autoDynamicLastExecution : null, startTime });
 });
 
 app.get('/api/offsets', authMiddleware, async (req, res) => {
@@ -1999,6 +2003,7 @@ app.get('/', (req, res) => {
         '        .flex-row-wrap { display: flex; gap: 16px; align-items: center; flex-wrap: wrap; }',
         '        .grid-2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; }',
         '        .grid-3 { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; }',
+        '        .grid-4 { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 16px; }',
         '        .flex-1 { flex: 1; }',
         '        .text-green { color: var(--success) !important; }',
         '        .text-red { color: var(--danger) !important; }',
@@ -2149,10 +2154,17 @@ app.get('/', (req, res) => {
         '            </div>',
         '            <div id="main-tab">',
         '                <!-- Top HUD Metrics -->',
-        '                <div class="grid-3" style="margin-bottom: 24px;">',
+        '                <div class="grid-3" style="margin-bottom: 16px;">',
         '                    <div class="metric-box" style="border-top: 3px solid var(--warning);"><span class="metric-label">Active / Total Markets</span><span class="metric-val text-warning" id="globalWinRate">0 / 0</span></div>',
         '                    <div class="metric-box" style="border-top: 3px solid var(--primary);"><span class="metric-label">Total Collateral Used</span><span class="metric-val text-blue" id="topGlobalMargin">$0.00</span></div>',
         '                    <div class="metric-box" style="border-top: 3px solid var(--success);"><span class="metric-label">Net Unrealized PNL</span><span class="metric-val" id="topGlobalUnrealized">$0.0000</span></div>',
+        '                </div>',
+        '                <!-- Projections Box -->',
+        '                <div class="grid-4" style="margin-bottom: 24px;">',
+        '                    <div class="metric-box"><span class="metric-label" style="color:var(--text-main);">Est. Per Hour</span><span class="metric-val" id="estHour">$0.00</span></div>',
+        '                    <div class="metric-box"><span class="metric-label" style="color:var(--text-main);">Est. Per Day</span><span class="metric-val" id="estDay">$0.00</span></div>',
+        '                    <div class="metric-box"><span class="metric-label" style="color:var(--text-main);">Est. Per Month</span><span class="metric-val" id="estMonth">$0.00</span></div>',
+        '                    <div class="metric-box"><span class="metric-label" style="color:var(--text-main);">Est. Per Year</span><span class="metric-val" id="estYear">$0.00</span></div>',
         '                </div>',
         '                <!-- Auto Dyn Box -->',
         '                <div id="autoDynStatusBox" class="pro-card" style="display:none; border:1px solid var(--primary); background:rgba(41,98,255,0.02);">',
@@ -2965,6 +2977,16 @@ app.get('/', (req, res) => {
         '                const topPnlEl = document.getElementById(\'topGlobalUnrealized\');',
         '                topPnlEl.innerText = (globalUnrealized >= 0 ? "+$" : "-$") + Math.abs(globalUnrealized).toFixed(4);',
         '                topPnlEl.className = \'metric-val \' + (globalUnrealized >= 0 ? \'text-green\' : \'text-red\');',
+        '                ',
+        '                const startTime = data.startTime ? new Date(data.startTime).getTime() : Date.now();',
+        '                const elapsedMs = Math.max(Date.now() - startTime, 3600000);',
+        '                const elapsedHours = elapsedMs / 3600000;',
+        '                const hourly = globalTotal / elapsedHours;',
+        '                const setEst = (id, val) => { const el = document.getElementById(id); if(el){ el.innerText = (val >= 0 ? "+$" : "-$") + Math.abs(val).toFixed(2); el.className = "metric-val " + (val >= 0 ? "text-green" : "text-red"); } };',
+        '                setEst("estHour", hourly);',
+        '                setEst("estDay", hourly * 24);',
+        '                setEst("estMonth", hourly * 24 * 30);',
+        '                setEst("estYear", hourly * 24 * 365);',
         '                if(currentProfileIndex === -1) return;',
         '                const globalPnlEl = document.getElementById(\'globalPnl\');',
         '                globalPnlEl.innerText = (globalTotal >= 0 ? "+$" : "-$") + Math.abs(globalTotal).toFixed(4);',
