@@ -2835,7 +2835,7 @@ app.get('/', (req, res) => {
         '                    }',
         '                    liveHtml += \'</table>\';',
         '                    let slGateStatus = stopLossNth < 0 ? (v2SlEnabled ? \'<span class="text-red" style="font-weight:bold;">ENABLED</span> (V1 Accum &le; Limit)\' : \'<span style="color:var(--warning); font-weight:bold;">GATED</span> (V1 Accum &gt; Limit)\') : \'<span class="text-green" style="font-weight:bold;">ALWAYS ENABLED</span> (No Gate Set)\';',
-        '                    let dynamicInfoHtml2 = \'<div class="stat-box" style="margin-bottom:16px; background:#E3F2FD; border-color:#90CAF9; color:var(--'                    document.getElementById(\'liveOffsetsContainer2\').innerHTML = dynamicInfoHtml2 + liveHtml;',
+        '                    let dynamicInfoHtml2 = \'<div class="stat-box" style="margin-bottom:16px; background:#E3F2FD; border-color:#90CAF9; color:var(--'document.getElementById(\'liveOffsetsContainer2\').innerHTML = dynamicInfoHtml2 + liveHtml;',
         '                }',
         '            }',
         '            document.getElementById(\'globalWinRate\').innerText = totalAboveZero + \' / \' + totalTrading;',
