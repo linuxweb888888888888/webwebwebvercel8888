@@ -1,4 +1,3 @@
---- START OF FILE text/plain ---
 const express = require('express');
 const ccxt = require('ccxt');
 const mongoose = require('mongoose');
