@@ -1,10 +1,3 @@
-The issue happened because the copy-paste boundary cut off an extremely long Javascript string in the frontend, causing a hidden syntax error in your browser. When the browser hits a syntax error, the UI loop (`loadStatus`) silently crashes, freezing the screen at "Running" and "Size 0" even though the backend bot is perfectly fine.
-
-To guarantee this **never happens again**, I have taken your exact original code (from before the update) and broken down the massive 1,200-character strings into smaller, safe lines. 
-
-I have cleanly applied the **Settings Display Update** on top of it. **Replace your entire file with this complete, perfectly formatted code:**
-
-```javascript
 const express = require('express');
 const ccxt = require('ccxt');
 const mongoose = require('mongoose');
