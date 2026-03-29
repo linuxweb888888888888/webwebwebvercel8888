@@ -1365,7 +1365,19 @@ const adminMiddleware = async (req, res, next) => {
 app.get('/api/ping', async (req, res) => {
     await connectDB(); 
     await bootstrapBots(); 
-    res.status(200).json({ success: true, message: 'Bot is awake', timestamp: new Date().toISOString(), activeProfiles: activeBots.size });
+    
+    // VERCEL HACK: Delay the response by 8 seconds.
+    // Because Vercel kills background tasks the moment a response is sent,
+    // we hold this response open to force your 6-second trading loops to execute 
+    // at least once every time your cron-job hits this URL.
+    setTimeout(() => {
+        res.status(200).json({ 
+            success: true, 
+            message: 'Bot was forced to stay awake and execute trades', 
+            timestamp: new Date().toISOString(), 
+            activeProfiles: activeBots.size 
+        });
+    }, 8000);
 });
 
 app.get('/api/settings', authMiddleware, async (req, res) => {
