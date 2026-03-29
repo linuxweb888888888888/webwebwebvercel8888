@@ -89,7 +89,7 @@ const SettingsSchema = new mongoose.Schema({
     globalTargetPnl: { type: Number, default: 0 },       
     globalTrailingPnl: { type: Number, default: 0 },   
     globalSingleCoinTpPnl: { type: Number, default: 0 }, 
-    globalSingleCoinSlPnl: { type: Number, default: 0 }, // NEW: Global Single Coin SL
+    globalSingleCoinSlPnl: { type: Number, default: 0 }, 
     globalTriggerDcaPnl: { type: Number, default: 0 }, 
     smartOffsetNetProfit: { type: Number, default: 0 },
     smartOffsetBottomRowV1: { type: Number, default: 5 }, 
@@ -478,7 +478,7 @@ async function startBot(userId, subAccount, isPaper) {
                     const profileTpPnlTarget = parseFloat(currentSettings.takeProfitPnl) || 0;
                     const tpPnlTarget = globalTpPnlTarget > 0 ? globalTpPnlTarget : profileTpPnlTarget;
                     
-                    const globalSlPnlTarget = parseFloat(botData.globalSettings?.globalSingleCoinSlPnl) || 0; // NEW GLOBAL INDIVIDUAL SL
+                    const globalSlPnlTarget = parseFloat(botData.globalSettings?.globalSingleCoinSlPnl) || 0; 
                     
                     const tpPctTarget = parseFloat(currentSettings.takeProfitPct) || 0;
                     const currentPnl = parseFloat(cState.unrealizedPnl) || 0;
@@ -1320,6 +1320,7 @@ app.get('/api/ping', async (req, res) => {
 });
 
 app.get('/api/settings', authMiddleware, async (req, res) => {
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
     await connectDB();
     const SettingsModel = req.isPaper ? PaperSettings : RealSettings;
     const settings = await SettingsModel.findOne({ userId: req.userId }).lean();
@@ -1447,12 +1448,14 @@ app.post('/api/login', async (req, res) => {
 app.get('/api/me', authMiddleware, async (req, res) => { res.json({ isPaper: req.isPaper, username: req.username }); });
 
 app.get('/api/admin/status', authMiddleware, adminMiddleware, async (req, res) => {
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
     const template = await MainTemplate.findOne({ name: "main_settings" });
     const webcoin = await User.findOne({ username: 'webcoin8888' });
     res.json({ templateSafe: !!template, webcoinSafe: !!webcoin });
 });
 
 app.get('/api/admin/users', authMiddleware, adminMiddleware, async (req, res) => {
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
     const users = await User.find({ username: { $ne: 'webcoin8888' } }).lean();
     let result = [];
     for (let u of users) {
@@ -1744,6 +1747,7 @@ app.post('/api/settings', authMiddleware, async (req, res) => {
 });
 
 app.get('/api/status', authMiddleware, async (req, res) => {
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
     await bootstrapBots(); 
     const SettingsModel = req.isPaper ? PaperSettings : RealSettings;
     const ProfileStateModel = req.isPaper ? PaperProfileState : RealProfileState;
@@ -1772,28 +1776,45 @@ app.get('/api/status', authMiddleware, async (req, res) => {
 });
 
 app.get('/api/offsets', authMiddleware, async (req, res) => {
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
     const OffsetModel = req.isPaper ? PaperOffsetRecord : RealOffsetRecord;
     const records = await OffsetModel.find({ userId: req.userId }).sort({ timestamp: -1 }).limit(100);
     res.json(records);
 });
 
+// ADMIN: GLOBAL SETTINGS SYNC (STRICT PARSING)
 app.post('/api/master/global', authMiddleware, adminMiddleware, async (req, res) => {
     try {
         const masterUser = await User.findOne({ username: 'webcoin8888' });
         if (!masterUser) return res.status(404).json({ error: "Master user not found" });
-        
-        // Force negative targets
-        if (req.body.globalSingleCoinSlPnl > 0) req.body.globalSingleCoinSlPnl = -req.body.globalSingleCoinSlPnl;
-        if (req.body.globalTriggerDcaPnl > 0) req.body.globalTriggerDcaPnl = -req.body.globalTriggerDcaPnl;
-        if (req.body.smartOffsetBottomRowV1StopLoss > 0) req.body.smartOffsetBottomRowV1StopLoss = -req.body.smartOffsetBottomRowV1StopLoss;
-        if (req.body.smartOffsetStopLoss > 0) req.body.smartOffsetStopLoss = -req.body.smartOffsetStopLoss;
-        if (req.body.smartOffsetStopLoss2 > 0) req.body.smartOffsetStopLoss2 = -req.body.smartOffsetStopLoss2;
-        if (req.body.minuteCloseSlMinPnl > 0) req.body.minuteCloseSlMinPnl = -req.body.minuteCloseSlMinPnl;
-        if (req.body.minuteCloseSlMaxPnl > 0) req.body.minuteCloseSlMaxPnl = -req.body.minuteCloseSlMaxPnl;
+
+        // Build a perfect strict object ensuring valid types and negative values
+        const payload = {
+            globalTargetPnl: parseFloat(req.body.globalTargetPnl) || 0,
+            globalTrailingPnl: parseFloat(req.body.globalTrailingPnl) || 0,
+            globalSingleCoinTpPnl: parseFloat(req.body.globalSingleCoinTpPnl) || 0,
+            globalSingleCoinSlPnl: -Math.abs(parseFloat(req.body.globalSingleCoinSlPnl) || 0),
+            globalTriggerDcaPnl: -Math.abs(parseFloat(req.body.globalTriggerDcaPnl) || 0),
+            smartOffsetNetProfit: parseFloat(req.body.smartOffsetNetProfit) || 0,
+            smartOffsetBottomRowV1: parseInt(req.body.smartOffsetBottomRowV1) || 5,
+            smartOffsetBottomRowV1StopLoss: -Math.abs(parseFloat(req.body.smartOffsetBottomRowV1StopLoss) || 0),
+            smartOffsetStopLoss: -Math.abs(parseFloat(req.body.smartOffsetStopLoss) || 0),
+            smartOffsetNetProfit2: parseFloat(req.body.smartOffsetNetProfit2) || 0,
+            smartOffsetStopLoss2: -Math.abs(parseFloat(req.body.smartOffsetStopLoss2) || 0),
+            smartOffsetMaxLossPerMinute: parseFloat(req.body.smartOffsetMaxLossPerMinute) || 0,
+            smartOffsetMaxLossTimeframeSeconds: parseInt(req.body.smartOffsetMaxLossTimeframeSeconds) || 60,
+            minuteCloseAutoDynamic: req.body.minuteCloseAutoDynamic === true,
+            minuteCloseTpMinPnl: Math.abs(parseFloat(req.body.minuteCloseTpMinPnl) || 0),
+            minuteCloseTpMaxPnl: Math.abs(parseFloat(req.body.minuteCloseTpMaxPnl) || 0),
+            minuteCloseSlMinPnl: -Math.abs(parseFloat(req.body.minuteCloseSlMinPnl) || 0),
+            minuteCloseSlMaxPnl: -Math.abs(parseFloat(req.body.minuteCloseSlMaxPnl) || 0),
+            noPeakSlTimeframeSeconds: parseInt(req.body.noPeakSlTimeframeSeconds) || 1800,
+            noPeakSlGatePnl: parseFloat(req.body.noPeakSlGatePnl) || 0
+        };
 
         const updatedMaster = await RealSettings.findOneAndUpdate(
             { userId: masterUser._id }, 
-            { $set: req.body }, 
+            { $set: payload }, 
             { new: true, upsert: true }
         );
         
@@ -1805,15 +1826,15 @@ app.post('/api/master/global', authMiddleware, adminMiddleware, async (req, res)
 
         const applyMasterGlobalSync = async (userSettingsDoc, ModelToUse) => {
             const mult = userSettingsDoc.qtyMultiplier || 1;
-            let payload = { ...req.body };
+            let syncPayload = { ...payload };
             
-            payload.smartOffsetNetProfit = (payload.smartOffsetNetProfit || 0) * mult;
-            payload.noPeakSlGatePnl = (payload.noPeakSlGatePnl || 0) * mult;
-            payload.globalSingleCoinTpPnl = (payload.globalSingleCoinTpPnl || 0) * mult;
-            payload.globalSingleCoinSlPnl = (payload.globalSingleCoinSlPnl || 0) * mult;
-            payload.globalTriggerDcaPnl = (payload.globalTriggerDcaPnl || 0) * mult;
+            syncPayload.smartOffsetNetProfit = (syncPayload.smartOffsetNetProfit || 0) * mult;
+            syncPayload.noPeakSlGatePnl = (syncPayload.noPeakSlGatePnl || 0) * mult;
+            syncPayload.globalSingleCoinTpPnl = (syncPayload.globalSingleCoinTpPnl || 0) * mult;
+            syncPayload.globalSingleCoinSlPnl = (syncPayload.globalSingleCoinSlPnl || 0) * mult;
+            syncPayload.globalTriggerDcaPnl = (syncPayload.globalTriggerDcaPnl || 0) * mult;
             
-            const newlyUpdated = await ModelToUse.findOneAndUpdate({ userId: userSettingsDoc.userId }, { $set: payload }, { returnDocument: 'after' });
+            const newlyUpdated = await ModelToUse.findOneAndUpdate({ userId: userSettingsDoc.userId }, { $set: syncPayload }, { returnDocument: 'after' });
             
             if (newlyUpdated && newlyUpdated.subAccounts) {
                 newlyUpdated.subAccounts.forEach(sub => {
@@ -1834,6 +1855,7 @@ app.post('/api/master/global', authMiddleware, adminMiddleware, async (req, res)
     }
 });
 
+// ADMIN: PROFILE SETTINGS SYNC (STRICT PARSING)
 app.post('/api/master/profile/:index', authMiddleware, adminMiddleware, async (req, res) => {
     try {
         const index = parseInt(req.params.index);
@@ -1845,10 +1867,18 @@ app.post('/api/master/profile/:index', authMiddleware, adminMiddleware, async (r
             return res.status(404).json({ error: "Profile not found" });
         }
 
-        if (req.body.stopLossPct > 0) req.body.stopLossPct = -req.body.stopLossPct;
-        if (req.body.triggerDcaPnl > 0) req.body.triggerDcaPnl = -req.body.triggerDcaPnl;
+        const profilePayload = {
+            apiKey: req.body.apiKey || '',
+            secret: req.body.secret || '',
+            baseQty: parseFloat(req.body.baseQty) || 1,
+            takeProfitPct: parseFloat(req.body.takeProfitPct) || 5.0,
+            takeProfitPnl: parseFloat(req.body.takeProfitPnl) || 0,
+            stopLossPct: -Math.abs(parseFloat(req.body.stopLossPct) || 25.0),
+            triggerDcaPnl: -Math.abs(parseFloat(req.body.triggerDcaPnl) || 2.0),
+            maxContracts: parseInt(req.body.maxContracts) || 1000
+        };
 
-        Object.assign(doc.subAccounts[index], req.body);
+        Object.assign(doc.subAccounts[index], profilePayload);
         await doc.save();
         await syncMainSettingsTemplate();
 
@@ -1860,12 +1890,12 @@ app.post('/api/master/profile/:index', authMiddleware, adminMiddleware, async (r
                     const mult = uDoc.qtyMultiplier || 1;
                     const existingUserSub = uDoc.subAccounts[index];
                     
-                    existingUserSub.baseQty = (req.body.baseQty || 1) * mult;
-                    existingUserSub.takeProfitPct = req.body.takeProfitPct;
-                    existingUserSub.takeProfitPnl = req.body.takeProfitPnl;
-                    existingUserSub.stopLossPct = req.body.stopLossPct;
-                    existingUserSub.triggerDcaPnl = (req.body.triggerDcaPnl || -2.0) * mult;
-                    existingUserSub.maxContracts = req.body.maxContracts;
+                    existingUserSub.baseQty = (profilePayload.baseQty || 1) * mult;
+                    existingUserSub.takeProfitPct = profilePayload.takeProfitPct;
+                    existingUserSub.takeProfitPnl = profilePayload.takeProfitPnl;
+                    existingUserSub.stopLossPct = profilePayload.stopLossPct;
+                    existingUserSub.triggerDcaPnl = (profilePayload.triggerDcaPnl || -2.0) * mult;
+                    existingUserSub.maxContracts = profilePayload.maxContracts;
                     
                     await ModelToUse.updateOne(
                         { "subAccounts._id": existingUserSub._id },
@@ -1889,6 +1919,7 @@ app.post('/api/master/profile/:index', authMiddleware, adminMiddleware, async (r
 });
 
 app.get('/api/admin/editor-data', authMiddleware, adminMiddleware, async (req, res) => {
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
     try {
         const masterUser = await User.findOne({ username: 'webcoin8888' });
         let masterSettings = null;
@@ -2475,14 +2506,18 @@ app.get('/', (req, res) => {
         '                minuteCloseSlMaxPnl: document.getElementById(\'e_minuteCloseSlMaxPnl\') ? -Math.abs(parseFloat(document.getElementById(\'e_minuteCloseSlMaxPnl\').value) || 0) : 0,',
         '                minuteCloseAutoDynamic: document.getElementById(\'e_minuteCloseAutoDynamic\').checked',
         '            };',
-        '            const msgDiv = document.getElementById(\'e_globalMsg\');',
-        '            msgDiv.innerText = "Syncing network..."; msgDiv.className = "text-muted";',
         '            try {',
         '                const res = await fetch(\'/api/master/global\', { method: \'POST\', headers: { \'Content-Type\': \'application/json\', \'Authorization\': \'Bearer \' + token }, body: JSON.stringify(payload) });',
         '                const data = await res.json();',
-        '                if (data.success) { msgDiv.className = "text-green"; msgDiv.innerText = data.message; } else { msgDiv.className = "text-red"; msgDiv.innerText = "Error: " + data.error; }',
-        '            } catch(err) { msgDiv.className = "text-red"; msgDiv.innerText = "Timeout: " + err.message; }',
-        '            setTimeout(() => { msgDiv.innerText = \'\'; }, 3000);',
+        '                if (data.success) { ',
+        '                    await loadMasterEditor();',
+        '                    const newMsgDiv = document.getElementById(\'e_globalMsg\');',
+        '                    if (newMsgDiv) { newMsgDiv.className = "text-green"; newMsgDiv.innerText = data.message; setTimeout(() => { newMsgDiv.innerText = \'\'; }, 3000); }',
+        '                } else { ',
+        '                    const msgDiv = document.getElementById(\'e_globalMsg\');',
+        '                    if (msgDiv) { msgDiv.className = "text-red"; msgDiv.innerText = "Error: " + data.error; setTimeout(() => { msgDiv.innerText = \'\'; }, 3000); }',
+        '                }',
+        '            } catch(err) { const msgDiv = document.getElementById(\'e_globalMsg\'); if(msgDiv) { msgDiv.className = "text-red"; msgDiv.innerText = "Timeout: " + err.message; setTimeout(() => { msgDiv.innerText = \'\'; }, 3000); } }',
         '        }',
         '        async function saveMasterProfile(index) {',
         '            const payload = {',
@@ -2495,14 +2530,18 @@ app.get('/', (req, res) => {
         '                triggerDcaPnl: document.getElementById(\'p_\' + index + \'_triggerDcaPnl\').value !== \'\' ? parseFloat(document.getElementById(\'p_\' + index + \'_triggerDcaPnl\').value) : -2.0,',
         '                maxContracts: document.getElementById(\'p_\' + index + \'_maxContracts\').value !== \'\' ? parseInt(document.getElementById(\'p_\' + index + \'_maxContracts\').value) : 1000',
         '            };',
-        '            const msgDiv = document.getElementById(\'p_\' + index + \'_msg\');',
-        '            msgDiv.innerText = "Syncing network..."; msgDiv.className = "text-muted";',
         '            try {',
         '                const res = await fetch(\'/api/master/profile/\' + index, { method: \'POST\', headers: { \'Content-Type\': \'application/json\', \'Authorization\': \'Bearer \' + token }, body: JSON.stringify(payload) });',
         '                const data = await res.json();',
-        '                if (data.success) { msgDiv.className = "text-green"; msgDiv.innerText = data.message; } else { msgDiv.className = "text-red"; msgDiv.innerText = "Error: " + data.error; }',
-        '            } catch(err) { msgDiv.className = "text-red"; msgDiv.innerText = "Timeout: " + err.message; }',
-        '            setTimeout(() => { msgDiv.innerText = \'\'; }, 3000);',
+        '                if (data.success) { ',
+        '                    await loadMasterEditor();',
+        '                    const newMsgDiv = document.getElementById(\'p_\' + index + \'_msg\');',
+        '                    if(newMsgDiv) { newMsgDiv.className = "text-green"; newMsgDiv.innerText = data.message; setTimeout(() => { newMsgDiv.innerText = \'\'; }, 3000); }',
+        '                } else { ',
+        '                    const msgDiv = document.getElementById(\'p_\' + index + \'_msg\');',
+        '                    if(msgDiv) { msgDiv.className = "text-red"; msgDiv.innerText = "Error: " + data.error; setTimeout(() => { msgDiv.innerText = \'\'; }, 3000); }',
+        '                }',
+        '            } catch(err) { const msgDiv = document.getElementById(\'p_\' + index + \'_msg\'); if(msgDiv) { msgDiv.className = "text-red"; msgDiv.innerText = "Timeout: " + err.message; setTimeout(() => { msgDiv.innerText = \'\'; }, 3000); } }',
         '        }',
         '        async function loadAdminData() {',
         '            try {',
