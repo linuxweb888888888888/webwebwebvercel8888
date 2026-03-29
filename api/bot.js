@@ -1,10 +1,3 @@
-The reason the "Save Global Settings" in the Database Editor tab appeared to not work is because the request was only saving the data to the master template database entry. It was **not broadcasting the new changes to the active users** or updating the live memory variables of the running bots.
-
-Additionally, I added logic to ensure negative numbers (Stop Losses) are strictly formatted and added the missing 1-Minute Closer variables to the visual editor.
-
-Here is the fully corrected code, line-by-line:
-
-```javascript
 const express = require('express');
 const ccxt = require('ccxt');
 const mongoose = require('mongoose');
@@ -2835,7 +2828,7 @@ app.get('/', (req, res) => {
         '                    }',
         '                    liveHtml += \'</table>\';',
         '                    let slGateStatus = stopLossNth < 0 ? (v2SlEnabled ? \'<span class="text-red" style="font-weight:bold;">ENABLED</span> (V1 Accum &le; Limit)\' : \'<span style="color:var(--warning); font-weight:bold;">GATED</span> (V1 Accum &gt; Limit)\') : \'<span class="text-green" style="font-weight:bold;">ALWAYS ENABLED</span> (No Gate Set)\';',
-        '                    let dynamicInfoHtml2 = \'<div class="stat-box" style="margin-bottom:16px; background:#E3F2FD; border-color:#90CAF9; color:var(--'
+        '                    let dynamicInfoHtml2 = \'<div class="stat-box" style="margin-bottom:16px; background:#E3F2FD; border-color:#90CAF9; color:var(--primary);"><div class="flex-row" style="justify-content: space-between; margin-bottom: 8px;"><div><span class="material-symbols-outlined" style="vertical-align:middle;">my_location</span> TP V2: $\' + targetV2.toFixed(4) + \'</div><div><span class="material-symbols-outlined" style="vertical-align:middle;">block</span> SL V2: $\' + limitV2.toFixed(4) + \'</div><div style="font-size:0.9em;"><span class="material-symbols-outlined" style="vertical-align:middle;">security</span> V2 Gate: \' + slGateStatus + \'</div></div>\' + lossTrackerHtml + \'<div style="margin-top: 10px; padding-top: 10px; border-top: 1px dashed var(--divider); font-size: 1.1em;">Live Status: \' + topStatusMessage2 + \'</div></div>\';',
         '                    document.getElementById(\'liveOffsetsContainer2\').innerHTML = dynamicInfoHtml2 + liveHtml;',
         '                }',
         '            }',
