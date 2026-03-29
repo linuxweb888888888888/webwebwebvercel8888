@@ -376,7 +376,7 @@ async function startBot(userId, subAccount, isPaper) {
                         const pos = positions.find(p => p.symbol === coin.symbol && p.side === activeSide && parseFloat(p.contracts || p.info?.volume || 0) > 0);
                         
                         // SECURE ACTUAL POSITION LEVERAGE FOR HTX CLOSE ORDERS
-                        cState.actualLeverage = pos && pos.info && pos.info.lever_rate ? parseInt(pos.info.lever_rate) : activeLeverage;
+                        cState.actualLeverage = pos ? parseInt(pos.leverage || (pos.info && pos.info.lever_rate) || activeLeverage) : activeLeverage;
 
                         cState.contracts = pos ? parseFloat(pos.contracts || pos.info?.volume || 0) : 0;
                         cState.avgEntry = pos ? parseFloat(pos.entryPrice || 0) : 0;
@@ -556,7 +556,7 @@ async function startBot(userId, subAccount, isPaper) {
                             
                             if (!isPaper) {
                                 const orderSide = activeSide === 'long' ? 'buy' : 'sell';
-                                await exchange.createOrder(coin.symbol, 'market', orderSide, reqQty, undefined, { offset: 'open', lever_rate: activeLeverage });
+                                await exchange.createOrder(coin.symbol, 'market', orderSide, reqQty, undefined, { offset: 'open', lever_rate: cState.actualLeverage || activeLeverage });
                             } else {
                                 const totalValue = (cState.contracts * cState.avgEntry) + (reqQty * cState.currentPrice);
                                 cState.contracts += reqQty;
@@ -1547,7 +1547,7 @@ app.post('/api/close-all', authMiddleware, async (req, res) => {
             for (let pos of positions) {
                 if (pos.contracts > 0) {
                     const closeSide = pos.side === 'long' ? 'sell' : 'buy';
-                    const activeLev = botData.state.coinStates[pos.symbol]?.actualLeverage || getLeverageForCoin(pos.symbol);
+                    const activeLev = parseInt(pos.leverage || (pos.info && pos.info.lever_rate)) || botData.state.coinStates[pos.symbol]?.actualLeverage || getLeverageForCoin(pos.symbol);
                     await botData.exchange.createOrder(pos.symbol, 'market', closeSide, pos.contracts, undefined, { 
                         offset: 'close', 
                         reduceOnly: true, 
