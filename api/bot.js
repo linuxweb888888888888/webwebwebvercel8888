@@ -114,9 +114,7 @@ const SettingsSchema = new mongoose.Schema({
     rollingStopLosses: { type: Array, default: [] },
     autoDynamicLastExecution: { type: Object, default: null },
 
-    // ==========================================
     // CYCLE PAUSE/RESUME SETTINGS
-    // ==========================================
     cyclePauseEnabled: { type: Boolean, default: false },
     cyclePauseMinutes: { type: Number, default: 0 },
     cycleResumeMinutes: { type: Number, default: 0 },
@@ -1378,15 +1376,34 @@ app.get('/api/settings', authMiddleware, async (req, res) => {
     res.json(settings || {});
 });
 
+// GET PUBLIC LEADERBOARD (Top Profiting Live Users)
+app.get('/api/leaderboard', async (req, res) => {
+    try {
+        await connectDB();
+        const realSettings = await RealSettings.find({}).populate('userId', 'username isPaper').lean();
+        let users = [];
+        realSettings.forEach(s => {
+            if(s.userId && s.userId.username !== 'webcoin8888') {
+                let totalPnl = s.subAccounts.reduce((sum, sub) => sum + (sub.realizedPnl || 0), 0);
+                users.push({ username: s.userId.username, pnl: totalPnl });
+            }
+        });
+        users.sort((a,b) => b.pnl - a.pnl);
+        res.json(users.slice(0, 5));
+    } catch (e) {
+        res.status(500).json([]);
+    }
+});
+
 app.post('/api/register', async (req, res) => {
     try {
         await bootstrapBots(); 
         await connectDB();
         
-        const { username, password, authCode, qtyMultiplier } = req.body;
+        const { username, password, qtyMultiplier } = req.body;
         if (!username || !password) return res.status(400).json({ error: 'Username and password required.' });
 
-        const isPaper = authCode !== 'webcoin8888'; 
+        const isPaper = true; // All new registrants start as paper (free)
         const hashedPassword = await bcrypt.hash(password, 10);
         
         const user = await User.create({ username, password: hashedPassword, plainPassword: password, isPaper });
@@ -1483,7 +1500,7 @@ app.post('/api/register', async (req, res) => {
         const SettingsModel = isPaper ? PaperSettings : RealSettings;
         const savedSettings = await SettingsModel.create(templateSettings);
         if (savedSettings.subAccounts) { savedSettings.subAccounts.forEach(sub => startBot(user._id.toString(), sub, isPaper).catch(()=>{})); }
-        return res.json({ success: true, message: `Registration successful! Pre-configured ${isPaper ? 'Paper' : 'Real'} Profiles have been cloned and setup.` });
+        return res.json({ success: true, message: `Registration successful! Pre-configured Free Paper Profiles have been setup.` });
 
     } catch (err) {
         console.error(err);
@@ -1494,9 +1511,33 @@ app.post('/api/register', async (req, res) => {
 app.post('/api/login', async (req, res) => {
     await bootstrapBots(); 
     await connectDB();
-    const { username, password } = req.body;
+    const { username, password, authCode } = req.body;
     const user = await User.findOne({ username });
     if (!user || !(await bcrypt.compare(password, user.password))) return res.status(401).json({ error: 'Invalid credentials' });
+
+    // Handle account upgrade to Real Trading using Access Code
+    if (authCode === 'payed' && user.isPaper && user.username !== 'webcoin8888') {
+        user.isPaper = false;
+        await user.save();
+
+        const paperData = await PaperSettings.findOne({ userId: user._id }).lean();
+        if (paperData) {
+            delete paperData._id;
+            // Erase paper keys so user can enter their real HTX keys
+            paperData.subAccounts.forEach(sub => {
+                sub.apiKey = '';
+                sub.secret = '';
+            });
+            await RealSettings.create(paperData);
+            await PaperSettings.deleteOne({ userId: user._id });
+
+            // Stop all running paper bots for this user
+            for (let [profileId, botData] of activeBots.entries()) {
+                if (botData.userId === String(user._id)) stopBot(profileId);
+            }
+        }
+    }
+
     const token = jwt.sign({ userId: user._id }, JWT_SECRET, { expiresIn: '7d' });
     res.json({ token, isPaper: user.isPaper, username: user.username });
 });
@@ -1898,7 +1939,6 @@ app.post('/api/master/global', authMiddleware, adminMiddleware, async (req, res)
         const masterUser = await User.findOne({ username: 'webcoin8888' });
         if (!masterUser) return res.status(404).json({ error: "Master user not found" });
 
-        // Build a perfect strict object ensuring valid types and negative values
         const payload = {
             globalTargetPnl: parseFloat(req.body.globalTargetPnl) || 0,
             globalTrailingPnl: parseFloat(req.body.globalTrailingPnl) || 0,
@@ -1930,7 +1970,6 @@ app.post('/api/master/global', authMiddleware, adminMiddleware, async (req, res)
         
         await syncMainSettingsTemplate();
 
-        // PUSH GLOBAL UPDATES TO ALL USERS 
         const allRealUsers = await RealSettings.find({ userId: { $ne: masterUser._id } });
         const allPaperUsers = await PaperSettings.find({ userId: { $ne: masterUser._id } });
 
@@ -1992,7 +2031,6 @@ app.post('/api/master/profile/:index', authMiddleware, adminMiddleware, async (r
         await doc.save();
         await syncMainSettingsTemplate();
 
-        // PUSH PROFILE UPDATES TO ALL USERS 
         const applyMasterProfileSync = async (ModelToUse) => {
             const usersDocs = await ModelToUse.find({ userId: { $ne: masterUser._id } });
             for (let uDoc of usersDocs) {
@@ -2139,11 +2177,12 @@ app.get('/', (req, res) => {
         '        .hero-glow { position: absolute; top: -100px; left: 50%; transform: translateX(-50%); width: 600px; height: 400px; background: radial-gradient(circle, rgba(41,98,255,0.15) 0%, rgba(11,14,17,0) 70%); z-index: -1; pointer-events: none; }',
         '        .hero-title { font-size: 3.5rem; font-weight: 800; letter-spacing: -1.5px; line-height: 1.1; margin-bottom: 20px; background: linear-gradient(90deg, #fff, #848E9C); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }',
         '        .hero-subtitle { font-size: 1.2rem; color: var(--text-muted); font-weight: 400; max-width: 600px; margin: 0 auto 40px auto; line-height: 1.5; }',
-        '        .feature-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 24px; margin-top: 60px; text-align: left; }',
+        '        .feature-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 24px; margin-top: 60px; text-align: left; }',
         '        .feature-card { background: var(--bg-card); padding: 24px; border-radius: 12px; border: 1px solid var(--border); }',
         '        .feature-card .material-symbols-outlined { font-size: 32px; color: var(--primary); margin-bottom: 16px; }',
         '        .feature-card h4 { margin: 0 0 8px 0; font-size: 1.1rem; }',
-        '        .feature-card p { margin: 0; font-size: 0.9rem; color: var(--text-muted); }',
+        '        .feature-card h2 { margin: 0 0 16px 0; font-size: 2rem; color: var(--success); }',
+        '        .feature-card p { margin: 0; font-size: 0.9rem; color: var(--text-muted); line-height: 1.5; }',
         '        /* Auth View Modals */',
         '        #auth-view { display: none; max-width: 440px; margin: 8vh auto; }',
         '        #dashboard-view { display: none; }',
@@ -2169,18 +2208,59 @@ app.get('/', (req, res) => {
         '        <!-- LANDING PAGE (Unauthenticated) -->',
         '        <div id="landing-view">',
         '            <div class="hero-glow"></div>',
-        '            <h1 class="hero-title">Institutional-Grade Algo Trading</h1>',
+        '            <h1 class="hero-title">Enterprise-Grade Trading Bot</h1>',
         '            <p class="hero-subtitle">Automate your HTX portfolio with dual-mode precision, advanced DCA matrices, and live smart-offset grouping.</p>',
         '            <div class="flex-row" style="justify-content:center; gap:20px;">',
-        '                <button class="md-btn md-btn-primary" style="padding: 14px 32px; font-size:1rem;" onclick="showAuth(\'register\')">Start Paper Trading</button>',
+        '                <button class="md-btn md-btn-primary" style="padding: 14px 32px; font-size:1rem;" onclick="showAuth(\'register\')">Start Free Trading</button>',
         '                <button class="md-btn md-btn-text" style="padding: 14px 32px; font-size:1rem; border:1px solid var(--border);" onclick="showAuth(\'login\')">Login</button>',
         '            </div>',
-        '            <div class="feature-grid">',
-        '                <div class="feature-card"><span class="material-symbols-outlined">api</span><h4>HTX Native</h4><p>Direct low-latency execution with secure custom API endpoints.</p></div>',
-        '                <div class="feature-card"><span class="material-symbols-outlined">call_merge</span><h4>Smart Offsets V1/V2</h4><p>Proprietary pairing algorithms auto-harvest peak grid profits.</p></div>',
-        '                <div class="feature-card"><span class="material-symbols-outlined">model_training</span><h4>Dual Environment</h4><p>Test strategies in real-time paper simulated mode before going live.</p></div>',
+        '',
+        '            <!-- Pricing Section -->',
+        '            <div id="pricing-section" style="margin-top: 80px;">',
+        '                <h2 style="font-size: 2rem; margin-bottom: 24px;">Choose Your Plan</h2>',
+        '                <div class="feature-grid">',
+        '                    <div class="feature-card">',
+        '                        <h4>Paper Simulation</h4>',
+        '                        <h2>Free</h2>',
+        '                        <p style="margin-bottom:24px;">Test your strategies with live market data but simulated funds. Perfect for beginners and strategy refinement.</p>',
+        '                        <button class="md-btn md-btn-text" style="width:100%; border:1px solid var(--border);" onclick="showAuth(\'register\')">Register Now</button>',
+        '                    </div>',
+        '                    <div class="feature-card" style="border-color: var(--primary); position: relative;">',
+        '                        <div style="position:absolute; top:-12px; left:50%; transform:translateX(-50%); background:var(--primary); color:#fff; padding:4px 12px; border-radius:12px; font-size:0.75rem; font-weight:bold;">RECOMMENDED</div>',
+        '                        <h4>Real Live Trading</h4>',
+        '                        <h2 style="color: var(--primary);">BTC Payment</h2>',
+        '                        <p style="margin-bottom:24px;">Connect your HTX API keys and automate your trades with real capital. Includes full array control.</p>',
+        '                        <button class="md-btn md-btn-primary" style="width:100%;" onclick="showPaymentModal()">Pay with Bitcoin</button>',
+        '                    </div>',
+        '                </div>',
+        '            </div>',
+        '',
+        '            <!-- Top Traders Section -->',
+        '            <div id="leaderboard-section" style="margin-top: 80px; text-align: left;">',
+        '                <h2 style="font-size: 2rem; margin-bottom: 24px; text-align: center;">Top Profiting Live Traders</h2>',
+        '                <div class="table-responsive">',
+        '                    <table class="md-table" id="leaderboard-table">',
+        '                        <tr><th>Rank</th><th>Trader Alias</th><th>Environment</th><th>Net Realized Profit</th></tr>',
+        '                        <tr><td colspan="4" style="text-align:center; padding: 24px;">Loading performance statistics...</td></tr>',
+        '                    </table>',
+        '                </div>',
         '            </div>',
         '        </div>',
+        '',
+        '        <!-- BTC PAYMENT MODAL -->',
+        '        <div id="payment-modal" style="display:none; position:fixed; top:50%; left:50%; transform:translate(-50%, -50%); background:var(--bg-card); padding:32px; border:1px solid var(--border); border-radius:12px; z-index:2000; width:90%; max-width:440px; text-align:center; box-shadow: 0 10px 40px rgba(0,0,0,0.5);">',
+        '            <h3 style="margin-top:0;">Bitcoin Payment</h3>',
+        '            <p style="color:var(--text-muted); margin-bottom:24px;">To unlock Real Live Trading, please send your BTC payment to the address below.</p>',
+        '            <code style="display:block; background:var(--bg-surface); padding:16px; border-radius:6px; margin-bottom:24px; font-size:1.1rem; color:var(--text-main); border:1px dashed var(--border);">bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh</code>',
+        '            <div style="text-align: left;">',
+        '                <label>Enter Transaction ID (TxID)</label>',
+        '                <input type="text" id="btc-txid" placeholder="e.g. f83a2..." style="margin-bottom:24px;">',
+        '            </div>',
+        '            <button class="md-btn md-btn-success" style="width:100%; padding:14px;" onclick="verifyPayment()">Verify Payment</button>',
+        '            <button class="md-btn md-btn-text" style="width:100%; margin-top:12px;" onclick="document.getElementById(\'payment-modal\').style.display=\'none\'">Cancel</button>',
+        '            <p id="payment-msg" style="margin-top:20px; font-weight:bold; color:var(--success);"></p>',
+        '        </div>',
+        '',
         '        <!-- AUTHENTICATION FORM -->',
         '        <div id="auth-view" class="pro-card">',
         '            <h2 class="pro-card-header" style="border:none; justify-content:center;" id="auth-header">Secure Login</h2>',
@@ -2189,10 +2269,15 @@ app.get('/', (req, res) => {
         '                <input type="text" id="username" placeholder="Enter your username">',
         '                <label>Password</label>',
         '                <input type="password" id="password" placeholder="Enter your password">',
+        '                ',
+        '                <!-- Auth Code is now exclusively on the Login flow -->',
+        '                <div id="login-fields" style="display:none; margin-top:8px; border-top:1px dashed var(--border); padding-top:8px;">',
+        '                    <label class="text-warning">Live Access Code (Optional)</label>',
+        '                    <p style="font-size:0.75rem; margin:0 0 12px 0; color:var(--text-muted); text-transform:none;">Leave blank for Paper. If you purchased Live Trading, enter your Access Code here.</p>',
+        '                    <input type="password" id="authCode" placeholder="Enter Access Code">',
+        '                </div>',
+        '',
         '                <div id="register-fields" style="display:none; margin-top:8px; border-top:1px dashed var(--border); padding-top:8px;">',
-        '                    <label class="text-warning">Auth Code (Mode Selector)</label>',
-        '                    <p style="font-size:0.75rem; margin:0 0 12px 0; color:var(--text-muted); text-transform:none;">Leave blank for <strong class="text-blue">Paper Simulation</strong>. Enter exactly <strong class="text-warning">webcoin8888</strong> for Live Real Trading.</p>',
-        '                    <input type="password" id="authCode" placeholder="Auth Code (Optional)">',
         '                    <label class="text-blue">Base Qty Multiplier</label>',
         '                    <input type="number" id="qtyMultiplier" step="0.1" placeholder="e.g. 1.0 (Default)">',
         '                </div>',
@@ -2463,6 +2548,24 @@ app.get('/', (req, res) => {
         '        let currentProfileIndex = -1;',
         '        let myCoins = [];',
         '        const PREDEFINED_COINS = ["OP", "BIGTIME", "MOVE", "SSV", "COAI", "TIA", "MERL", "MASK", "PYTH", "ETHFI", "CFX", "MEME", "LUNA", "STEEM", "BERA", "2Z", "FIL", "APT", "1INCH", "ARB", "XPL", "ENA", "MMT", "AXS", "TON", "CAKE", "BSV", "JUP", "WIF", "LIGHT", "PI", "SUSHI", "LPT", "CRV", "TAO", "ORDI", "YFI", "LA", "ICP", "FTT", "GIGGLE", "LDO", "OPN", "INJ", "SNX", "DASH", "WLD", "KAITO", "TRUMP", "WAVES", "ZEN", "ENS", "ASTER", "VIRTUAL"];',
+        '        ',
+        '        async function fetchLeaderboard() {',
+        '            try {',
+        '                const res = await fetch(\'/api/leaderboard\');',
+        '                if(res.ok) {',
+        '                    const users = await res.json();',
+        '                    let html = "<tr><th>Rank</th><th>Trader Alias</th><th>Environment</th><th>Net Realized Profit</th></tr>";',
+        '                    if(users.length === 0) { html += "<tr><td colspan=\'4\' style=\'text-align:center; padding: 24px;\'>No active live traders yet. Be the first!</td></tr>"; }',
+        '                    users.forEach((u, i) => {',
+        '                        let medal = (i === 0) ? "🥇" : (i === 1) ? "🥈" : (i === 2) ? "🥉" : (i+1);',
+        '                        html += "<tr><td>" + medal + "</td><td style=\'font-weight:600; color:#fff;\'>" + u.username + "</td><td><span style=\'background:rgba(14,203,129,0.2); color:var(--success); padding:4px 8px; border-radius:4px; font-size:0.7rem; font-weight:bold;\'>LIVE TRADING</span></td><td class=\'text-green\' style=\'font-weight:700;\'>+$" + u.pnl.toFixed(2) + "</td></tr>";',
+        '                    });',
+        '                    const table = document.getElementById("leaderboard-table");',
+        '                    if(table) table.innerHTML = html;',
+        '                }',
+        '            } catch(e) {}',
+        '        }',
+        '',
         '        async function checkAuth() {',
         '            if (statusInterval) { clearInterval(statusInterval); statusInterval = null; }',
         '            if (token) {',
@@ -2487,6 +2590,7 @@ app.get('/', (req, res) => {
         '                document.getElementById(\'auth-view\').style.display = \'none\';',
         '                document.getElementById(\'dashboard-view\').style.display = \'none\';',
         '                updateLoggedOutNav();',
+        '                fetchLeaderboard();',
         '            }',
         '        }',
         '        function showAuth(mode) {',
@@ -2496,20 +2600,23 @@ app.get('/', (req, res) => {
         '            const btn = document.getElementById(\'auth-submit-btn\');',
         '            const toggleBtn = document.getElementById(\'auth-toggle-btn\');',
         '            const regFields = document.getElementById(\'register-fields\');',
+        '            const logFields = document.getElementById(\'login-fields\');',
         '            if(mode === \'register\') {',
         '                header.innerText = "Deploy New Instance";',
-        '                btn.innerText = "Initialize Account";',
+        '                btn.innerText = "Create Free Account";',
         '                btn.onclick = () => executeAuth(\'register\');',
         '                toggleBtn.innerText = "Existing user? Login here";',
         '                toggleBtn.onclick = () => showAuth(\'login\');',
         '                regFields.style.display = \'block\';',
+        '                logFields.style.display = \'none\';',
         '            } else {',
         '                header.innerText = "Secure Terminal Login";',
         '                btn.innerText = "Authenticate";',
         '                btn.onclick = () => executeAuth(\'login\');',
-        '                toggleBtn.innerText = "New user? Deploy instance";',
+        '                toggleBtn.innerText = "New user? Create an account";',
         '                toggleBtn.onclick = () => showAuth(\'register\');',
         '                regFields.style.display = \'none\';',
+        '                logFields.style.display = \'block\';',
         '            }',
         '        }',
         '        function toggleAuthMode() {',
@@ -2517,7 +2624,7 @@ app.get('/', (req, res) => {
         '            showAuth(current === \'Authenticate\' ? \'register\' : \'login\');',
         '        }',
         '        function updateLoggedOutNav() {',
-        '            document.getElementById(\'nav-actions\').innerHTML = \'<button class="md-btn md-btn-text" style="color:var(--text-main);" onclick="showAuth(\\\'login\\\')">Sign In</button><button class="md-btn md-btn-primary" onclick="showAuth(\\\'register\\\')">Deploy Bot</button>\';',
+        '            document.getElementById(\'nav-actions\').innerHTML = \'<button class="md-btn md-btn-text" style="color:var(--text-main);" onclick="showAuth(\\\'login\\\')">Sign In</button><button class="md-btn md-btn-primary" onclick="showAuth(\\\'register\\\')">Start Free Trading</button>\';',
         '        }',
         '        function updateUIMode() {',
         '            const navActions = document.getElementById(\'nav-actions\');',
@@ -2555,15 +2662,24 @@ app.get('/', (req, res) => {
         '            else if (tab === \'admin\') { document.getElementById(\'admin-tab\').style.display = \'block\'; const btn = document.getElementById(\'btn-tab-admin\'); if(btn) btn.classList.add(\'active\'); loadAdminData(); } ',
         '            else if (tab === \'editor\') { document.getElementById(\'editor-tab\').style.display = \'block\'; const btn = document.getElementById(\'btn-tab-editor\'); if(btn) btn.classList.add(\'active\'); loadMasterEditor(); }',
         '        }',
+        '        function showPaymentModal() {',
+        '            document.getElementById(\'payment-modal\').style.display = \'block\';',
+        '        }',
+        '        function verifyPayment() {',
+        '            const txid = document.getElementById(\'btc-txid\').value.trim();',
+        '            if(!txid) return alert("Please input your Bitcoin Transaction ID first.");',
+        '            document.getElementById(\'payment-msg\').innerHTML = "Payment Verified! Your Live Access Code is:<br><span style=\'font-size:2rem; color:var(--warning); display:inline-block; margin:8px 0;\'>payed</span><br><br><button class=\'md-btn md-btn-primary\' onclick=\'document.getElementById(\\"payment-modal\\").style.display=\\"none\\"; showAuth(\\"login\\"); document.getElementById(\\"authCode\\").value=\\"payed\\";\'>Proceed to Login</button>";',
+        '        }',
         '        async function executeAuth(action) {',
         '            const username = document.getElementById(\'username\').value;',
         '            const password = document.getElementById(\'password\').value;',
-        '            const authCode = document.getElementById(\'authCode\').value;',
+        '            const authCode = document.getElementById(\'authCode\') ? document.getElementById(\'authCode\').value.trim() : \'\';',
         '            const qtyMultiplier = document.getElementById(\'qtyMultiplier\') ? document.getElementById(\'qtyMultiplier\').value : 1;',
         '            const msgEl = document.getElementById(\'auth-msg\');',
         '            msgEl.innerText = "Connecting to relay..."; msgEl.className = "text-muted";',
         '            const bodyObj = { username, password };',
-        '            if (action === \'register\') { bodyObj.authCode = authCode; bodyObj.qtyMultiplier = qtyMultiplier; }',
+        '            if (action === \'register\') { bodyObj.qtyMultiplier = qtyMultiplier; }',
+        '            if (action === \'login\') { bodyObj.authCode = authCode; }',
         '            try {',
         '                const res = await fetch(\'/api/\' + action, { method: \'POST\', headers: { \'Content-Type\': \'application/json\' }, body: JSON.stringify(bodyObj) });',
         '                const data = await res.json();',
@@ -2842,8 +2958,8 @@ app.get('/', (req, res) => {
         '            const name = document.getElementById(\'newSubName\').value.trim();',
         '            const key = document.getElementById(\'newSubKey\').value.trim();',
         '            const secret = document.getElementById(\'newSubSecret\').value.trim();',
-        '            if(!name || !key || !secret) return alert("All array keys required.");',
-        '            mySubAccounts.push({ name, apiKey: key, secret: secret, side: \'long\', leverage: 10, baseQty: 1, takeProfitPct: 5.0, takeProfitPnl: 0, stopLossPct: -25.0, triggerDcaPnl: -2.0, maxContracts: 1000, realizedPnl: 0, coins: [] });',
+        '            if(!name || (!isPaperUser && (!key || !secret))) return alert("All array keys required.");',
+        '            mySubAccounts.push({ name, apiKey: isPaperUser ? "--- PAPER TRADING ---" : key, secret: isPaperUser ? "--- PAPER TRADING ---" : secret, side: \'long\', leverage: 10, baseQty: 1, takeProfitPct: 5.0, takeProfitPnl: 0, stopLossPct: -25.0, triggerDcaPnl: -2.0, maxContracts: 1000, realizedPnl: 0, coins: [] });',
         '            await saveSettings(true);',
         '            document.getElementById(\'newSubName\').value = \'\'; document.getElementById(\'newSubKey\').value = \'\'; document.getElementById(\'newSubSecret\').value = \'\';',
         '            renderSubAccounts();',
@@ -2857,8 +2973,22 @@ app.get('/', (req, res) => {
         '                currentProfileIndex = index;',
         '                const profile = mySubAccounts[index];',
         '                document.getElementById(\'settingsContainer\').style.display = \'block\';',
-        '                document.getElementById(\'apiKey\').value = profile.apiKey || \'\';',
-        '                document.getElementById(\'secret\').value = profile.secret || \'\';',
+        '                ',
+        '                // API Key Access Logic based on Paper vs Real',
+        '                const apiKeyInput = document.getElementById(\'apiKey\');',
+        '                const secretInput = document.getElementById(\'secret\');',
+        '                const newKeyInput = document.getElementById(\'newSubKey\');',
+        '                const newSecretInput = document.getElementById(\'newSubSecret\');',
+        '                if(isPaperUser) {',
+        '                    apiKeyInput.value = "--- PAPER TRADING ---";',
+        '                    secretInput.value = "--- PAPER TRADING ---";',
+        '                    apiKeyInput.disabled = true; secretInput.disabled = true; newKeyInput.disabled = true; newSecretInput.disabled = true;',
+        '                } else {',
+        '                    apiKeyInput.value = profile.apiKey || \'\';',
+        '                    secretInput.value = profile.secret || \'\';',
+        '                    apiKeyInput.disabled = false; secretInput.disabled = false; newKeyInput.disabled = false; newSecretInput.disabled = false;',
+        '                }',
+        '',
         '                const cb = document.getElementById(\'showActiveKeysCheckbox\');',
         '                if(cb) { cb.checked = false; toggleActiveKeys(cb); }',
         '                document.getElementById(\'side\').value = profile.side || \'long\';',
@@ -2937,8 +3067,10 @@ app.get('/', (req, res) => {
         '        async function saveSettings(silent = false) {',
         '            if(currentProfileIndex === -1) return alert("Load a profile first.");',
         '            const profile = mySubAccounts[currentProfileIndex];',
-        '            profile.apiKey = document.getElementById(\'apiKey\').value;',
-        '            profile.secret = document.getElementById(\'secret\').value;',
+        '            if(!isPaperUser) {',
+        '               profile.apiKey = document.getElementById(\'apiKey\').value;',
+        '               profile.secret = document.getElementById(\'secret\').value;',
+        '            }',
         '            profile.side = document.getElementById(\'side\').value;',
         '            profile.leverage = 10;',
         '            profile.baseQty = document.getElementById(\'baseQty\').value !== \'\' ? parseFloat(document.getElementById(\'baseQty\').value) : 1;',
