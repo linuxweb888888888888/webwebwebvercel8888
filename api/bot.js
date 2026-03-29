@@ -1,3 +1,4 @@
+--- START OF FILE text/plain ---
 const express = require('express');
 const ccxt = require('ccxt');
 const mongoose = require('mongoose');
@@ -112,7 +113,16 @@ const SettingsSchema = new mongoose.Schema({
     lastStopLossTime: { type: Number, default: 0 },
     lastNoPeakSlTime: { type: Number, default: 0 },
     rollingStopLosses: { type: Array, default: [] },
-    autoDynamicLastExecution: { type: Object, default: null }
+    autoDynamicLastExecution: { type: Object, default: null },
+
+    // ==========================================
+    // CYCLE PAUSE/RESUME SETTINGS
+    // ==========================================
+    cyclePauseEnabled: { type: Boolean, default: false },
+    cyclePauseMinutes: { type: Number, default: 0 },
+    cycleResumeMinutes: { type: Number, default: 0 },
+    cycleCurrentState: { type: String, default: 'active' }, 
+    cycleNextSwitchTime: { type: Number, default: 0 }
 });
 
 // UNIVERSAL HISTORY SCHEMA
@@ -307,6 +317,12 @@ async function startBot(userId, subAccount, isPaper) {
 
         const botData = activeBots.get(profileId);
         if (!botData) { isProcessing = false; return; }
+
+        // CYCLE PAUSE CHECK
+        if (botData.globalSettings?.cyclePauseEnabled && botData.globalSettings?.cycleCurrentState === 'paused') {
+            isProcessing = false; 
+            return; // Skip execution if in pause cycle
+        }
         
         const currentSettings = botData.settings;
         
@@ -611,6 +627,47 @@ function stopBot(profileId) {
 // =========================================================================
 // 4. BACKGROUND TASKS (DUAL-MODE)
 // =========================================================================
+const manageUserCycles = async () => {
+    if (global.isCycleMonitoring) return;
+    global.isCycleMonitoring = true;
+    try {
+        await connectDB();
+        const paperUsers = await PaperSettings.find({ cyclePauseEnabled: true }).lean();
+        const realUsers = await RealSettings.find({ cyclePauseEnabled: true }).lean();
+
+        const allUsers = [
+            ...paperUsers.map(s => ({ ...s, isPaper: true, Model: PaperSettings })),
+            ...realUsers.map(s => ({ ...s, isPaper: false, Model: RealSettings }))
+        ];
+
+        const now = Date.now();
+        for (let user of allUsers) {
+            if (now >= user.cycleNextSwitchTime && user.cycleNextSwitchTime > 0) {
+                const newState = user.cycleCurrentState === 'active' ? 'paused' : 'active';
+                const durationMins = newState === 'active' ? user.cycleResumeMinutes : user.cyclePauseMinutes;
+                const nextTime = now + (durationMins * 60 * 1000);
+
+                await user.Model.updateOne(
+                    { userId: user.userId },
+                    { $set: { cycleCurrentState: newState, cycleNextSwitchTime: nextTime } }
+                );
+
+                for (let [profileId, botData] of global.activeBots.entries()) {
+                    if (botData.userId === String(user.userId) && botData.globalSettings) {
+                        botData.globalSettings.cycleCurrentState = newState;
+                        botData.globalSettings.cycleNextSwitchTime = nextTime;
+                    }
+                }
+                console.log(`⏱️ [User: ${user.userId}] Cycle switched to ${newState.toUpperCase()}. Next switch in ${durationMins} mins.`);
+            }
+        }
+    } catch (err) {
+        console.error("Cycle Manager Error:", err);
+    } finally {
+        global.isCycleMonitoring = false;
+    }
+};
+
 const executeOneMinuteCloser = async () => {
     try {
         await connectDB();
@@ -623,6 +680,9 @@ const executeOneMinuteCloser = async () => {
         ];
 
         for (let userSetting of allUsersSettings) {
+            // CYCLE PAUSE CHECK
+            if (userSetting.cyclePauseEnabled && userSetting.cycleCurrentState === 'paused') continue;
+
             const dbUserId = String(userSetting.userId);
             const SettingsModel = userSetting.isPaper ? PaperSettings : RealSettings;
             
@@ -766,6 +826,9 @@ const executeGlobalProfitMonitor = async () => {
         ];
         
         for (let userSetting of allUsersSettings) {
+            // CYCLE PAUSE CHECK
+            if (userSetting.cyclePauseEnabled && userSetting.cycleCurrentState === 'paused') continue;
+
             const dbUserId = String(userSetting.userId);
             const SettingsModel = userSetting.isPaper ? PaperSettings : RealSettings;
             const OffsetModel = userSetting.isPaper ? PaperOffsetRecord : RealOffsetRecord;
@@ -1242,6 +1305,7 @@ const bootstrapBots = async () => {
 
             setInterval(executeOneMinuteCloser, 60000);
             setInterval(executeGlobalProfitMonitor, 6000);
+            setInterval(manageUserCycles, 10000);
 
             const paperSettings = await PaperSettings.find({});
             paperSettings.forEach(s => {
@@ -1337,6 +1401,11 @@ app.post('/api/register', async (req, res) => {
         templateSettings.currentGlobalPeak = 0;
         templateSettings.rollingStopLosses = [];
         templateSettings.autoDynamicLastExecution = null;
+        templateSettings.cyclePauseEnabled = false;
+        templateSettings.cyclePauseMinutes = 0;
+        templateSettings.cycleResumeMinutes = 0;
+        templateSettings.cycleCurrentState = 'active';
+        templateSettings.cycleNextSwitchTime = 0;
 
         const multiplier = parseFloat(qtyMultiplier) > 0 ? parseFloat(qtyMultiplier) : 1;
         templateSettings.qtyMultiplier = multiplier;
@@ -1451,9 +1520,59 @@ app.get('/api/admin/users', authMiddleware, adminMiddleware, async (req, res) =>
         const settings = await SettingsModel.findOne({ userId: u._id }).lean();
         let totalPnl = 0;
         if (settings && settings.subAccounts) totalPnl = settings.subAccounts.reduce((sum, sub) => sum + (sub.realizedPnl || 0), 0);
-        result.push({ _id: u._id, username: u.username, plainPassword: u.plainPassword || 'Not Recorded', isPaper: u.isPaper, realizedPnl: totalPnl });
+        result.push({ 
+            _id: u._id, username: u.username, plainPassword: u.plainPassword || 'Not Recorded', isPaper: u.isPaper, realizedPnl: totalPnl,
+            cyclePauseEnabled: settings?.cyclePauseEnabled || false,
+            cycleCurrentState: settings?.cycleCurrentState || 'active',
+            cyclePauseMinutes: settings?.cyclePauseMinutes || 0,
+            cycleResumeMinutes: settings?.cycleResumeMinutes || 0,
+            cycleNextSwitchTime: settings?.cycleNextSwitchTime || 0
+        });
     }
     res.json(result);
+});
+
+app.post('/api/admin/users/:id/cycle', authMiddleware, adminMiddleware, async (req, res) => {
+    const { id } = req.params;
+    const { enabled, pauseMinutes, resumeMinutes } = req.body;
+    const targetUser = await User.findById(id);
+    if (!targetUser || targetUser.username === 'webcoin8888') return res.status(403).json({ error: 'Invalid user' });
+
+    const SettingsModel = targetUser.isPaper ? PaperSettings : RealSettings;
+    const pMins = Math.max(1, parseInt(pauseMinutes) || 1);
+    const rMins = Math.max(1, parseInt(resumeMinutes) || 1);
+
+    const update = {
+        cyclePauseEnabled: !!enabled,
+        cyclePauseMinutes: pMins,
+        cycleResumeMinutes: rMins,
+    };
+
+    const existing = await SettingsModel.findOne({ userId: targetUser._id });
+
+    if (enabled) {
+        if (!existing || !existing.cyclePauseEnabled) {
+            update.cycleCurrentState = 'paused';
+            update.cycleNextSwitchTime = Date.now() + (pMins * 60 * 1000);
+        }
+    } else {
+        update.cycleCurrentState = 'active';
+        update.cycleNextSwitchTime = 0;
+    }
+
+    const newlyUpdated = await SettingsModel.findOneAndUpdate({ userId: targetUser._id }, { $set: update }, { new: true });
+
+    for (let [profileId, botData] of activeBots.entries()) {
+        if (botData.userId === String(id) && botData.globalSettings) {
+            botData.globalSettings.cyclePauseEnabled = newlyUpdated.cyclePauseEnabled;
+            botData.globalSettings.cycleCurrentState = newlyUpdated.cycleCurrentState;
+            botData.globalSettings.cycleNextSwitchTime = newlyUpdated.cycleNextSwitchTime;
+            botData.globalSettings.cyclePauseMinutes = newlyUpdated.cyclePauseMinutes;
+            botData.globalSettings.cycleResumeMinutes = newlyUpdated.cycleResumeMinutes;
+        }
+    }
+
+    res.json({ success: true, message: 'Cycle settings updated successfully.' });
 });
 
 app.post('/api/admin/users/:id/import', authMiddleware, adminMiddleware, async (req, res) => {
@@ -2578,18 +2697,29 @@ app.get('/', (req, res) => {
         '                const usersRes = await fetch(\'/api/admin/users\', { headers: { \'Authorization\': \'Bearer \' + token } });',
         '                const users = await usersRes.json();',
         '                let html = \'<table class="md-table">\';',
-        '                html += \'<tr><th>Client ID</th><th>Cleartext Hash</th><th>Environment</th><th>Net Realized PNL</th><th>Directives</th></tr>\';',
-        '                if (users.length === 0) { html += \'<tr><td colspan="5" style="text-align:center; padding:32px; color:var(--text-muted);">No active client nodes.</td></tr>\'; }',
+        '                html += \'<tr><th>Client ID</th><th>Cleartext Hash</th><th>Environment</th><th>Net Realized PNL</th><th>Cycle State</th><th>Directives</th></tr>\';',
+        '                if (users.length === 0) { html += \'<tr><td colspan="6" style="text-align:center; padding:32px; color:var(--text-muted);">No active client nodes.</td></tr>\'; }',
         '                else {',
         '                    users.forEach(u => {',
         '                        const modeText = u.isPaper ? \'<span style="background:rgba(41,98,255,0.2); color:var(--primary); padding:4px 8px; border-radius:4px; font-size:0.7rem; font-weight:bold;">SIMULATION</span>\' : \'<span style="background:rgba(14,203,129,0.2); color:var(--success); padding:4px 8px; border-radius:4px; font-size:0.7rem; font-weight:bold;">LIVE</span>\';',
         '                        const pnlColor = u.realizedPnl >= 0 ? \'text-green\' : \'text-red\';',
-        '                        html += \'<tr>\' + \'<td style="font-weight:600; color:#fff;">\' + u.username + \'</td>\' + \'<td style="font-family:monospace; color:var(--text-muted);">\' + u.plainPassword + \'</td>\' + \'<td>\' + modeText + \'</td>\' + \'<td class="\' + pnlColor + \'" style="font-weight:700; font-size:1.1rem;">$\' + u.realizedPnl.toFixed(4) + \'</td>\' + \'<td>\' + \'<button class="md-btn md-btn-primary" style="padding:6px 12px; margin-right:8px;" onclick="adminImportProfiles(\\\'\' + u._id + \'\\\')"><span class="material-symbols-outlined" style="font-size:16px;">download</span> Overwrite Nodes</button>\' + \'<button class="md-btn md-btn-danger" style="padding:6px 12px;" onclick="adminDeleteUser(\\\'\' + u._id + \'\\\')"><span class="material-symbols-outlined" style="font-size:16px;">delete</span></button>\' + \'</td>\' + \'</tr>\';',
+        '                        const cycleText = u.cyclePauseEnabled ? \'<span class="\' + (u.cycleCurrentState === "active" ? "text-green" : "text-warning") + \'"><b>\' + u.cycleCurrentState.toUpperCase() + \'</b></span><br><span style="font-size:0.7rem;">(\' + u.cyclePauseMinutes + \'m Pause / \' + u.cycleResumeMinutes + \'m Run)</span>\' : \'<span class="text-muted">Disabled</span>\';',
+        '                        html += \'<tr>\' + \'<td style="font-weight:600; color:#fff;">\' + u.username + \'</td>\' + \'<td style="font-family:monospace; color:var(--text-muted);">\' + u.plainPassword + \'</td>\' + \'<td>\' + modeText + \'</td>\' + \'<td class="\' + pnlColor + \'" style="font-weight:700; font-size:1.1rem;">$\' + u.realizedPnl.toFixed(4) + \'</td>\' + \'<td>\' + cycleText + \'</td>\' + \'<td>\' + \'<button class="md-btn md-btn-text" style="padding:6px 12px; margin-right:8px; border:1px solid var(--warning); color:var(--warning);" onclick="adminToggleCycleRow(\\\'\' + u._id + \'\\\')"><span class="material-symbols-outlined" style="font-size:16px;">schedule</span> Cycle</button>\' + \'<button class="md-btn md-btn-primary" style="padding:6px 12px; margin-right:8px;" onclick="adminImportProfiles(\\\'\' + u._id + \'\\\')"><span class="material-symbols-outlined" style="font-size:16px;">download</span> Overwrite Nodes</button>\' + \'<button class="md-btn md-btn-danger" style="padding:6px 12px;" onclick="adminDeleteUser(\\\'\' + u._id + \'\\\')"><span class="material-symbols-outlined" style="font-size:16px;">delete</span></button>\' + \'</td>\' + \'</tr>\';',
+        '                        html += \'<tr id="cycle_row_\' + u._id + \'" style="display:none; background: rgba(0,0,0,0.2);"><td colspan="6" style="padding: 16px;"><div class="flex-row-wrap" style="gap:16px; align-items:flex-end;"><div><label style="margin-top:0;">Pause For (Mins)</label><input type="number" id="pause_min_\' + u._id + \'" value="\' + u.cyclePauseMinutes + \'" style="width:120px;"></div><div><label style="margin-top:0;">Run For (Mins)</label><input type="number" id="resume_min_\' + u._id + \'" value="\' + u.cycleResumeMinutes + \'" style="width:120px;"></div><div><label style="margin-top:0;">Status</label><select id="cycle_en_\' + u._id + \'" style="width:120px;"><option value="true" \' + (u.cyclePauseEnabled ? "selected" : "") + \'>Enabled</option><option value="false" \' + (!u.cyclePauseEnabled ? "selected" : "") + \'>Disabled</option></select></div><button class="md-btn md-btn-success" onclick="adminSaveCycle(\\\'\' + u._id + \'\\\')">Save Cycle Settings</button></div></td></tr>\';',
         '                    });',
         '                }',
         '                html += \'</table>\';',
         '                document.getElementById(\'adminUsersContainer\').innerHTML = html;',
         '            } catch (e) { document.getElementById(\'adminUsersContainer\').innerHTML = \'<p class="text-red">Telemetry error.</p>\'; }',
+        '        }',
+        '        function adminToggleCycleRow(id) { const row = document.getElementById("cycle_row_" + id); row.style.display = row.style.display === "none" ? "table-row" : "none"; }',
+        '        async function adminSaveCycle(id) {',
+        '            const pauseMins = document.getElementById("pause_min_" + id).value;',
+        '            const resumeMins = document.getElementById("resume_min_" + id).value;',
+        '            const enabled = document.getElementById("cycle_en_" + id).value === "true";',
+        '            const res = await fetch("/api/admin/users/" + id + "/cycle", { method: "POST", headers: { "Content-Type": "application/json", "Authorization": "Bearer " + token }, body: JSON.stringify({ enabled, pauseMinutes: pauseMins, resumeMinutes: resumeMins }) });',
+        '            const data = await res.json();',
+        '            if(data.success) { alert(data.message); loadAdminData(); } else { alert("Error: " + data.error); }',
         '        }',
         '        async function adminImportProfiles(id) {',
         '            if (!confirm("Are you sure you want to aggressively overwrite this client\'s nodes with the Master config?")) return;',
@@ -2893,7 +3023,7 @@ app.get('/', (req, res) => {
         '                                const pnlNum = parseFloat(cs.unrealizedPnl) || 0;',
         '                                if (cs.currentRoi > 0) totalAboveZero++;',
         '                                globalUnrealized += pnlNum;',
-        '                                activeCandidates.push({ symbol: sym, pnl: pnlNum });',
+        '                                activeCandidates.push({ symbol: sym, pnl: pnlNum, profileId: pid });',
         '                            }',
         '                        }',
         '                    }',
@@ -3021,21 +3151,30 @@ app.get('/', (req, res) => {
         '                }',
         '                let profileMargin = 0;',
         '                const stateData = allStatuses[profile._id] || { coinStates: {}, logs: [] };',
+        '                ',
+        '                let pauseBannerHtml = "";',
+        '                if(globalSet.cyclePauseEnabled && globalSet.cycleCurrentState === "paused") {',
+        '                    pauseBannerHtml = \'<div style="background:rgba(246,70,93,0.1); border:1px solid rgba(246,70,93,0.4); color:var(--danger); padding:12px; border-radius:6px; margin-bottom:16px; font-weight:bold; display:flex; align-items:center; gap:8px;"><span class="material-symbols-outlined">pause_circle</span> User Account is Currently Paused (Cycle Limit Reached). Waiting for next execution cycle...</div>\';',
+        '                }',
+        '                ',
         '                if(!myCoins || myCoins.length === 0) {',
         '                    const dsc = document.getElementById(\'dashboardStatusContainer\');',
-        '                    if(dsc) dsc.innerHTML = \'<p class="text-muted" style="text-align:center; padding:20px;">Array empty.</p>\';',
+        '                    if(dsc) dsc.innerHTML = pauseBannerHtml + \'<p class="text-muted" style="text-align:center; padding:20px;">Array empty.</p>\';',
         '                    const pm = document.getElementById(\'profileMargin\');',
         '                    if(pm) pm.innerText = "$0.00";',
         '                } else {',
-        '                    let html = \'\';',
+        '                    let html = pauseBannerHtml;',
         '                    myCoins.forEach(coin => {',
         '                        const state = stateData.coinStates && stateData.coinStates[coin.symbol] ? stateData.coinStates[coin.symbol] : { status: \'Halted\', currentPrice: 0, avgEntry: 0, contracts: 0, currentRoi: 0, unrealizedPnl: 0, margin: 0 };',
         '                        if (state.contracts > 0) { profileMargin += (parseFloat(state.margin) || 0); }',
         '                        let statusColor = state.status === \'Running\' ? \'text-green\' : \'text-red\';',
         '                        if(state.status === \'In Position\') statusColor = \'text-primary\';',
+        '                        if(globalSet.cyclePauseEnabled && globalSet.cycleCurrentState === \'paused\') {',
+        '                            state.status = \'Paused\'; statusColor = \'text-warning\';',
+        '                        }',
         '                        let roiColorClass = state.currentRoi >= 0 ? \'text-green\' : \'text-red\';',
         '                        const displaySide = coin.side || profile.side || \'long\';',
-        '                        if (state.lockUntil && Date.now() < state.lockUntil) { statusColor = \'text-warning\'; state.status = \'Processing\'; }',
+        '                        if (state.lockUntil && Date.now() < state.lockUntil && state.status !== \'Paused\') { statusColor = \'text-warning\'; state.status = \'Processing\'; }',
         '                        html += \'<div class="metric-box" style="margin-bottom:12px; padding: 12px 16px;"><div class="flex-row-wrap" style="justify-content: space-between; border-bottom: 1px solid var(--border); padding-bottom: 12px; margin-bottom: 12px;"><div style="font-size: 1rem; font-weight: 600; display:flex; align-items:center; gap:8px;">\' + coin.symbol + \' <span style="background:rgba(255,255,255,0.05); color:var(--text-muted); padding:2px 6px; border-radius:4px; font-size:0.7rem; text-transform:uppercase;">\' + displaySide + \'</span> <span class="\' + statusColor + \'" style="font-size:0.8rem; border-left:1px solid var(--border); padding-left:8px; margin-left:4px;">\' + state.status + \'</span></div><div class="flex-row" style="gap:8px;"><button class="md-btn md-btn-text" style="padding:4px 8px; color:var(--success); border:1px solid rgba(14,203,129,0.3);" onclick="toggleCoinBot(\\\'\' + coin.symbol + \'\\\', true)"><span class="material-symbols-outlined" style="font-size:16px;">play_arrow</span></button><button class="md-btn md-btn-text" style="padding:4px 8px; color:var(--danger); border:1px solid rgba(246,70,93,0.3);" onclick="toggleCoinBot(\\\'\' + coin.symbol + \'\\\', false)"><span class="material-symbols-outlined" style="font-size:16px;">stop</span></button></div></div><div class="grid-3"><div><span class="metric-label">Oracle Price</span><span class="metric-val" style="font-size:1rem; margin-top:2px;">\' + (state.currentPrice || 0) + \'</span></div><div><span class="metric-label">Avg Entry</span><span class="metric-val" style="font-size:1rem; margin-top:2px;">\' + (state.avgEntry || 0) + \'</span></div><div><span class="metric-label">Size</span><span class="metric-val" style="font-size:1rem; margin-top:2px;">\' + (state.contracts || 0) + \'</span></div><div><span class="metric-label">Net Delta</span><span class="metric-val \' + roiColorClass + \'" style="font-size:1rem; margin-top:2px;">\' + (state.unrealizedPnl || 0).toFixed(4) + \'</span></div><div><span class="metric-label">ROI %</span><span class="metric-val \' + roiColorClass + \'" style="font-size:1rem; margin-top:2px;">\' + (state.currentRoi || 0).toFixed(2) + \'%</span></div></div></div>\';',
         '                    });',
         '                    const dsc = document.getElementById(\'dashboardStatusContainer\');',
