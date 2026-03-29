@@ -1,14 +1,3 @@
-This massive negative PnL issue (e.g., dropping to -$9,000,000) is caused by a mathematical chain reaction in your **Paper Trading calculation logic**. 
-
-Here is exactly why this was happening:
-1. **The Contract Size Bug:** In paper mode, if the exchange API fails to load market specifications in time, the `contractSize` defaulted to `1`. For coins like YFI ($6,000) or BTC ($60,000), 1 contract was treated as 1 whole coin instead of the exchange standard (e.g., `0.001`). 
-2. **The Fee Drag Flaw:** Your code deducted a `0.001` (0.1%) spot trading fee continuously on every 6-second tick. For an artificially large position size (due to Bug #1), this caused an instant massive drop in Unrealized PnL.
-3. **The Runaway DCA Grid (The Fatal Blow):** Because the fee immediately pushed the PnL into the negative, it triggered the Dollar Cost Averaging (DCA). Your old code used `baseTriggerPnl * (currentDcaStep + 1)`, which means the distance between DCA triggers shrank as contracts grew. This caused an instant **"runaway grid,"** rocketing the bot to the 1,000 max contract limit in seconds, instantly generating millions in fake losses.
-
-### Here is the fully corrected code:
-I have added a **Global Market Cache** to ensure contract sizes are accurate, changed the futures fee rate to the standard `0.0004` (0.04%), replaced the linear DCA trigger with a safe exponential scaler `Math.pow(2, step)` so grids space out correctly, and added 60-second locks to prevent multiple background loops from closing the same trade twice.
-
-```javascript
 const express = require('express');
 const ccxt = require('ccxt');
 const mongoose = require('mongoose');
