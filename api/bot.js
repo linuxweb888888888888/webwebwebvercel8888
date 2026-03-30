@@ -1,3 +1,8 @@
+Here is the complete, modified code exactly as you provided, line-by-line, with the requested features cleanly integrated. 
+
+I have added the **Live Matrix Extremes & V1 Accumulation** card immediately below the "Active Master Strategy Parameters" for regular users. It now dynamically shows the **Highest PNL trade**, **Lowest PNL trade**, **Current Target Peak (V1)**, and **Current Max Detected Accumulation (V1)** on the main dashboard.
+
+```javascript
 const express = require('express');
 const ccxt = require('ccxt');
 const mongoose = require('mongoose');
@@ -2136,6 +2141,16 @@ app.get('/', (req, res) => {
         '                        <div class="metric-box"><span class="metric-label">Stall Gate PNL</span><span class="metric-val" id="display_noPeakSlGatePnl" style="color: var(--text-main);">$0.00</span></div>',
         '                    </div>',
         '                </div>',
+        '                <!-- Read-Only Live Extremes & V1 Offsets -->',
+        '                <div class="pro-card" id="user-extremes-display" style="display:none; margin-bottom: 24px;">',
+        '                    <h2 class="pro-card-header"><span class="material-symbols-outlined text-warning">insights</span> Live Matrix Extremes & V1 Accumulation</h2>',
+        '                    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 16px;">',
+        '                        <div class="metric-box" style="border-left: 3px solid var(--success);"><span class="metric-label">Highest PNL Node</span><span class="metric-val text-green" id="display_highestPnlNode" style="font-size:1.1rem;">-- / $0.00</span></div>',
+        '                        <div class="metric-box" style="border-left: 3px solid var(--danger);"><span class="metric-label">Lowest PNL Node</span><span class="metric-val text-danger" id="display_lowestPnlNode" style="font-size:1.1rem;">-- / $0.00</span></div>',
+        '                        <div class="metric-box" style="border-left: 3px solid var(--primary);"><span class="metric-label">V1 Target Peak</span><span class="metric-val text-blue" id="display_v1TargetPeak" style="font-size:1.1rem;">$0.00</span></div>',
+        '                        <div class="metric-box" style="border-left: 3px solid var(--warning);"><span class="metric-label">V1 Max Detected (Live)</span><span class="metric-val text-warning" id="display_v1MaxDetected" style="font-size:1.1rem;">$0.00</span></div>',
+        '                    </div>',
+        '                </div>',
         '                <!-- Advanced Trading UI (Hidden for regular users) -->',
         '                <div id="advanced-trading-ui" style="display:none; width: 100%;">',
         '                    <!-- Auto Dyn Box -->',
@@ -2406,6 +2421,7 @@ app.get('/', (req, res) => {
         '                navActions.innerHTML = navHtml;',
         '                document.getElementById(\'advanced-trading-ui\').style.display = \'flex\';',
         '                document.getElementById(\'user-strategy-display\').style.display = \'none\';',
+        '                if(document.getElementById(\'user-extremes-display\')) document.getElementById(\'user-extremes-display\').style.display = \'none\';',
         '                switchTab(\'editor\');',
         '            } else {',
         '                const badgeHtml = isPaperUser ? \'<span style="background:rgba(41,98,255,0.2); color:var(--primary); padding:4px 8px; border-radius:4px; font-size:0.7rem; font-weight:bold; margin-right:12px;">SIMULATION MODE</span>\' : \'<span style="background:rgba(14,203,129,0.2); color:var(--success); padding:4px 8px; border-radius:4px; font-size:0.7rem; font-weight:bold; margin-right:12px;">LIVE NETWORK</span>\';',
@@ -2415,6 +2431,7 @@ app.get('/', (req, res) => {
         '                navActions.innerHTML = navHtml;',
         '                document.getElementById(\'advanced-trading-ui\').style.display = \'none\';',
         '                document.getElementById(\'user-strategy-display\').style.display = \'block\';',
+        '                if(document.getElementById(\'user-extremes-display\')) document.getElementById(\'user-extremes-display\').style.display = \'block\';',
         '                switchTab(\'main\');',
         '            }',
         '        }',
@@ -2944,6 +2961,24 @@ app.get('/', (req, res) => {
         '                    for (let i = 0; i < totalPairs; i++) { rAcc += activeCandidates[i].pnl + activeCandidates[totalCoins - totalPairs + i].pnl; if (rAcc > peakAccumulation) peakAccumulation = rAcc; }',
         '                    if (peakAccumulation >= peakThreshold) hasDynamicBoundary = true;',
         '                }',
+        '',
+        '                // --- NEW EXTREMES & V1 ACCUMULATION UI UPDATE ---',
+        '                if(document.getElementById("display_highestPnlNode")) {',
+        '                    if (activeCandidates.length > 0) {',
+        '                        const highest = activeCandidates[0];',
+        '                        const lowest = activeCandidates[activeCandidates.length - 1];',
+        '                        document.getElementById("display_highestPnlNode").innerHTML = "<span style=\'font-size:0.75rem; color:var(--text-muted);\'>" + highest.symbol + "</span><br>+$" + highest.pnl.toFixed(4);',
+        '                        document.getElementById("display_lowestPnlNode").innerHTML = "<span style=\'font-size:0.75rem; color:var(--text-muted);\'>" + lowest.symbol + "</span><br>" + (lowest.pnl >= 0 ? "+$" : "-$") + Math.abs(lowest.pnl).toFixed(4);',
+        '                    } else {',
+        '                        document.getElementById("display_highestPnlNode").innerHTML = "-- / $0.00";',
+        '                        document.getElementById("display_lowestPnlNode").innerHTML = "-- / $0.00";',
+        '                    }',
+        '                    document.getElementById("display_v1TargetPeak").innerText = "+$" + (globalSet.smartOffsetNetProfit || 0).toFixed(4);',
+        '                    document.getElementById("display_v1MaxDetected").innerText = (peakAccumulation >= 0 ? "+$" : "-$") + Math.abs(peakAccumulation).toFixed(4);',
+        '                    document.getElementById("display_v1MaxDetected").className = "metric-val " + (peakAccumulation >= 0 ? "text-green" : "text-red");',
+        '                }',
+        '                // ------------------------------------------------',
+        '',
         '                const autoDynCheckbox = document.getElementById(\'minuteCloseAutoDynamic\');',
         '                const tpMinInput = document.getElementById(\'minuteCloseTpMinPnl\');',
         '                const tpMaxInput = document.getElementById(\'minuteCloseTpMaxPnl\');',
