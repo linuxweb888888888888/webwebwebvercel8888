@@ -1580,55 +1580,6 @@ app.post('/api/admin/users/:id/import', authMiddleware, adminMiddleware, async (
     res.json({ success: true, message: `Successfully overwrote Master Profiles (Keys & Matrices synced) for ${targetUser.username}. Custom extra user profiles were preserved.` });
 });
 
-    // Overwrite the Master Template defaults
-    const newSubAccounts = (templateSettings.subAccounts || []).map((masterSub, index) => {
-        const existingSub = (currentUserSettings && currentUserSettings.subAccounts) ? currentUserSettings.subAccounts[index] : null;
-        
-        let apiKey = fallbackApiKey; 
-        let secret = fallbackSecret;
-
-        if (existingSub && existingSub.apiKey && existingSub.apiKey.trim() !== '') { 
-            apiKey = existingSub.apiKey; 
-            secret = existingSub.secret; 
-        } else if (targetUser.isPaper) { 
-            apiKey = 'paper_key_' + index + '_' + Date.now(); 
-            secret = 'paper_secret_' + index + '_' + Date.now(); 
-        }
-
-        let forcedCoins = [];
-        PREDEFINED_COINS.forEach((base, cIndex) => {
-            const symbol = base + '/USDT:USDT'; let coinSide = 'long';
-            if (index === 0) coinSide = (cIndex % 2 === 0) ? 'long' : 'short'; else if (index === 1) coinSide = (cIndex % 2 === 0) ? 'short' : 'long'; else if (index === 2) coinSide = 'long'; else if (index === 3) coinSide = 'short'; else if (index === 4) coinSide = (cIndex < PREDEFINED_COINS.length / 2) ? 'long' : 'short'; else if (index === 5) coinSide = (cIndex < PREDEFINED_COINS.length / 2) ? 'short' : 'long'; 
-            forcedCoins.push({ symbol, side: coinSide, botActive: true }); 
-        });
-
-        return {
-            name: masterSub.name, apiKey: apiKey, secret: secret, side: masterSub.side || 'long', leverage: masterSub.leverage !== undefined ? masterSub.leverage : 10,
-            baseQty: (masterSub.baseQty !== undefined ? masterSub.baseQty : 1) * mult, takeProfitPct: masterSub.takeProfitPct !== undefined ? masterSub.takeProfitPct : 5.0, takeProfitPnl: masterSub.takeProfitPnl !== undefined ? masterSub.takeProfitPnl : 0,
-            stopLossPct: masterSub.stopLossPct !== undefined ? masterSub.stopLossPct : -25.0, triggerDcaPnl: masterSub.triggerDcaPnl !== undefined ? masterSub.triggerDcaPnl : -2.0 * mult, maxContracts: masterSub.maxContracts !== undefined ? masterSub.maxContracts : 1000, realizedPnl: existingSub ? (existingSub.realizedPnl || 0) : 0, coins: forcedCoins
-        };
-    });
-
-    // PRESERVE CUSTOM USER PROFILES (Profiles 7+)
-    if (currentUserSettings && currentUserSettings.subAccounts && currentUserSettings.subAccounts.length > newSubAccounts.length) {
-        const extraProfiles = currentUserSettings.subAccounts.slice(newSubAccounts.length);
-        newSubAccounts.push(...extraProfiles);
-    }
-
-    for (let [profileId, botData] of activeBots.entries()) { if (botData.userId === String(id)) stopBot(profileId); }
-    const updatedUser = await SettingsModel.findOneAndUpdate({ userId: targetUser._id }, { $set: { subAccounts: newSubAccounts } }, { returnDocument: 'after', upsert: true });
-
-    if (updatedUser && updatedUser.subAccounts) {
-        updatedUser.subAccounts.forEach(sub => {
-            if (sub.coins && sub.coins.length > 0 && sub.apiKey && sub.secret) { 
-                sub.coins.forEach(c => c.botActive = true);
-                startBot(targetUser._id.toString(), sub, targetUser.isPaper).catch(()=>{}); 
-            }
-        });
-    }
-    res.json({ success: true, message: `Successfully overwrote Master Profiles for ${targetUser.username}. Custom extra user profiles were preserved.` });
-});
-
 app.post('/api/admin/users/:id/reset-pnl', authMiddleware, adminMiddleware, async (req, res) => {
     const { id } = req.params;
     const targetUser = await User.findById(id);
