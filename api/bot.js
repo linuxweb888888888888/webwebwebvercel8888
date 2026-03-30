@@ -1,3 +1,12 @@
+Here is the **complete, fully unified code** with the new **Dynamic L/S Position Balancer** added exactly as you requested.
+
+### Key Additions in this Version:
+1. **Dynamic Long/Short Balancer:** Before opening a new position, the engine counts the currently active Longs and Shorts within the profile. If the `Long Count > Short Count`, it automatically forces the next opened trade to be a `Short` (and vice-versa). This guarantees your array remains perfectly balanced in real-time as trades hit Take Profits or Stop Losses.
+2. **Top Bar HUD Counter:** Added a real-time tracking badge next to the logo in the top Navigation Bar `(⚖️ 0 L / 0 S)` that shows the user exactly how many Longs and Shorts they currently have open across the network. 
+
+### `app.js` (Copy and paste this completely)
+
+```javascript
 const express = require('express');
 const ccxt = require('ccxt');
 const mongoose = require('mongoose');
@@ -335,11 +344,43 @@ async function startBot(userId, subAccount, isPaper) {
                 positions = await exchange.fetchPositions().catch(e => { throw new Error('Positions: ' + e.message); });
             }
 
+            // DYNAMIC L/S BALANCING PRE-CALCULATION
+            let currentLongs = 0;
+            let currentShorts = 0;
+            for (let sym in state.coinStates) {
+                if (state.coinStates[sym].contracts > 0) {
+                    if (state.coinStates[sym].activeSide === 'long') currentLongs++;
+                    else if (state.coinStates[sym].activeSide === 'short') currentShorts++;
+                }
+            }
+
             for (let coin of activeCoins) {
                 try {
                     const activeLeverage = getLeverageForCoin(coin.symbol);
-                    const activeSide = coin.side || currentSettings.side;
                     
+                    if (!state.coinStates[coin.symbol]) {
+                        state.coinStates[coin.symbol] = { status: 'Running', currentPrice: 0, avgEntry: 0, contracts: 0, currentRoi: 0, unrealizedPnl: 0, margin: 0, lastDcaTime: 0, lockUntil: 0, dcaCount: 0 };
+                    }
+
+                    let cState = state.coinStates[coin.symbol];
+                    if (cState.lockUntil && Date.now() < cState.lockUntil) continue;
+
+                    // DYNAMIC POSITION BALANCER LOGIC
+                    let activeSide = coin.side || currentSettings.side;
+                    if (cState.contracts <= 0) {
+                        if (currentLongs > currentShorts) activeSide = 'short';
+                        else if (currentShorts > currentLongs) activeSide = 'long';
+                    } else {
+                        // Maintain the side it was originally opened with
+                        activeSide = cState.activeSide || activeSide;
+                    }
+                    
+                    const currentPrice = global.livePrices[coin.symbol];
+                    if (!currentPrice) continue; 
+                    
+                    cState.currentPrice = currentPrice;
+                    cState.activeSide = activeSide;
+
                     // FIXED: Global Market Size Fallback to prevent paper margin explosions
                     let contractSize = 1;
                     if (global.marketSizes && global.marketSizes[coin.symbol]) {
@@ -347,19 +388,6 @@ async function startBot(userId, subAccount, isPaper) {
                     } else if (exchange.markets && exchange.markets[coin.symbol]) {
                         contractSize = exchange.markets[coin.symbol].contractSize || 1;
                     }
-
-                    if (!state.coinStates[coin.symbol]) {
-                        state.coinStates[coin.symbol] = { status: 'Running', currentPrice: 0, avgEntry: 0, contracts: 0, currentRoi: 0, unrealizedPnl: 0, margin: 0, lastDcaTime: 0, lockUntil: 0, dcaCount: 0 };
-                    }
-
-                    let cState = state.coinStates[coin.symbol];
-                    if (cState.lockUntil && Date.now() < cState.lockUntil) continue;
-                    
-                    const currentPrice = global.livePrices[coin.symbol];
-                    if (!currentPrice) continue; 
-                    
-                    cState.currentPrice = currentPrice;
-                    cState.activeSide = activeSide;
 
                     // FIXED: Lowered Fee Rate to standard 0.04% futures maker/taker avg.
                     const ESTIMATED_FEE_RATE = 0.0004; 
@@ -437,6 +465,10 @@ async function startBot(userId, subAccount, isPaper) {
                             cState.unrealizedPnl = 0; 
                             cState.margin = (cState.avgEntry * cState.contracts * contractSize) / activeLeverage;
                         }
+
+                        // Update dynamic balancing counters for the next coin in the loop
+                        if (activeSide === 'long') currentLongs++;
+                        else currentShorts++;
 
                         const OffsetModel = isPaper ? PaperOffsetRecord : RealOffsetRecord;
                         OffsetModel.create({ userId: userId, symbol: coin.symbol, winnerSymbol: coin.symbol, reason: `Open Base Position (${safeBaseQty} contracts)`, netProfit: 0 }).catch(()=>{});
@@ -1853,10 +1885,25 @@ app.get('/api/status', authMiddleware, async (req, res) => {
         currentMinuteLoss = arr.reduce((sum, r) => sum + r.amount, 0);
     }
 
+    let totalLongs = 0;
+    let totalShorts = 0;
+    for (let pid in userStatuses) {
+        const st = userStatuses[pid];
+        if (st && st.coinStates) {
+            for (let sym in st.coinStates) {
+                const cs = st.coinStates[sym];
+                if (cs.contracts > 0) { 
+                    if (cs.activeSide === 'long') totalLongs++;
+                    else if (cs.activeSide === 'short') totalShorts++;
+                }
+            }
+        }
+    }
+
     const firstOffset = await OffsetModel.findOne({ userId: req.userId }).sort({ timestamp: 1 }).lean();
     const startTime = firstOffset ? firstOffset.timestamp : null;
 
-    res.json({ states: userStatuses, subAccounts: settings ? settings.subAccounts : [], globalSettings: settings, currentMinuteLoss, autoDynExec: settings ? settings.autoDynamicLastExecution : null, startTime });
+    res.json({ states: userStatuses, subAccounts: settings ? settings.subAccounts : [], globalSettings: settings, currentMinuteLoss, autoDynExec: settings ? settings.autoDynamicLastExecution : null, startTime, totalLongs, totalShorts });
 });
 
 app.get('/api/offsets', authMiddleware, async (req, res) => {
@@ -2086,7 +2133,7 @@ app.get('/', (req, res) => {
         '    <div id="app">',
         '        <!-- NAVBAR -->',
         '        <nav class="navbar">',
-        '            <div class="nav-brand"><span class="material-symbols-outlined highlight" style="font-size:28px;">show_chart</span> NexGen <span class="highlight">Algo</span></div>',
+        '            <div class="nav-brand"><span class="material-symbols-outlined highlight" style="font-size:28px;">show_chart</span> NexGen <span class="highlight">Algo</span> <span id="nav-ls-balance" style="display:none; margin-left:12px; padding:4px 10px; background:rgba(255,255,255,0.05); border:1px solid var(--border); border-radius:6px; font-size:0.85rem; font-weight:600; color:var(--text-main); align-items:center; gap:6px;"><span class="material-symbols-outlined" style="font-size:16px; color:var(--warning);">balance</span> <span class="text-green" id="nav-long-count">0</span> L / <span class="text-red" id="nav-short-count">0</span> S</span></div>',
         '            <div class="nav-links" id="nav-actions">',
         '                <!-- Injected via JS based on auth state -->',
         '            </div>',
@@ -3204,6 +3251,13 @@ app.get('/', (req, res) => {
         '                if(topPnlEl) {',
         '                    topPnlEl.innerText = (globalUnrealized >= 0 ? "+$" : "-$") + Math.abs(globalUnrealized).toFixed(4);',
         '                    topPnlEl.className = \'metric-val \' + (globalUnrealized >= 0 ? \'text-green\' : \'text-red\');',
+        '                }',
+        '                ',
+        '                // Update L/S Balance Counters in Nav',
+        '                if (myUsername !== \'webcoin8888\') {',
+        '                    document.getElementById(\'nav-ls-balance\').style.display = \'inline-flex\';',
+        '                    document.getElementById(\'nav-long-count\').innerText = data.totalLongs || 0;',
+        '                    document.getElementById(\'nav-short-count\').innerText = data.totalShorts || 0;',
         '                }',
         '                ',
         '                const startTime = data.startTime ? new Date(data.startTime).getTime() : Date.now();',
