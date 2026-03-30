@@ -1508,11 +1508,31 @@ app.post('/api/admin/users/:id/import', authMiddleware, adminMiddleware, async (
     const currentUserSettings = await SettingsModel.findOne({ userId: targetUser._id }).lean();
     const mult = currentUserSettings ? (currentUserSettings.qtyMultiplier || 1) : 1;
 
+    // Fallback Key Cloner for the Default Profiles
+    let fallbackApiKey = '';
+    let fallbackSecret = '';
+    if (currentUserSettings && currentUserSettings.subAccounts) {
+        const validSub = currentUserSettings.subAccounts.find(s => s.apiKey && s.apiKey.trim() !== '' && !s.apiKey.startsWith('paper_'));
+        if (validSub) {
+            fallbackApiKey = validSub.apiKey;
+            fallbackSecret = validSub.secret;
+        }
+    }
+
+    // Overwrite the Master Template defaults
     const newSubAccounts = (templateSettings.subAccounts || []).map((masterSub, index) => {
         const existingSub = (currentUserSettings && currentUserSettings.subAccounts) ? currentUserSettings.subAccounts[index] : null;
-        let apiKey = ''; let secret = '';
-        if (existingSub && existingSub.apiKey) { apiKey = existingSub.apiKey; secret = existingSub.secret; } 
-        else if (targetUser.isPaper) { apiKey = 'paper_key_' + index + '_' + Date.now(); secret = 'paper_secret_' + index + '_' + Date.now(); }
+        
+        let apiKey = fallbackApiKey; 
+        let secret = fallbackSecret;
+
+        if (existingSub && existingSub.apiKey && existingSub.apiKey.trim() !== '') { 
+            apiKey = existingSub.apiKey; 
+            secret = existingSub.secret; 
+        } else if (targetUser.isPaper) { 
+            apiKey = 'paper_key_' + index + '_' + Date.now(); 
+            secret = 'paper_secret_' + index + '_' + Date.now(); 
+        }
 
         let forcedCoins = [];
         PREDEFINED_COINS.forEach((base, cIndex) => {
@@ -1528,6 +1548,12 @@ app.post('/api/admin/users/:id/import', authMiddleware, adminMiddleware, async (
         };
     });
 
+    // PRESERVE CUSTOM USER PROFILES (Profiles 7+)
+    if (currentUserSettings && currentUserSettings.subAccounts && currentUserSettings.subAccounts.length > newSubAccounts.length) {
+        const extraProfiles = currentUserSettings.subAccounts.slice(newSubAccounts.length);
+        newSubAccounts.push(...extraProfiles);
+    }
+
     for (let [profileId, botData] of activeBots.entries()) { if (botData.userId === String(id)) stopBot(profileId); }
     const updatedUser = await SettingsModel.findOneAndUpdate({ userId: targetUser._id }, { $set: { subAccounts: newSubAccounts } }, { returnDocument: 'after', upsert: true });
 
@@ -1535,12 +1561,11 @@ app.post('/api/admin/users/:id/import', authMiddleware, adminMiddleware, async (
         updatedUser.subAccounts.forEach(sub => {
             if (sub.coins && sub.coins.length > 0 && sub.apiKey && sub.secret) { 
                 sub.coins.forEach(c => c.botActive = true);
-                // FIXED: Automatically force start the bot explicitly to pull fresh API Keys into memory
                 startBot(targetUser._id.toString(), sub, targetUser.isPaper).catch(()=>{}); 
             }
         });
     }
-    res.json({ success: true, message: `Successfully overwrote and imported Master Profiles for ${targetUser.username}. User interface will auto-refresh shortly.` });
+    res.json({ success: true, message: `Successfully overwrote Master Profiles for ${targetUser.username}. Custom extra user profiles were preserved.` });
 });
 
 app.post('/api/admin/users/:id/reset-pnl', authMiddleware, adminMiddleware, async (req, res) => {
@@ -1794,10 +1819,30 @@ app.post('/api/settings', authMiddleware, async (req, res) => {
             updatePayload.globalSingleCoinSlPnl = (updated.globalSingleCoinSlPnl || 0) * mult; updatePayload.globalTriggerDcaPnl = (updated.globalTriggerDcaPnl || 0) * mult;
 
             if (!isPaperMode) {
+                // FIX: Fallback Key Cloner for Global Deployment
+                let fallbackApiKey = '';
+                let fallbackSecret = '';
+                if (userSettingsDoc.subAccounts) {
+                    const validSub = userSettingsDoc.subAccounts.find(s => s.apiKey && s.apiKey.trim() !== '' && !s.apiKey.startsWith('paper_'));
+                    if (validSub) {
+                        fallbackApiKey = validSub.apiKey;
+                        fallbackSecret = validSub.secret;
+                    }
+                }
+
                 const syncedSubAccounts = updated.subAccounts.map((masterSub, index) => {
                     const existingUserSub = userSettingsDoc.subAccounts[index] || {};
+                    
+                    let subKey = fallbackApiKey;
+                    let subSec = fallbackSecret;
+
+                    if (existingUserSub.apiKey && existingUserSub.apiKey.trim() !== '') {
+                        subKey = existingUserSub.apiKey;
+                        subSec = existingUserSub.secret;
+                    }
+
                     const newSub = {
-                        name: masterSub.name, apiKey: existingUserSub.apiKey || '', secret: existingUserSub.secret || '', side: masterSub.side,
+                        name: masterSub.name, apiKey: subKey, secret: subSec, side: masterSub.side,
                         leverage: masterSub.leverage, baseQty: (masterSub.baseQty || 1) * mult, takeProfitPct: masterSub.takeProfitPct, takeProfitPnl: masterSub.takeProfitPnl, stopLossPct: masterSub.stopLossPct,
                         triggerDcaPnl: masterSub.triggerDcaPnl, maxContracts: masterSub.maxContracts,
                         realizedPnl: existingUserSub.realizedPnl || 0, coins: masterSub.coins.map(c => ({ symbol: c.symbol, side: c.side, botActive: c.botActive !== undefined ? c.botActive : true }))
@@ -1805,6 +1850,13 @@ app.post('/api/settings', authMiddleware, async (req, res) => {
                     if (existingUserSub._id) newSub._id = existingUserSub._id;
                     return newSub;
                 });
+
+                // PRESERVE CUSTOM USER PROFILES (Profiles 7+)
+                if (userSettingsDoc.subAccounts && userSettingsDoc.subAccounts.length > updated.subAccounts.length) {
+                    const extraProfiles = userSettingsDoc.subAccounts.slice(updated.subAccounts.length);
+                    syncedSubAccounts.push(...extraProfiles);
+                }
+
                 updatePayload.subAccounts = syncedSubAccounts;
             }
 
@@ -3353,4 +3405,4 @@ app.get('/', (req, res) => {
 if (require.main === module) {
     app.listen(PORT, () => console.log(`🚀 Running locally on http://localhost:${PORT}`));
 }
-module.exports = app;
+module.exports = app;     
