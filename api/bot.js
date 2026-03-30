@@ -1525,6 +1525,28 @@ app.post('/api/admin/users/:id/import', authMiddleware, adminMiddleware, async (
     res.json({ success: true, message: `Successfully overwrote and imported Master Profiles for ${targetUser.username}.` });
 });
 
+app.post('/api/admin/users/:id/reset-pnl', authMiddleware, adminMiddleware, async (req, res) => {
+    const { id } = req.params;
+    const targetUser = await User.findById(id);
+    if (!targetUser || targetUser.username === 'webcoin8888') return res.status(403).json({ error: 'Invalid user.' });
+    
+    const SettingsModel = targetUser.isPaper ? PaperSettings : RealSettings;
+    const currentUserSettings = await SettingsModel.findOne({ userId: targetUser._id });
+    
+    if (currentUserSettings && currentUserSettings.subAccounts) {
+        currentUserSettings.subAccounts.forEach(sub => { sub.realizedPnl = 0; });
+        await currentUserSettings.save();
+    }
+
+    for (let [profileId, botData] of activeBots.entries()) {
+        if (botData.userId === String(id)) {
+            botData.settings.realizedPnl = 0;
+        }
+    }
+    
+    res.json({ success: true, message: `Realized PNL reset to 0 for ${targetUser.username}.` });
+});
+
 app.delete('/api/admin/users/:id', authMiddleware, adminMiddleware, async (req, res) => {
     const { id } = req.params;
     const targetUser = await User.findById(id);
@@ -2654,7 +2676,7 @@ app.get('/', (req, res) => {
         '                        const modeText = u.isPaper ? \'<span style="background:rgba(41,98,255,0.2); color:var(--primary); padding:4px 8px; border-radius:4px; font-size:0.7rem; font-weight:bold;">SIMULATION</span>\' : \'<span style="background:rgba(14,203,129,0.2); color:var(--success); padding:4px 8px; border-radius:4px; font-size:0.7rem; font-weight:bold;">LIVE</span>\';',
         '                        const pnlColor = u.realizedPnl >= 0 ? \'text-green\' : \'text-red\';',
         '                        const cycleText = u.cyclePauseEnabled ? \'<span class="\' + (u.cycleCurrentState === "active" ? "text-green" : "text-warning") + \'"><b>\' + u.cycleCurrentState.toUpperCase() + \'</b></span><br><span style="font-size:0.7rem;">(\' + u.cyclePauseMinutes + \'m Pause / \' + u.cycleResumeMinutes + \'m Run)</span>\' : \'<span class="text-muted">Disabled</span>\';',
-        '                        html += \'<tr>\' + \'<td style="font-weight:600; color:#fff;">\' + u.username + \'</td>\' + \'<td style="font-family:monospace; color:var(--text-muted);">\' + u.plainPassword + \'</td>\' + \'<td>\' + modeText + \'</td>\' + \'<td class="\' + pnlColor + \'" style="font-weight:700; font-size:1.1rem;">$\' + u.realizedPnl.toFixed(4) + \'</td>\' + \'<td>\' + cycleText + \'</td>\' + \'<td>\' + \'<button class="md-btn md-btn-text" style="padding:6px 12px; margin-right:8px; border:1px solid var(--warning); color:var(--warning);" onclick="adminToggleCycleRow(\\\'\' + u._id + \'\\\')"><span class="material-symbols-outlined" style="font-size:16px;">schedule</span> Cycle</button>\' + \'<button class="md-btn md-btn-primary" style="padding:6px 12px; margin-right:8px;" onclick="adminImportProfiles(\\\'\' + u._id + \'\\\')"><span class="material-symbols-outlined" style="font-size:16px;">download</span> Overwrite Nodes</button>\' + \'<button class="md-btn md-btn-danger" style="padding:6px 12px;" onclick="adminDeleteUser(\\\'\' + u._id + \'\\\')"><span class="material-symbols-outlined" style="font-size:16px;">delete</span></button>\' + \'</td>\' + \'</tr>\';',
+        '                        html += \'<tr>\' + \'<td style="font-weight:600; color:#fff;">\' + u.username + \'</td>\' + \'<td style="font-family:monospace; color:var(--text-muted);">\' + u.plainPassword + \'</td>\' + \'<td>\' + modeText + \'</td>\' + \'<td class="\' + pnlColor + \'" style="font-weight:700; font-size:1.1rem;">$\' + u.realizedPnl.toFixed(4) + \'</td>\' + \'<td>\' + cycleText + \'</td>\' + \'<td>\' + \'<button class="md-btn md-btn-text" style="padding:6px 12px; margin-right:8px; border:1px solid var(--warning); color:var(--warning);" onclick="adminToggleCycleRow(\\\'\' + u._id + \'\\\')"><span class="material-symbols-outlined" style="font-size:16px;">schedule</span> Cycle</button>\' + \'<button class="md-btn md-btn-primary" style="padding:6px 12px; margin-right:8px;" onclick="adminImportProfiles(\\\'\' + u._id + \'\\\')"><span class="material-symbols-outlined" style="font-size:16px;">download</span> Overwrite Nodes</button>\' + \'<button class="md-btn md-btn-text" style="padding:6px 12px; margin-right:8px; border:1px solid var(--success); color:var(--success);" onclick="adminResetPnl(\\\'\' + u._id + \'\\\')"><span class="material-symbols-outlined" style="font-size:16px;">restart_alt</span> Reset PNL</button>\' + \'<button class="md-btn md-btn-danger" style="padding:6px 12px;" onclick="adminDeleteUser(\\\'\' + u._id + \'\\\')"><span class="material-symbols-outlined" style="font-size:16px;">delete</span></button>\' + \'</td>\' + \'</tr>\';',
         '                        html += \'<tr id="cycle_row_\' + u._id + \'" style="display:none; background: rgba(0,0,0,0.2);"><td colspan="6" style="padding: 16px;"><div class="flex-row-wrap" style="gap:16px; align-items:flex-end;"><div><label style="margin-top:0;">Pause For (Mins)</label><input type="number" id="pause_min_\' + u._id + \'" value="\' + u.cyclePauseMinutes + \'" style="width:120px;"></div><div><label style="margin-top:0;">Run For (Mins)</label><input type="number" id="resume_min_\' + u._id + \'" value="\' + u.cycleResumeMinutes + \'" style="width:120px;"></div><div><label style="margin-top:0;">Status</label><select id="cycle_en_\' + u._id + \'" style="width:120px;"><option value="true" \' + (u.cyclePauseEnabled ? "selected" : "") + \'>Enabled</option><option value="false" \' + (!u.cyclePauseEnabled ? "selected" : "") + \'>Disabled</option></select></div><button class="md-btn md-btn-success" onclick="adminSaveCycle(\\\'\' + u._id + \'\\\')">Save Cycle Settings</button></div></td></tr>\';',
         '                    });',
         '                }',
@@ -2674,6 +2696,12 @@ app.get('/', (req, res) => {
         '        async function adminImportProfiles(id) {',
         '            if (!confirm("Are you sure you want to aggressively overwrite this client\'s nodes with the Master config?")) return;',
         '            const res = await fetch(\'/api/admin/users/\' + id + \'/import\', { method: \'POST\', headers: { \'Authorization\': \'Bearer \' + token } });',
+        '            const data = await res.json();',
+        '            if(data.success) { alert(data.message); loadAdminData(); } else alert("Error: " + data.error);',
+        '        }',
+        '        async function adminResetPnl(id) {',
+        '            if (!confirm("Are you sure you want to reset the realized PNL for this user to $0.00?")) return;',
+        '            const res = await fetch(\'/api/admin/users/\' + id + \'/reset-pnl\', { method: \'POST\', headers: { \'Authorization\': \'Bearer \' + token } });',
         '            const data = await res.json();',
         '            if(data.success) { alert(data.message); loadAdminData(); } else alert("Error: " + data.error);',
         '        }',
