@@ -1,13 +1,3 @@
-Here is the **complete, fully unified code** in a single block. It contains all the features, all the fixes, and the exact architecture you requested.
-
-### Included in this Final Version:
-1. **Custom Coins on Registration:** Users can input space-separated coins (e.g., `BTC ETH SOL`). If left blank, it defaults to the standard 54 predefined matrix.
-2. **Real Trading Not Starting Fix:** When a user enters real API keys (or when an Admin syncs a profile), the backend explicitly hard-restarts the CCXT engine for that profile to inject the fresh keys into memory, fixing the `0 / 0` active trades bug.
-3. **Admin "Force Close (2m Lock)":** Added to the Admin Hub. Closes all positions for that user (real and paper) and strictly locks their engine for 120,000 ms (2 minutes).
-
-### `app.js` (Copy and paste this completely)
-
-```javascript
 const express = require('express');
 const ccxt = require('ccxt');
 const mongoose = require('mongoose');
