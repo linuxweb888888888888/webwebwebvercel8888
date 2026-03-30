@@ -1578,6 +1578,53 @@ app.post('/api/close-all', authMiddleware, async (req, res) => {
     } catch(err) { res.status(500).json({ error: err.message }); }
 });
 
+app.post('/api/close-position', authMiddleware, async (req, res) => {
+    const { symbol, profileId } = req.body;
+    if (!symbol) return res.status(400).json({ error: "Symbol required" });
+
+    try {
+        let closed = false;
+        for (let [pId, botData] of activeBots.entries()) {
+            if (botData.userId !== req.userId.toString()) continue;
+            if (profileId && pId !== profileId) continue; 
+
+            const cState = botData.state.coinStates[symbol];
+            if (!cState || cState.contracts <= 0) continue;
+
+            const closePnl = parseFloat(cState.unrealizedPnl) || 0;
+
+            if (!req.isPaper) {
+                const positions = await botData.exchange.fetchPositions().catch(()=>[]);
+                const pos = positions.find(p => p.symbol === symbol && p.contracts > 0);
+                if (pos) {
+                    const closeSide = pos.side === 'long' ? 'sell' : 'buy';
+                    const activeLev = parseInt(pos.leverage || (pos.info && pos.info.lever_rate)) || cState.actualLeverage || getLeverageForCoin(symbol);
+                    await botData.exchange.createOrder(symbol, 'market', closeSide, pos.contracts, undefined, { offset: 'close', reduceOnly: true, lever_rate: activeLev });
+                }
+            }
+
+            cState.contracts = 0;
+            cState.unrealizedPnl = 0;
+            cState.avgEntry = 0;
+            cState.dcaCount = 0;
+            cState.lockUntil = Date.now() + 60000;
+
+            botData.settings.realizedPnl = (botData.settings.realizedPnl || 0) + closePnl;
+            const SettingsModel = req.isPaper ? PaperSettings : RealSettings;
+            await SettingsModel.updateOne({ "subAccounts._id": botData.settings._id }, { $set: { "subAccounts.$.realizedPnl": botData.settings.realizedPnl } }).catch(()=>{});
+
+            const OffsetModel = req.isPaper ? PaperOffsetRecord : RealOffsetRecord;
+            OffsetModel.create({ userId: req.userId, symbol: symbol, winnerSymbol: symbol, reason: 'Manual User Close', netProfit: closePnl }).catch(()=>{});
+
+            closed = true;
+            break; 
+        }
+
+        if (closed) res.json({ success: true, message: `Closed ${symbol} successfully.` });
+        else res.status(400).json({ error: "Position not found or already closed." });
+    } catch(err) { res.status(500).json({ error: err.message }); }
+});
+
 app.post('/api/settings', authMiddleware, async (req, res) => {
     await bootstrapBots(); 
     const SettingsModel = req.isPaper ? PaperSettings : RealSettings;
@@ -2473,6 +2520,15 @@ app.get('/', (req, res) => {
         '            const data = await res.json();',
         '            if(data.success) alert(data.message); else alert("Error: " + data.error);',
         '        }',
+        '        async function closeSinglePosition(symbol, profileId) {',
+        '            if(!confirm("Are you sure you want to close the " + symbol + " position?")) return;',
+        '            try {',
+        '                const res = await fetch(\'/api/close-position\', { method: \'POST\', headers: { \'Content-Type\': \'application/json\', \'Authorization\': \'Bearer \' + token }, body: JSON.stringify({ symbol, profileId }) });',
+        '                const data = await res.json();',
+        '                if(data.success) { alert("Position manual close command sent successfully."); loadStatus(); }',
+        '                else alert("Error: " + data.error);',
+        '            } catch(e) { alert("Network Error: Could not close position."); }',
+        '        }',
         '        async function loadMasterEditor() {',
         '            try {',
         '                const res = await fetch(\'/api/admin/editor-data\', { headers: { \'Authorization\': \'Bearer \' + token } });',
@@ -2962,7 +3018,7 @@ app.get('/', (req, res) => {
         '                    if (activeCandidates.length > 0) {',
         '                        const highest = activeCandidates[0];',
         '                        const lowest = activeCandidates[activeCandidates.length - 1];',
-        '                        document.getElementById("display_highestPnlNode").innerHTML = "<span style=\'font-size:0.75rem; color:var(--text-muted);\'>" + highest.symbol + "</span><br>+$" + highest.pnl.toFixed(4);',
+        '                        document.getElementById("display_highestPnlNode").innerHTML = "<div style=\'display:flex; justify-content:space-between; align-items:center;\'><div><span style=\'font-size:0.75rem; color:var(--text-muted);\'>" + highest.symbol + "</span><br>+$" + highest.pnl.toFixed(4) + "</div><button class=\'md-btn md-btn-danger\' style=\'padding:4px 8px; font-size:0.75rem;\' onclick=\'closeSinglePosition(\\"" + highest.symbol + "\\", \\"" + highest.profileId + "\\")\'>Close</button></div>";',
         '                        document.getElementById("display_lowestPnlNode").innerHTML = "<span style=\'font-size:0.75rem; color:var(--text-muted);\'>" + lowest.symbol + "</span><br>" + (lowest.pnl >= 0 ? "+$" : "-$") + Math.abs(lowest.pnl).toFixed(4);',
         '                    } else {',
         '                        document.getElementById("display_highestPnlNode").innerHTML = "-- / $0.00";',
