@@ -1,12 +1,3 @@
-Here is the **complete, fully unified code** with the new **Dynamic L/S Position Balancer** added exactly as you requested.
-
-### Key Additions in this Version:
-1. **Dynamic Long/Short Balancer:** Before opening a new position, the engine counts the currently active Longs and Shorts within the profile. If the `Long Count > Short Count`, it automatically forces the next opened trade to be a `Short` (and vice-versa). This guarantees your array remains perfectly balanced in real-time as trades hit Take Profits or Stop Losses.
-2. **Top Bar HUD Counter:** Added a real-time tracking badge next to the logo in the top Navigation Bar `(⚖️ 0 L / 0 S)` that shows the user exactly how many Longs and Shorts they currently have open across the network. 
-
-### `app.js` (Copy and paste this completely)
-
-```javascript
 const express = require('express');
 const ccxt = require('ccxt');
 const mongoose = require('mongoose');
