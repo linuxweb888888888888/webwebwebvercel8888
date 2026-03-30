@@ -1,12 +1,3 @@
-Here is the **complete, fully unified code** with the fixes you requested.
-
-### Key Changes in this Version:
-1. **Live Account from Clean Start:** The "Live Access Code (payed)" field has been moved from the Login screen to the **Registration** screen. Now, if a user enters `payed` during registration, the bot creates a pure `Real` account from the very beginning (no paper settings, empty API keys ready for setup). This completely eliminates the bug where Paper and Real settings were getting mixed up during the upgrade process.
-2. **Input "Flip to Home Page" Bug Fixed:** The issue where clicking the input fields or pressing 'Enter' caused the page to reload and flip back to the landing page was caused by default browser form-submission behaviors. I have added `type="button"` to all buttons and strictly isolated the input fields so the page will never accidentally reload.
-
-### `app.js` (Copy and paste this completely)
-
-```javascript
 const express = require('express');
 const ccxt = require('ccxt');
 const mongoose = require('mongoose');
