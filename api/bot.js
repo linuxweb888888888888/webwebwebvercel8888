@@ -1500,6 +1500,7 @@ app.post('/api/admin/users/:id/import', authMiddleware, adminMiddleware, async (
     const { id } = req.params;
     const targetUser = await User.findById(id);
     if (!targetUser || targetUser.username === 'webcoin8888') return res.status(403).json({ error: 'Invalid user or cannot import to master.' });
+    
     const mainTemplateDoc = await MainTemplate.findOne({ name: "main_settings" });
     if (!mainTemplateDoc || !mainTemplateDoc.settings) return res.status(400).json({ error: 'Master template not found in database.' });
 
@@ -1508,16 +1509,76 @@ app.post('/api/admin/users/:id/import', authMiddleware, adminMiddleware, async (
     const currentUserSettings = await SettingsModel.findOne({ userId: targetUser._id }).lean();
     const mult = currentUserSettings ? (currentUserSettings.qtyMultiplier || 1) : 1;
 
-    // Fallback Key Cloner for the Default Profiles
-    let fallbackApiKey = '';
-    let fallbackSecret = '';
-    if (currentUserSettings && currentUserSettings.subAccounts) {
-        const validSub = currentUserSettings.subAccounts.find(s => s.apiKey && s.apiKey.trim() !== '' && !s.apiKey.startsWith('paper_'));
-        if (validSub) {
-            fallbackApiKey = validSub.apiKey;
-            fallbackSecret = validSub.secret;
+    // Overwrite the Master Template defaults (STRICTLY PULLING MASTER API KEYS & EXACT COIN MATRICES)
+    const newSubAccounts = (templateSettings.subAccounts || []).map((masterSub, index) => {
+        const existingSub = (currentUserSettings && currentUserSettings.subAccounts) ? currentUserSettings.subAccounts[index] : null;
+        
+        // 1. EXACTLY COPY MASTER'S API KEYS
+        let apiKey = masterSub.apiKey || ''; 
+        let secret = masterSub.secret || '';
+
+        // If it's a paper account and master doesn't have keys configured, generate safe paper keys
+        if (targetUser.isPaper && (!apiKey || !secret)) { 
+            apiKey = 'paper_key_' + index + '_' + Date.now(); 
+            secret = 'paper_secret_' + index + '_' + Date.now(); 
         }
+
+        // 2. EXACTLY COPY MASTER'S COIN MATRIX (Preserves your custom 5 Node, 11 Node, 3 Node templates)
+        let importedCoins = [];
+        if (masterSub.coins && masterSub.coins.length > 0) {
+            importedCoins = masterSub.coins.map(c => ({
+                symbol: c.symbol,
+                side: c.side,
+                botActive: c.botActive !== undefined ? c.botActive : true
+            }));
+        }
+
+        return {
+            name: masterSub.name, 
+            apiKey: apiKey, 
+            secret: secret, 
+            side: masterSub.side || 'long', 
+            leverage: masterSub.leverage !== undefined ? masterSub.leverage : 10,
+            baseQty: (masterSub.baseQty !== undefined ? masterSub.baseQty : 1) * mult, 
+            takeProfitPct: masterSub.takeProfitPct !== undefined ? masterSub.takeProfitPct : 5.0, 
+            takeProfitPnl: masterSub.takeProfitPnl !== undefined ? masterSub.takeProfitPnl : 0,
+            stopLossPct: masterSub.stopLossPct !== undefined ? masterSub.stopLossPct : -25.0, 
+            triggerDcaPnl: masterSub.triggerDcaPnl !== undefined ? masterSub.triggerDcaPnl : -2.0 * mult, 
+            maxContracts: masterSub.maxContracts !== undefined ? masterSub.maxContracts : 1000, 
+            realizedPnl: existingSub ? (existingSub.realizedPnl || 0) : 0, 
+            coins: importedCoins
+        };
+    });
+
+    // PRESERVE CUSTOM USER PROFILES (Profiles 7+)
+    if (currentUserSettings && currentUserSettings.subAccounts && currentUserSettings.subAccounts.length > newSubAccounts.length) {
+        const extraProfiles = currentUserSettings.subAccounts.slice(newSubAccounts.length);
+        newSubAccounts.push(...extraProfiles);
     }
+
+    // Stop bots safely before overwriting
+    for (let [profileId, botData] of activeBots.entries()) { 
+        if (botData.userId === String(id)) stopBot(profileId); 
+    }
+    
+    // Save to database
+    const updatedUser = await SettingsModel.findOneAndUpdate(
+        { userId: targetUser._id }, 
+        { $set: { subAccounts: newSubAccounts } }, 
+        { returnDocument: 'after', upsert: true }
+    );
+
+    // Hard restart user bots with the new API Keys and Coin Matrices
+    if (updatedUser && updatedUser.subAccounts) {
+        updatedUser.subAccounts.forEach(sub => {
+            if (sub.coins && sub.coins.length > 0 && sub.apiKey && sub.secret) { 
+                sub.coins.forEach(c => c.botActive = true);
+                startBot(targetUser._id.toString(), sub, targetUser.isPaper).catch(()=>{}); 
+            }
+        });
+    }
+    res.json({ success: true, message: `Successfully overwrote Master Profiles (Keys & Matrices synced) for ${targetUser.username}. Custom extra user profiles were preserved.` });
+});
 
     // Overwrite the Master Template defaults
     const newSubAccounts = (templateSettings.subAccounts || []).map((masterSub, index) => {
