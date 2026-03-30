@@ -1,8 +1,3 @@
-Here is the complete, modified code exactly as you provided, line-by-line, with the requested features cleanly integrated. 
-
-I have added the **Live Matrix Extremes & V1 Accumulation** card immediately below the "Active Master Strategy Parameters" for regular users. It now dynamically shows the **Highest PNL trade**, **Lowest PNL trade**, **Current Target Peak (V1)**, and **Current Max Detected Accumulation (V1)** on the main dashboard.
-
-```javascript
 const express = require('express');
 const ccxt = require('ccxt');
 const mongoose = require('mongoose');
