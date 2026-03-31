@@ -164,6 +164,7 @@ const MainTemplate = mongoose.models.MainTemplate || mongoose.model('MainTemplat
 global.customMaxLeverages = {};
 global.marketSizes = {};
 global.livePrices = global.livePrices || {};
+global.priceChangePct = global.priceChangePct || {};
 let isBinanceFetching = false;
 let isHtxFetching = false;
 
@@ -231,7 +232,12 @@ function startPriceOracle() {
         isBinanceFetching = true;
         try {
             const tickers = await binanceOracle.fetchTickers();
-            for (let sym in tickers) { if (tickers[sym] && tickers[sym].last) global.livePrices[sym] = tickers[sym].last; }
+            for (let sym in tickers) { 
+                if (tickers[sym] && tickers[sym].last) {
+                    global.livePrices[sym] = tickers[sym].last;
+                    if (tickers[sym].percentage !== undefined) global.priceChangePct[sym] = tickers[sym].percentage;
+                } 
+            }
         } catch(e) { } finally { isBinanceFetching = false; }
     }, 3000);
 
@@ -240,7 +246,12 @@ function startPriceOracle() {
         isHtxFetching = true;
         try {
             const tickers = await htxOracle.fetchTickers();
-            for (let sym in tickers) { if (tickers[sym] && tickers[sym].last) global.livePrices[sym] = tickers[sym].last; }
+            for (let sym in tickers) { 
+                if (tickers[sym] && tickers[sym].last) {
+                    global.livePrices[sym] = tickers[sym].last;
+                    if (tickers[sym].percentage !== undefined) global.priceChangePct[sym] = tickers[sym].percentage;
+                } 
+            }
         } catch(e) { } finally { isHtxFetching = false; }
     }, 5000);
 
@@ -335,16 +346,6 @@ async function startBot(userId, subAccount, isPaper) {
                 positions = await exchange.fetchPositions().catch(e => { throw new Error('Positions: ' + e.message); });
             }
 
-            // DYNAMIC L/S BALANCING PRE-CALCULATION
-            let currentLongs = 0;
-            let currentShorts = 0;
-            for (let sym in state.coinStates) {
-                if (state.coinStates[sym].contracts > 0) {
-                    if (state.coinStates[sym].activeSide === 'long') currentLongs++;
-                    else if (state.coinStates[sym].activeSide === 'short') currentShorts++;
-                }
-            }
-
             for (let coin of activeCoins) {
                 try {
                     const activeLeverage = getLeverageForCoin(coin.symbol);
@@ -356,11 +357,13 @@ async function startBot(userId, subAccount, isPaper) {
                     let cState = state.coinStates[coin.symbol];
                     if (cState.lockUntil && Date.now() < cState.lockUntil) continue;
 
-                    // DYNAMIC POSITION BALANCER LOGIC
+                    // 24HR CHANGE DIRECTION LOGIC
                     let activeSide = coin.side || currentSettings.side;
                     if (cState.contracts <= 0) {
-                        if (currentLongs > currentShorts) activeSide = 'short';
-                        else if (currentShorts > currentLongs) activeSide = 'long';
+                        const changePct = global.priceChangePct && global.priceChangePct[coin.symbol];
+                        if (changePct !== undefined && changePct !== null) {
+                            activeSide = changePct >= 0 ? 'long' : 'short';
+                        }
                     } else {
                         // Maintain the side it was originally opened with
                         activeSide = cState.activeSide || activeSide;
@@ -456,10 +459,6 @@ async function startBot(userId, subAccount, isPaper) {
                             cState.unrealizedPnl = 0; 
                             cState.margin = (cState.avgEntry * cState.contracts * contractSize) / activeLeverage;
                         }
-
-                        // Update dynamic balancing counters for the next coin in the loop
-                        if (activeSide === 'long') currentLongs++;
-                        else currentShorts++;
 
                         const OffsetModel = isPaper ? PaperOffsetRecord : RealOffsetRecord;
                         OffsetModel.create({ userId: userId, symbol: coin.symbol, winnerSymbol: coin.symbol, reason: `Open Base Position (${safeBaseQty} contracts)`, netProfit: 0 }).catch(()=>{});
@@ -1927,25 +1926,10 @@ app.get('/api/status', authMiddleware, async (req, res) => {
         currentMinuteLoss = arr.reduce((sum, r) => sum + r.amount, 0);
     }
 
-    let totalLongs = 0;
-    let totalShorts = 0;
-    for (let pid in userStatuses) {
-        const st = userStatuses[pid];
-        if (st && st.coinStates) {
-            for (let sym in st.coinStates) {
-                const cs = st.coinStates[sym];
-                if (cs.contracts > 0) { 
-                    if (cs.activeSide === 'long') totalLongs++;
-                    else if (cs.activeSide === 'short') totalShorts++;
-                }
-            }
-        }
-    }
-
     const firstOffset = await OffsetModel.findOne({ userId: req.userId }).sort({ timestamp: 1 }).lean();
     const startTime = firstOffset ? firstOffset.timestamp : null;
 
-    res.json({ states: userStatuses, subAccounts: settings ? settings.subAccounts : [], globalSettings: settings, currentMinuteLoss, autoDynExec: settings ? settings.autoDynamicLastExecution : null, startTime, totalLongs, totalShorts });
+    res.json({ states: userStatuses, subAccounts: settings ? settings.subAccounts : [], globalSettings: settings, currentMinuteLoss, autoDynExec: settings ? settings.autoDynamicLastExecution : null, startTime });
 });
 
 app.get('/api/offsets', authMiddleware, async (req, res) => {
@@ -2175,7 +2159,7 @@ app.get('/', (req, res) => {
         '    <div id="app">',
         '        <!-- NAVBAR -->',
         '        <nav class="navbar">',
-        '            <div class="nav-brand"><span class="material-symbols-outlined highlight" style="font-size:28px;">show_chart</span> NexGen <span class="highlight">Algo</span> <span id="nav-ls-balance" style="display:none; margin-left:12px; padding:4px 10px; background:rgba(255,255,255,0.05); border:1px solid var(--border); border-radius:6px; font-size:0.85rem; font-weight:600; color:var(--text-main); align-items:center; gap:6px;"><span class="material-symbols-outlined" style="font-size:16px; color:var(--warning);">balance</span> <span class="text-green" id="nav-long-count">0</span> L / <span class="text-red" id="nav-short-count">0</span> S</span></div>',
+        '            <div class="nav-brand"><span class="material-symbols-outlined highlight" style="font-size:28px;">show_chart</span> NexGen <span class="highlight">Algo</span></div>',
         '            <div class="nav-links" id="nav-actions">',
         '                <!-- Injected via JS based on auth state -->',
         '            </div>',
@@ -3331,13 +3315,6 @@ app.get('/', (req, res) => {
         '                if (summaryTbody) summaryTbody.innerHTML = summaryHtml;',
         '                // ------------------------------------',
         '',
-        '                // Update L/S Balance Counters in Nav',
-        '                if (myUsername !== \'webcoin8888\') {',
-        '                    document.getElementById(\'nav-ls-balance\').style.display = \'inline-flex\';',
-        '                    document.getElementById(\'nav-long-count\').innerText = data.totalLongs || 0;',
-        '                    document.getElementById(\'nav-short-count\').innerText = data.totalShorts || 0;',
-        '                }',
-        '                ',
         '                const startTime = data.startTime ? new Date(data.startTime).getTime() : Date.now();',
         '                const elapsedMs = Math.max(Date.now() - startTime, 3600000);',
         '                const elapsedHours = elapsedMs / 3600000;',
@@ -3417,4 +3394,4 @@ app.get('/', (req, res) => {
 if (require.main === module) {
     app.listen(PORT, () => console.log(`🚀 Running locally on http://localhost:${PORT}`));
 }
-module.exports = app;     
+module.exports = app;
