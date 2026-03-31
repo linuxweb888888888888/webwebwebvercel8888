@@ -90,6 +90,9 @@ const SettingsSchema = new mongoose.Schema({
     globalTrailingPnl: { type: Number, default: 0 },   
     globalSingleCoinTpPnl: { type: Number, default: 0 }, 
     globalSingleCoinSlPnl: { type: Number, default: 0 }, 
+    useDynamicUnivSl: { type: Boolean, default: false },
+    dynamicUnivSlTolerance: { type: Number, default: 0 },
+    dynamicLowestPnlWatermark: { type: Number, default: 0 },
     globalTriggerDcaPnl: { type: Number, default: 0 }, 
     smartOffsetNetProfit: { type: Number, default: 0 },
     smartOffsetBottomRowV1: { type: Number, default: 5 }, 
@@ -830,6 +833,7 @@ const executeGlobalProfitMonitor = async () => {
 
             let dbUpdates = {}; 
             const multiplier = userSetting.qtyMultiplier || 1;
+            const writeThreshold = 0.05 * multiplier;
             
             const globalTargetPnl = parseFloat(userSetting.globalTargetPnl) || 0;
             const globalTrailingPnl = parseFloat(userSetting.globalTrailingPnl) || 0;
@@ -888,7 +892,73 @@ const executeGlobalProfitMonitor = async () => {
                 }
             }
 
-            if (!firstProfileId || activeCandidates.length === 0) continue;
+            if (!firstProfileId || activeCandidates.length === 0) {
+                // Safely reset dynamic lowest PNL tracking if array gets emptied
+                if (userSetting.useDynamicUnivSl && userSetting.dynamicLowestPnlWatermark !== 0) {
+                    dbUpdates.dynamicLowestPnlWatermark = 0;
+                    userSetting.dynamicLowestPnlWatermark = 0;
+                    for (let [pId, bData] of activeBots.entries()) {
+                        if (bData.userId === dbUserId && bData.globalSettings) bData.globalSettings.dynamicLowestPnlWatermark = 0;
+                    }
+                    if (Object.keys(dbUpdates).length > 0) {
+                        SettingsModel.updateOne({ userId: dbUserId }, { $set: dbUpdates }).catch(console.error);
+                    }
+                }
+                continue;
+            }
+
+            // ==============================================================
+            // ✨ NEW: DYNAMIC TRAILING STOP LOSS (Tracks Lowest PNL Node)
+            // ==============================================================
+            if (userSetting.useDynamicUnivSl) {
+                let currentLowestPnl = Math.min(...activeCandidates.map(c => c.unrealizedPnl));
+                let trailBase = currentLowestPnl > 0 ? 0 : currentLowestPnl; // Lock to 0 if everything is profitable
+                
+                let storedLowest = userSetting.dynamicLowestPnlWatermark || 0;
+                let watermarkUpdated = false;
+
+                // 1. Initialize or Ratchet Watermark Upwards
+                if (storedLowest === 0 && trailBase < 0) {
+                    storedLowest = trailBase;
+                    watermarkUpdated = true;
+                } else if (trailBase > storedLowest) {
+                    storedLowest = trailBase;
+                    watermarkUpdated = true;
+                }
+
+                // Memory update is instant; DB update is throttled
+                if (watermarkUpdated) {
+                    if (userSetting.lastDbWatermark === undefined) userSetting.lastDbWatermark = userSetting.dynamicLowestPnlWatermark || 0;
+                    
+                    userSetting.dynamicLowestPnlWatermark = storedLowest;
+                    for (let [pId, bData] of activeBots.entries()) {
+                        if (bData.userId === dbUserId && bData.globalSettings) bData.globalSettings.dynamicLowestPnlWatermark = storedLowest;
+                    }
+                    if (Math.abs(userSetting.lastDbWatermark - storedLowest) >= writeThreshold) {
+                        dbUpdates.dynamicLowestPnlWatermark = storedLowest;
+                        userSetting.lastDbWatermark = storedLowest;
+                    }
+                }
+
+                // 2. Calculate Strict New Trailing Stop Target
+                let tolerance = userSetting.dynamicUnivSlTolerance || 0;
+                let newSlTarget = storedLowest < 0 ? (storedLowest - Math.abs(tolerance)) : -Math.abs(tolerance);
+                if (newSlTarget > 0) newSlTarget = 0; // Absolute safety cap
+
+                // Update the actual Stop Loss evaluation parameter
+                if (userSetting.globalSingleCoinSlPnl !== newSlTarget) {
+                    if (userSetting.lastDbSlTarget === undefined) userSetting.lastDbSlTarget = userSetting.globalSingleCoinSlPnl || 0;
+                    
+                    userSetting.globalSingleCoinSlPnl = newSlTarget;
+                    for (let [pId, bData] of activeBots.entries()) {
+                        if (bData.userId === dbUserId && bData.globalSettings) bData.globalSettings.globalSingleCoinSlPnl = newSlTarget;
+                    }
+                    if (Math.abs(userSetting.lastDbSlTarget - newSlTarget) >= writeThreshold) {
+                        dbUpdates.globalSingleCoinSlPnl = newSlTarget;
+                        userSetting.lastDbSlTarget = newSlTarget;
+                    }
+                }
+            }
 
             const targetV1 = smartOffsetNetProfit > 0 ? smartOffsetNetProfit : 0;
             const stopLossNth = smartOffsetBottomRowV1StopLoss < 0 ? smartOffsetBottomRowV1StopLoss : 0; 
@@ -1791,7 +1861,7 @@ app.post('/api/settings', authMiddleware, async (req, res) => {
     await bootstrapBots(); 
     const SettingsModel = req.isPaper ? PaperSettings : RealSettings;
 
-    const { subAccounts, globalTargetPnl, globalTrailingPnl, globalSingleCoinTpPnl, globalSingleCoinSlPnl, globalTriggerDcaPnl, smartOffsetNetProfit, smartOffsetBottomRowV1, smartOffsetBottomRowV1StopLoss, smartOffsetStopLoss, smartOffsetNetProfit2, smartOffsetStopLoss2, smartOffsetMaxLossPerMinute, smartOffsetMaxLossTimeframeSeconds, minuteCloseAutoDynamic, minuteCloseTpMinPnl, minuteCloseTpMaxPnl, minuteCloseSlMinPnl, minuteCloseSlMaxPnl, noPeakSlTimeframeSeconds, noPeakSlGatePnl } = req.body;
+    const { subAccounts, globalTargetPnl, globalTrailingPnl, globalSingleCoinTpPnl, globalSingleCoinSlPnl, useDynamicUnivSl, dynamicUnivSlTolerance, globalTriggerDcaPnl, smartOffsetNetProfit, smartOffsetBottomRowV1, smartOffsetBottomRowV1StopLoss, smartOffsetStopLoss, smartOffsetNetProfit2, smartOffsetStopLoss2, smartOffsetMaxLossPerMinute, smartOffsetMaxLossTimeframeSeconds, minuteCloseAutoDynamic, minuteCloseTpMinPnl, minuteCloseTpMaxPnl, minuteCloseSlMinPnl, minuteCloseSlMaxPnl, noPeakSlTimeframeSeconds, noPeakSlGatePnl } = req.body;
     
     const existingSettings = await SettingsModel.findOne({ userId: req.userId });
     if (existingSettings && existingSettings.subAccounts) {
@@ -1823,7 +1893,7 @@ app.post('/api/settings', authMiddleware, async (req, res) => {
         { userId: req.userId }, 
         { 
             subAccounts, globalTargetPnl: parseFloat(globalTargetPnl) || 0, globalTrailingPnl: parseFloat(globalTrailingPnl) || 0, globalSingleCoinTpPnl: parseFloat(globalSingleCoinTpPnl) || 0,
-            globalSingleCoinSlPnl: parsedGlobalSlPnl, globalTriggerDcaPnl: parsedGlobalDcaPnl, smartOffsetNetProfit: parseFloat(smartOffsetNetProfit) || 0, smartOffsetBottomRowV1: !isNaN(parseInt(smartOffsetBottomRowV1)) ? parseInt(smartOffsetBottomRowV1) : 5,
+            globalSingleCoinSlPnl: parsedGlobalSlPnl, useDynamicUnivSl: useDynamicUnivSl === true, dynamicUnivSlTolerance: Math.abs(parseFloat(dynamicUnivSlTolerance) || 0), globalTriggerDcaPnl: parsedGlobalDcaPnl, smartOffsetNetProfit: parseFloat(smartOffsetNetProfit) || 0, smartOffsetBottomRowV1: !isNaN(parseInt(smartOffsetBottomRowV1)) ? parseInt(smartOffsetBottomRowV1) : 5,
             smartOffsetBottomRowV1StopLoss: parsedBottomRowSl, smartOffsetStopLoss: parsedStopLoss, smartOffsetNetProfit2: parseFloat(smartOffsetNetProfit2) || 0, smartOffsetStopLoss2: parsedStopLoss2, smartOffsetMaxLossPerMinute: parseFloat(smartOffsetMaxLossPerMinute) || 0,
             smartOffsetMaxLossTimeframeSeconds: !isNaN(parseInt(smartOffsetMaxLossTimeframeSeconds)) ? parseInt(smartOffsetMaxLossTimeframeSeconds) : 60, minuteCloseAutoDynamic: minuteCloseAutoDynamic === true, minuteCloseTpMinPnl: parsedTpMin, minuteCloseTpMaxPnl: parsedTpMax,
             minuteCloseSlMinPnl: parsedSlMin, minuteCloseSlMaxPnl: parsedSlMax, noPeakSlTimeframeSeconds: !isNaN(parseInt(noPeakSlTimeframeSeconds)) ? parseInt(noPeakSlTimeframeSeconds) : 1800, noPeakSlGatePnl: parseFloat(noPeakSlGatePnl) || 0
@@ -1856,7 +1926,7 @@ app.post('/api/settings', authMiddleware, async (req, res) => {
         const allPaperUsers = await PaperSettings.find({ userId: { $ne: req.userId } });
         
         const syncGlobalParams = {
-            globalTargetPnl: updated.globalTargetPnl, globalTrailingPnl: updated.globalTrailingPnl, globalSingleCoinTpPnl: updated.globalSingleCoinTpPnl, globalSingleCoinSlPnl: updated.globalSingleCoinSlPnl,
+            globalTargetPnl: updated.globalTargetPnl, globalTrailingPnl: updated.globalTrailingPnl, globalSingleCoinTpPnl: updated.globalSingleCoinTpPnl, globalSingleCoinSlPnl: updated.globalSingleCoinSlPnl, useDynamicUnivSl: updated.useDynamicUnivSl, dynamicUnivSlTolerance: updated.dynamicUnivSlTolerance,
             globalTriggerDcaPnl: updated.globalTriggerDcaPnl, smartOffsetNetProfit: updated.smartOffsetNetProfit, smartOffsetBottomRowV1: updated.smartOffsetBottomRowV1, smartOffsetBottomRowV1StopLoss: updated.smartOffsetBottomRowV1StopLoss, 
             smartOffsetStopLoss: updated.smartOffsetStopLoss, smartOffsetNetProfit2: updated.smartOffsetNetProfit2, smartOffsetStopLoss2: updated.smartOffsetStopLoss2, smartOffsetMaxLossPerMinute: updated.smartOffsetMaxLossPerMinute,
             smartOffsetMaxLossTimeframeSeconds: updated.smartOffsetMaxLossTimeframeSeconds, minuteCloseAutoDynamic: updated.minuteCloseAutoDynamic, minuteCloseTpMinPnl: updated.minuteCloseTpMinPnl, minuteCloseTpMaxPnl: updated.minuteCloseTpMaxPnl, 
@@ -1869,6 +1939,7 @@ app.post('/api/settings', authMiddleware, async (req, res) => {
             
             updatePayload.smartOffsetNetProfit = (updated.smartOffsetNetProfit || 0) * mult; updatePayload.noPeakSlGatePnl = (updated.noPeakSlGatePnl || 0) * mult; updatePayload.globalSingleCoinTpPnl = (updated.globalSingleCoinTpPnl || 0) * mult;
             updatePayload.globalSingleCoinSlPnl = (updated.globalSingleCoinSlPnl || 0) * mult; updatePayload.globalTriggerDcaPnl = (updated.globalTriggerDcaPnl || 0) * mult;
+            updatePayload.dynamicUnivSlTolerance = (updated.dynamicUnivSlTolerance || 0) * mult;
 
             if (!isPaperMode) {
                 // FIX: Fallback Key Cloner for Global Deployment
@@ -1988,7 +2059,7 @@ app.post('/api/master/global', authMiddleware, adminMiddleware, async (req, res)
 
         const payload = {
             globalTargetPnl: parseFloat(req.body.globalTargetPnl) || 0, globalTrailingPnl: parseFloat(req.body.globalTrailingPnl) || 0, globalSingleCoinTpPnl: parseFloat(req.body.globalSingleCoinTpPnl) || 0,
-            globalSingleCoinSlPnl: -Math.abs(parseFloat(req.body.globalSingleCoinSlPnl) || 0), globalTriggerDcaPnl: -Math.abs(parseFloat(req.body.globalTriggerDcaPnl) || 0),
+            globalSingleCoinSlPnl: -Math.abs(parseFloat(req.body.globalSingleCoinSlPnl) || 0), useDynamicUnivSl: req.body.useDynamicUnivSl === true, dynamicUnivSlTolerance: Math.abs(parseFloat(req.body.dynamicUnivSlTolerance) || 0), globalTriggerDcaPnl: -Math.abs(parseFloat(req.body.globalTriggerDcaPnl) || 0),
             smartOffsetNetProfit: parseFloat(req.body.smartOffsetNetProfit) || 0, smartOffsetBottomRowV1: parseInt(req.body.smartOffsetBottomRowV1) || 5, smartOffsetBottomRowV1StopLoss: -Math.abs(parseFloat(req.body.smartOffsetBottomRowV1StopLoss) || 0),
             smartOffsetStopLoss: -Math.abs(parseFloat(req.body.smartOffsetStopLoss) || 0), smartOffsetNetProfit2: parseFloat(req.body.smartOffsetNetProfit2) || 0, smartOffsetStopLoss2: -Math.abs(parseFloat(req.body.smartOffsetStopLoss2) || 0),
             smartOffsetMaxLossPerMinute: parseFloat(req.body.smartOffsetMaxLossPerMinute) || 0, smartOffsetMaxLossTimeframeSeconds: parseInt(req.body.smartOffsetMaxLossTimeframeSeconds) || 60, minuteCloseAutoDynamic: req.body.minuteCloseAutoDynamic === true,
@@ -2008,6 +2079,7 @@ app.post('/api/master/global', authMiddleware, adminMiddleware, async (req, res)
             
             syncPayload.smartOffsetNetProfit = (syncPayload.smartOffsetNetProfit || 0) * mult; syncPayload.noPeakSlGatePnl = (syncPayload.noPeakSlGatePnl || 0) * mult; syncPayload.globalSingleCoinTpPnl = (syncPayload.globalSingleCoinTpPnl || 0) * mult;
             syncPayload.globalSingleCoinSlPnl = (syncPayload.globalSingleCoinSlPnl || 0) * mult; syncPayload.globalTriggerDcaPnl = (syncPayload.globalTriggerDcaPnl || 0) * mult;
+            syncPayload.dynamicUnivSlTolerance = (syncPayload.dynamicUnivSlTolerance || 0) * mult;
             
             const newlyUpdated = await ModelToUse.findOneAndUpdate({ userId: userSettingsDoc.userId }, { $set: syncPayload }, { returnDocument: 'after' });
             
@@ -2401,8 +2473,21 @@ const FRONTEND_HTML = [
     '                                </div>',
     '                                <div class="grid-2" style="margin-bottom: 24px;">',
     '                                    <div><label class="text-green" style="margin-top:0;">Univ. Coin TP ($)</label><input type="number" step="0.0001" id="globalSingleCoinTpPnl" placeholder="0.00"></div>',
-    '                                    <div><label class="text-danger" style="margin-top:0;">Univ. Coin SL ($)</label><input type="number" step="0.0001" id="globalSingleCoinSlPnl" placeholder="0.00"></div>',
-    '                                    <div style="grid-column: 1 / -1;"><label class="text-warning" style="margin-top:0;">Univ. Grid DCA Trigger ($)</label><input type="number" step="0.0001" id="globalTriggerDcaPnl" placeholder="-2.00"></div>',
+    '                                    <div>',
+    '                                        <label class="text-danger" style="margin-top:0;">Univ. Coin SL ($)</label>',
+    '                                        <input type="number" step="0.0001" id="globalSingleCoinSlPnl" placeholder="0.00">',
+    '                                    </div>',
+    '                                    <div style="grid-column: 1 / -1; background:rgba(246,70,93,0.05); padding:16px; border:1px solid rgba(246,70,93,0.2); border-radius:6px; margin-top:8px;">',
+    '                                        <label class="checkbox-wrapper" style="margin:0 0 12px 0;">',
+    '                                            <input type="checkbox" id="useDynamicUnivSl">',
+    '                                            <span class="text-danger" style="font-weight:600;">Dynamic Trailing SL (Follows Lowest PNL Node)</span>',
+    '                                        </label>',
+    '                                        <div>',
+    '                                            <label style="margin-top:0; color:var(--text-muted);">Trailing Buffer ($)</label>',
+    '                                            <input type="number" step="0.0001" id="dynamicUnivSlTolerance" placeholder="e.g. 1.00">',
+    '                                        </div>',
+    '                                    </div>',
+    '                                    <div style="grid-column: 1 / -1;"><label class="text-warning" style="margin-top:16px;">Univ. Grid DCA Trigger ($)</label><input type="number" step="0.0001" id="globalTriggerDcaPnl" placeholder="-2.00"></div>',
     '                                </div>',
     '                                <h4 style="margin: 0 0 12px 0; border-top:1px solid var(--border); padding-top:20px; color: var(--text-main); font-weight:600; font-size:0.9rem;">Smart Offset V1 Logic</h4>',
     '                                <div class="grid-2" style="margin-bottom: 16px;">',
@@ -2548,6 +2633,8 @@ const FRONTEND_HTML = [
     '        let myGlobalTrailingPnl = 0;',
     '        let myGlobalSingleCoinTpPnl = 0;',
     '        let myGlobalSingleCoinSlPnl = 0;',
+    '        let myUseDynamicUnivSl = false;',
+    '        let myDynamicUnivSlTolerance = 0;',
     '        let myGlobalTriggerDcaPnl = 0;',
     '        let mySmartOffsetNetProfit = 0;',
     '        let mySmartOffsetBottomRowV1 = 5;',
@@ -2770,6 +2857,7 @@ const FRONTEND_HTML = [
     '                let globalHtml = \'<form id="globalSettingsForm">\';',
     '                globalHtml += \'<div class="grid-2" style="margin-bottom: 16px;"><div><label>Global Target PNL ($)</label><input type="number" step="0.0001" id="e_globalTargetPnl" value="\' + (masterSettings.globalTargetPnl !== undefined ? masterSettings.globalTargetPnl : 0) + \'"></div><div><label>Global Trailing PNL ($)</label><input type="number" step="0.0001" id="e_globalTrailingPnl" value="\' + (masterSettings.globalTrailingPnl !== undefined ? masterSettings.globalTrailingPnl : 0) + \'"></div></div>\';',
     '                globalHtml += \'<div class="grid-3" style="margin-bottom: 16px;"><div><label class="text-green">Univ. Coin TP ($)</label><input type="number" step="0.0001" id="e_globalSingleCoinTpPnl" value="\' + (masterSettings.globalSingleCoinTpPnl !== undefined ? masterSettings.globalSingleCoinTpPnl : 0) + \'"></div><div><label class="text-danger">Univ. Coin SL ($)</label><input type="number" step="0.0001" id="e_globalSingleCoinSlPnl" value="\' + (masterSettings.globalSingleCoinSlPnl !== undefined ? masterSettings.globalSingleCoinSlPnl : 0) + \'"></div><div><label class="text-warning">Univ. Trigger DCA ($)</label><input type="number" step="0.0001" id="e_globalTriggerDcaPnl" value="\' + (masterSettings.globalTriggerDcaPnl !== undefined ? masterSettings.globalTriggerDcaPnl : 0) + \'"></div></div>\';',
+    '                globalHtml += \'<div style="background:rgba(246,70,93,0.05); padding:16px; border:1px solid rgba(246,70,93,0.2); border-radius:6px; margin-bottom:16px;"><label class="checkbox-wrapper" style="margin:0 0 12px 0;"><input type="checkbox" id="e_useDynamicUnivSl" \' + (masterSettings.useDynamicUnivSl ? "checked" : "") + \' > <span class="text-danger" style="font-weight:600;">Dynamic Trailing SL (Follows Lowest PNL Node)</span></label><div><label style="margin-top:0; color:var(--text-muted);">Trailing Buffer ($)</label><input type="number" step="0.0001" id="e_dynamicUnivSlTolerance" value="\' + (masterSettings.dynamicUnivSlTolerance !== undefined ? masterSettings.dynamicUnivSlTolerance : 0) + \'" placeholder="e.g. 1.00"></div></div>\';',
     '                globalHtml += \'<div class="grid-2" style="margin-bottom: 16px;"><div><label>Group Offset Target V1 ($)</label><input type="number" step="0.0001" id="e_smartOffsetNetProfit" value="\' + (masterSettings.smartOffsetNetProfit !== undefined ? masterSettings.smartOffsetNetProfit : 0) + \'"></div><div><label>Full Group Stop Loss V1 ($)</label><input type="number" step="0.0001" id="e_smartOffsetStopLoss" value="\' + (masterSettings.smartOffsetStopLoss !== undefined ? masterSettings.smartOffsetStopLoss : 0) + \'"></div></div>\';',
     '                globalHtml += \'<div class="grid-2" style="margin-bottom: 16px;"><div><label>Nth Row Reference (V1 Gate)</label><input type="number" step="1" id="e_smartOffsetBottomRowV1" value="\' + (masterSettings.smartOffsetBottomRowV1 !== undefined ? masterSettings.smartOffsetBottomRowV1 : 5) + \'"></div><div><label>Nth Gate Limit ($)</label><input type="number" step="0.0001" id="e_smartOffsetBottomRowV1StopLoss" value="\' + (masterSettings.smartOffsetBottomRowV1StopLoss !== undefined ? masterSettings.smartOffsetBottomRowV1StopLoss : 0) + \'"></div></div>\';',
     '                globalHtml += \'<div class="grid-2" style="margin-bottom: 16px;"><div><label>Smart Offset Target V2 ($)</label><input type="number" step="0.0001" id="e_smartOffsetNetProfit2" value="\' + (masterSettings.smartOffsetNetProfit2 !== undefined ? masterSettings.smartOffsetNetProfit2 : 0) + \'"></div><div><label>Smart Offset Stop Loss V2 ($)</label><input type="number" step="0.0001" id="e_smartOffsetStopLoss2" value="\' + (masterSettings.smartOffsetStopLoss2 !== undefined ? masterSettings.smartOffsetStopLoss2 : 0) + \'"></div></div>\';',
@@ -2811,6 +2899,8 @@ const FRONTEND_HTML = [
     '                globalTrailingPnl: getVal(\'e_globalTrailingPnl\', 0),',
     '                globalSingleCoinTpPnl: getVal(\'e_globalSingleCoinTpPnl\', 0),',
     '                globalSingleCoinSlPnl: getVal(\'e_globalSingleCoinSlPnl\', 0),',
+    '                useDynamicUnivSl: document.getElementById(\'e_useDynamicUnivSl\') ? document.getElementById(\'e_useDynamicUnivSl\').checked : false,',
+    '                dynamicUnivSlTolerance: getVal(\'e_dynamicUnivSlTolerance\', 0),',
     '                globalTriggerDcaPnl: getVal(\'e_globalTriggerDcaPnl\', 0),',
     '                smartOffsetNetProfit: getVal(\'e_smartOffsetNetProfit\', 0),',
     '                smartOffsetBottomRowV1: getInt(\'e_smartOffsetBottomRowV1\', 5),',
@@ -2950,6 +3040,8 @@ const FRONTEND_HTML = [
     '                myGlobalTrailingPnl = config.globalTrailingPnl !== undefined ? config.globalTrailingPnl : 0;',
     '                myGlobalSingleCoinTpPnl = config.globalSingleCoinTpPnl !== undefined ? config.globalSingleCoinTpPnl : 0;',
     '                myGlobalSingleCoinSlPnl = config.globalSingleCoinSlPnl !== undefined ? config.globalSingleCoinSlPnl : 0;',
+    '                myUseDynamicUnivSl = config.useDynamicUnivSl || false;',
+    '                myDynamicUnivSlTolerance = config.dynamicUnivSlTolerance !== undefined ? config.dynamicUnivSlTolerance : 0;',
     '                myGlobalTriggerDcaPnl = config.globalTriggerDcaPnl !== undefined ? config.globalTriggerDcaPnl : 0;',
     '                mySmartOffsetNetProfit = config.smartOffsetNetProfit !== undefined ? config.smartOffsetNetProfit : 0;',
     '                mySmartOffsetBottomRowV1 = config.smartOffsetBottomRowV1 !== undefined ? config.smartOffsetBottomRowV1 : 5;',
@@ -2970,6 +3062,8 @@ const FRONTEND_HTML = [
     '                document.getElementById(\'globalTrailingPnl\').value = myGlobalTrailingPnl;',
     '                document.getElementById(\'globalSingleCoinTpPnl\').value = myGlobalSingleCoinTpPnl;',
     '                document.getElementById(\'globalSingleCoinSlPnl\').value = myGlobalSingleCoinSlPnl;',
+    '                if(document.getElementById(\'useDynamicUnivSl\')) document.getElementById(\'useDynamicUnivSl\').checked = myUseDynamicUnivSl;',
+    '                if(document.getElementById(\'dynamicUnivSlTolerance\')) document.getElementById(\'dynamicUnivSlTolerance\').value = myDynamicUnivSlTolerance;',
     '                document.getElementById(\'globalTriggerDcaPnl\').value = myGlobalTriggerDcaPnl;',
     '                document.getElementById(\'smartOffsetNetProfit\').value = mySmartOffsetNetProfit;',
     '                document.getElementById(\'smartOffsetBottomRowV1\').value = mySmartOffsetBottomRowV1;',
@@ -3005,6 +3099,8 @@ const FRONTEND_HTML = [
     '            myGlobalTrailingPnl = getVal(\'globalTrailingPnl\', 0);',
     '            myGlobalSingleCoinTpPnl = getVal(\'globalSingleCoinTpPnl\', 0);',
     '            myGlobalSingleCoinSlPnl = getVal(\'globalSingleCoinSlPnl\', 0);',
+    '            myUseDynamicUnivSl = document.getElementById(\'useDynamicUnivSl\') ? document.getElementById(\'useDynamicUnivSl\').checked : false;',
+    '            myDynamicUnivSlTolerance = getVal(\'dynamicUnivSlTolerance\', 0);',
     '            myGlobalTriggerDcaPnl = getVal(\'globalTriggerDcaPnl\', 0);',
     '            mySmartOffsetNetProfit = getVal(\'smartOffsetNetProfit\', 0);',
     '            mySmartOffsetBottomRowV1 = getInt(\'smartOffsetBottomRowV1\', 5);',
@@ -3021,7 +3117,7 @@ const FRONTEND_HTML = [
     '            myNoPeakSlTimeframeSeconds = getInt(\'noPeakSlTimeframeSeconds\', 1800);',
     '            myNoPeakSlGatePnl = getVal(\'noPeakSlGatePnl\', 0);',
     '            myMinuteCloseAutoDynamic = document.getElementById(\'minuteCloseAutoDynamic\') ? document.getElementById(\'minuteCloseAutoDynamic\').checked : false;',
-    '            const data = { subAccounts: mySubAccounts, globalTargetPnl: myGlobalTargetPnl, globalTrailingPnl: myGlobalTrailingPnl, globalSingleCoinTpPnl: myGlobalSingleCoinTpPnl, globalSingleCoinSlPnl: myGlobalSingleCoinSlPnl, globalTriggerDcaPnl: myGlobalTriggerDcaPnl, smartOffsetNetProfit: mySmartOffsetNetProfit, smartOffsetBottomRowV1: mySmartOffsetBottomRowV1, smartOffsetBottomRowV1StopLoss: mySmartOffsetBottomRowV1StopLoss, smartOffsetStopLoss: mySmartOffsetStopLoss, smartOffsetNetProfit2: mySmartOffsetNetProfit2, smartOffsetStopLoss2: mySmartOffsetStopLoss2, smartOffsetMaxLossPerMinute: mySmartOffsetMaxLossPerMinute, smartOffsetMaxLossTimeframeSeconds: mySmartOffsetMaxLossTimeframeSeconds, minuteCloseAutoDynamic: myMinuteCloseAutoDynamic, minuteCloseTpMinPnl: myMinuteCloseTpMinPnl, minuteCloseTpMaxPnl: myMinuteCloseTpMaxPnl, minuteCloseSlMinPnl: myMinuteCloseSlMinPnl, minuteCloseSlMaxPnl: myMinuteCloseSlMaxPnl, noPeakSlTimeframeSeconds: myNoPeakSlTimeframeSeconds, noPeakSlGatePnl: myNoPeakSlGatePnl };',
+    '            const data = { subAccounts: mySubAccounts, globalTargetPnl: myGlobalTargetPnl, globalTrailingPnl: myGlobalTrailingPnl, globalSingleCoinTpPnl: myGlobalSingleCoinTpPnl, globalSingleCoinSlPnl: myGlobalSingleCoinSlPnl, useDynamicUnivSl: myUseDynamicUnivSl, dynamicUnivSlTolerance: myDynamicUnivSlTolerance, globalTriggerDcaPnl: myGlobalTriggerDcaPnl, smartOffsetNetProfit: mySmartOffsetNetProfit, smartOffsetBottomRowV1: mySmartOffsetBottomRowV1, smartOffsetBottomRowV1StopLoss: mySmartOffsetBottomRowV1StopLoss, smartOffsetStopLoss: mySmartOffsetStopLoss, smartOffsetNetProfit2: mySmartOffsetNetProfit2, smartOffsetStopLoss2: mySmartOffsetStopLoss2, smartOffsetMaxLossPerMinute: mySmartOffsetMaxLossPerMinute, smartOffsetMaxLossTimeframeSeconds: mySmartOffsetMaxLossTimeframeSeconds, minuteCloseAutoDynamic: myMinuteCloseAutoDynamic, minuteCloseTpMinPnl: myMinuteCloseTpMinPnl, minuteCloseTpMaxPnl: myMinuteCloseTpMaxPnl, minuteCloseSlMinPnl: myMinuteCloseSlMinPnl, minuteCloseSlMaxPnl: myMinuteCloseSlMaxPnl, noPeakSlTimeframeSeconds: myNoPeakSlTimeframeSeconds, noPeakSlGatePnl: myNoPeakSlGatePnl };',
     '            await fetch(\'/api/settings\', { method: \'POST\', headers: { \'Content-Type\': \'application/json\', \'Authorization\': \'Bearer \' + token }, body: JSON.stringify(data) });',
     '            const saveBtn = document.activeElement;',
     '            if(saveBtn.tagName === "BUTTON") { const oldTxt = saveBtn.innerHTML; saveBtn.innerHTML = "<span class=\'material-symbols-outlined\'>check</span> Deployed"; saveBtn.classList.replace("md-btn-primary", "md-btn-success"); setTimeout(()=>{ saveBtn.innerHTML = oldTxt; saveBtn.classList.replace("md-btn-success", "md-btn-primary"); }, 2000); }',
@@ -3161,7 +3257,7 @@ const FRONTEND_HTML = [
     '            profile.triggerDcaPnl = document.getElementById(\'triggerDcaPnl\').value !== \'\' ? parseFloat(document.getElementById(\'triggerDcaPnl\').value) : -2.0;',
     '            profile.maxContracts = document.getElementById(\'maxContracts\').value !== \'\' ? parseInt(document.getElementById(\'maxContracts\').value) : 1000;',
     '            profile.coins = myCoins;',
-    '            const data = { subAccounts: mySubAccounts, globalTargetPnl: myGlobalTargetPnl, globalTrailingPnl: myGlobalTrailingPnl, globalSingleCoinTpPnl: myGlobalSingleCoinTpPnl, globalSingleCoinSlPnl: myGlobalSingleCoinSlPnl, globalTriggerDcaPnl: myGlobalTriggerDcaPnl, smartOffsetNetProfit: mySmartOffsetNetProfit, smartOffsetBottomRowV1: mySmartOffsetBottomRowV1, smartOffsetBottomRowV1StopLoss: mySmartOffsetBottomRowV1StopLoss, smartOffsetStopLoss: mySmartOffsetStopLoss, smartOffsetNetProfit2: mySmartOffsetNetProfit2, smartOffsetStopLoss2: mySmartOffsetStopLoss2, smartOffsetMaxLossPerMinute: mySmartOffsetMaxLossPerMinute, smartOffsetMaxLossTimeframeSeconds: mySmartOffsetMaxLossTimeframeSeconds, minuteCloseAutoDynamic: myMinuteCloseAutoDynamic, minuteCloseTpMinPnl: myMinuteCloseTpMinPnl, minuteCloseTpMaxPnl: myMinuteCloseTpMaxPnl, minuteCloseSlMinPnl: myMinuteCloseSlMinPnl, minuteCloseSlMaxPnl: myMinuteCloseSlMaxPnl, noPeakSlTimeframeSeconds: myNoPeakSlTimeframeSeconds, noPeakSlGatePnl: myNoPeakSlGatePnl };',
+    '            const data = { subAccounts: mySubAccounts, globalTargetPnl: myGlobalTargetPnl, globalTrailingPnl: myGlobalTrailingPnl, globalSingleCoinTpPnl: myGlobalSingleCoinTpPnl, globalSingleCoinSlPnl: myGlobalSingleCoinSlPnl, useDynamicUnivSl: myUseDynamicUnivSl, dynamicUnivSlTolerance: myDynamicUnivSlTolerance, globalTriggerDcaPnl: myGlobalTriggerDcaPnl, smartOffsetNetProfit: mySmartOffsetNetProfit, smartOffsetBottomRowV1: mySmartOffsetBottomRowV1, smartOffsetBottomRowV1StopLoss: mySmartOffsetBottomRowV1StopLoss, smartOffsetStopLoss: mySmartOffsetStopLoss, smartOffsetNetProfit2: mySmartOffsetNetProfit2, smartOffsetStopLoss2: mySmartOffsetStopLoss2, smartOffsetMaxLossPerMinute: mySmartOffsetMaxLossPerMinute, smartOffsetMaxLossTimeframeSeconds: mySmartOffsetMaxLossTimeframeSeconds, minuteCloseAutoDynamic: myMinuteCloseAutoDynamic, minuteCloseTpMinPnl: myMinuteCloseTpMinPnl, minuteCloseTpMaxPnl: myMinuteCloseTpMaxPnl, minuteCloseSlMinPnl: myMinuteCloseSlMinPnl, minuteCloseSlMaxPnl: myMinuteCloseSlMaxPnl, noPeakSlTimeframeSeconds: myNoPeakSlTimeframeSeconds, noPeakSlGatePnl: myNoPeakSlGatePnl };',
     '            const res = await fetch(\'/api/settings\', { method: \'POST\', headers: { \'Content-Type\': \'application/json\', \'Authorization\': \'Bearer \' + token }, body: JSON.stringify(data) });',
     '            const json = await res.json();',
     '            mySubAccounts = json.settings.subAccounts || [];',
