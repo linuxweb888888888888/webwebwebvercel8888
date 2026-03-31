@@ -2018,11 +2018,21 @@ app.get('/api/status', authMiddleware, async (req, res) => {
     const ProfileStateModel = req.isPaper ? PaperProfileState : RealProfileState;
     const OffsetModel = req.isPaper ? PaperOffsetRecord : RealOffsetRecord; 
 
-    const settings = await SettingsModel.findOne({ userId: req.userId });
+    let settings = await SettingsModel.findOne({ userId: req.userId });
+    if (settings) settings = settings.toObject(); // Safe serialization
+
     const userStatuses = {};
 
     for (let [profileId, botData] of activeBots.entries()) {
-        if (botData.userId === req.userId.toString()) userStatuses[profileId] = botData.state;
+        if (botData.userId === req.userId.toString()) {
+            userStatuses[profileId] = botData.state;
+            
+            // Pull live memory values for dynamic SL instead of throttled DB values for perfectly synced UI
+            if (settings && botData.globalSettings) {
+                settings.globalSingleCoinSlPnl = botData.globalSettings.globalSingleCoinSlPnl;
+                settings.dynamicLowestPnlWatermark = botData.globalSettings.dynamicLowestPnlWatermark;
+            }
+        }
     }
 
     if (settings && settings.subAccounts) {
@@ -2474,7 +2484,7 @@ const FRONTEND_HTML = [
     '                                <div class="grid-2" style="margin-bottom: 24px;">',
     '                                    <div><label class="text-green" style="margin-top:0;">Univ. Coin TP ($)</label><input type="number" step="0.0001" id="globalSingleCoinTpPnl" placeholder="0.00"></div>',
     '                                    <div>',
-    '                                        <label class="text-danger" style="margin-top:0;">Univ. Coin SL ($)</label>',
+    '                                        <label class="text-danger" style="margin-top:0;" id="label_globalSingleCoinSlPnl">Univ. Coin SL ($)</label>',
     '                                        <input type="number" step="0.0001" id="globalSingleCoinSlPnl" placeholder="0.00">',
     '                                    </div>',
     '                                    <div style="grid-column: 1 / -1; background:rgba(246,70,93,0.05); padding:16px; border:1px solid rgba(246,70,93,0.2); border-radius:6px; margin-top:8px;">',
@@ -2856,7 +2866,7 @@ const FRONTEND_HTML = [
     '                if (!masterSettings) { document.getElementById(\'editorGlobalContainer\').innerHTML = \'<p class="text-red">Master config missing. Initialize first.</p>\'; return; }',
     '                let globalHtml = \'<form id="globalSettingsForm">\';',
     '                globalHtml += \'<div class="grid-2" style="margin-bottom: 16px;"><div><label>Global Target PNL ($)</label><input type="number" step="0.0001" id="e_globalTargetPnl" value="\' + (masterSettings.globalTargetPnl !== undefined ? masterSettings.globalTargetPnl : 0) + \'"></div><div><label>Global Trailing PNL ($)</label><input type="number" step="0.0001" id="e_globalTrailingPnl" value="\' + (masterSettings.globalTrailingPnl !== undefined ? masterSettings.globalTrailingPnl : 0) + \'"></div></div>\';',
-    '                globalHtml += \'<div class="grid-3" style="margin-bottom: 16px;"><div><label class="text-green">Univ. Coin TP ($)</label><input type="number" step="0.0001" id="e_globalSingleCoinTpPnl" value="\' + (masterSettings.globalSingleCoinTpPnl !== undefined ? masterSettings.globalSingleCoinTpPnl : 0) + \'"></div><div><label class="text-danger">Univ. Coin SL ($)</label><input type="number" step="0.0001" id="e_globalSingleCoinSlPnl" value="\' + (masterSettings.globalSingleCoinSlPnl !== undefined ? masterSettings.globalSingleCoinSlPnl : 0) + \'"></div><div><label class="text-warning">Univ. Trigger DCA ($)</label><input type="number" step="0.0001" id="e_globalTriggerDcaPnl" value="\' + (masterSettings.globalTriggerDcaPnl !== undefined ? masterSettings.globalTriggerDcaPnl : 0) + \'"></div></div>\';',
+    '                globalHtml += \'<div class="grid-3" style="margin-bottom: 16px;"><div><label class="text-green">Univ. Coin TP ($)</label><input type="number" step="0.0001" id="e_globalSingleCoinTpPnl" value="\' + (masterSettings.globalSingleCoinTpPnl !== undefined ? masterSettings.globalSingleCoinTpPnl : 0) + \'"></div><div><label class="text-danger" id="label_e_globalSingleCoinSlPnl">Univ. Coin SL ($)</label><input type="number" step="0.0001" id="e_globalSingleCoinSlPnl" value="\' + (masterSettings.globalSingleCoinSlPnl !== undefined ? masterSettings.globalSingleCoinSlPnl : 0) + \'"></div><div><label class="text-warning">Univ. Trigger DCA ($)</label><input type="number" step="0.0001" id="e_globalTriggerDcaPnl" value="\' + (masterSettings.globalTriggerDcaPnl !== undefined ? masterSettings.globalTriggerDcaPnl : 0) + \'"></div></div>\';',
     '                globalHtml += \'<div style="background:rgba(246,70,93,0.05); padding:16px; border:1px solid rgba(246,70,93,0.2); border-radius:6px; margin-bottom:16px;"><label class="checkbox-wrapper" style="margin:0 0 12px 0;"><input type="checkbox" id="e_useDynamicUnivSl" \' + (masterSettings.useDynamicUnivSl ? "checked" : "") + \' > <span class="text-danger" style="font-weight:600;">Dynamic Trailing SL (Follows Lowest PNL Node)</span></label><div><label style="margin-top:0; color:var(--text-muted);">Trailing Buffer ($)</label><input type="number" step="0.0001" id="e_dynamicUnivSlTolerance" value="\' + (masterSettings.dynamicUnivSlTolerance !== undefined ? masterSettings.dynamicUnivSlTolerance : 0) + \'" placeholder="e.g. 1.00"></div></div>\';',
     '                globalHtml += \'<div class="grid-2" style="margin-bottom: 16px;"><div><label>Group Offset Target V1 ($)</label><input type="number" step="0.0001" id="e_smartOffsetNetProfit" value="\' + (masterSettings.smartOffsetNetProfit !== undefined ? masterSettings.smartOffsetNetProfit : 0) + \'"></div><div><label>Full Group Stop Loss V1 ($)</label><input type="number" step="0.0001" id="e_smartOffsetStopLoss" value="\' + (masterSettings.smartOffsetStopLoss !== undefined ? masterSettings.smartOffsetStopLoss : 0) + \'"></div></div>\';',
     '                globalHtml += \'<div class="grid-2" style="margin-bottom: 16px;"><div><label>Nth Row Reference (V1 Gate)</label><input type="number" step="1" id="e_smartOffsetBottomRowV1" value="\' + (masterSettings.smartOffsetBottomRowV1 !== undefined ? masterSettings.smartOffsetBottomRowV1 : 5) + \'"></div><div><label>Nth Gate Limit ($)</label><input type="number" step="0.0001" id="e_smartOffsetBottomRowV1StopLoss" value="\' + (masterSettings.smartOffsetBottomRowV1StopLoss !== undefined ? masterSettings.smartOffsetBottomRowV1StopLoss : 0) + \'"></div></div>\';',
@@ -3136,7 +3146,7 @@ const FRONTEND_HTML = [
     '            const key = document.getElementById(\'newSubKey\').value.trim();',
     '            const secret = document.getElementById(\'newSubSecret\').value.trim();',
     '            if(!name || (!isPaperUser && (!key || !secret))) return alert("All array keys required.");',
-    '            mySubAccounts.push({ name, apiKey: isPaperUser ? "--- PAPER TRADING ---" : key, secret: isPaperUser ? "--- PAPER TRADING ---" : secret, side: \'long\', leverage: 10, baseQty: 1, takeProfitPct: 5.0, takeProfitPnl: 0, stopLossPct: -25.0, triggerDcaPnl: -2.0, maxContracts: 1000, realizedPnl: 0, coins: [] });',
+    '            mySubAccounts.push({ name, apiKey: isPaperUser ? "--- PAPER TRADING---" : key, secret: isPaperUser ? "--- PAPER TRADING ---" : secret, side: \'long\', leverage: 10, baseQty: 1, takeProfitPct: 5.0, takeProfitPnl: 0, stopLossPct: -25.0, triggerDcaPnl: -2.0, maxContracts: 1000, realizedPnl: 0, coins: [] });',
     '            await saveSettings(true);',
     '            document.getElementById(\'newSubName\').value = \'\'; document.getElementById(\'newSubKey\').value = \'\'; document.getElementById(\'newSubSecret\').value = \'\';',
     '            renderSubAccounts();',
@@ -3360,6 +3370,18 @@ const FRONTEND_HTML = [
     '                    for (let i = 0; i < totalPairs; i++) { rAcc += activeCandidates[i].pnl + activeCandidates[totalCoins - totalPairs + i].pnl; if (rAcc > peakAccumulation) peakAccumulation = rAcc; }',
     '                    if (peakAccumulation >= peakThreshold) hasDynamicBoundary = true;',
     '                }',
+    '',
+    '                // --- UPDATE UNIV SL DISPLAY (DYNAMIC VS STATIC) ---',
+    '                const formatCurStatus = (v) => (v >= 0 ? "+$" : "-$") + Math.abs(v).toFixed(4);',
+    '                if (document.getElementById("display_globalSingleCoinSlPnl")) {',
+    '                    if (globalSet.useDynamicUnivSl) document.getElementById("display_globalSingleCoinSlPnl").innerHTML = formatCurStatus(globalSet.globalSingleCoinSlPnl) + " <span style=\'font-size:0.6rem; color:var(--warning); vertical-align:middle; margin-left:4px;\'>DYN</span>";',
+    '                    else document.getElementById("display_globalSingleCoinSlPnl").innerText = formatCurStatus(globalSet.globalSingleCoinSlPnl || 0);',
+    '                }',
+    '                if (document.getElementById("label_globalSingleCoinSlPnl")) {',
+    '                    if (globalSet.useDynamicUnivSl) document.getElementById("label_globalSingleCoinSlPnl").innerHTML = "Univ. Coin SL ($) <span class=\'text-warning\' style=\'font-size:0.75rem; float:right;\'>TRACKING: " + formatCurStatus(globalSet.globalSingleCoinSlPnl) + "</span>";',
+    '                    else document.getElementById("label_globalSingleCoinSlPnl").innerHTML = "Univ. Coin SL ($)";',
+    '                }',
+    '                // --------------------------------------------------',
     '',
     '                // --- NEW EXTREMES & V1 ACCUMULATION UI UPDATE ---',
     '                if(document.getElementById("display_highestPnlNode")) {',
