@@ -2584,46 +2584,46 @@ const FRONTEND_HTML = [
     '',
     '                if(currentProfileIndex === -1) return;',
     '                const profile = mySubAccounts[currentProfileIndex];',
-    '                setTxt(\'profilePnl\', fmtC(profile.realizedPnl||0), (profile.realizedPnl||0)>=0?"text-green":"text-red");
-                
-                let pMargin = 0;
-                const stateData = allStatuses[profile._id] || { coinStates: {}, logs: [] };
-                let pBanner = (globalSet.cyclePauseEnabled && globalSet.cycleCurrentState === "paused") ? '<div style="background:#450a0a; color:#f87171; padding:10px; margin-bottom:10px;">[!] Paused by Cycle Timer</div>' : '';
-
-                if(!myCoins || myCoins.length === 0) {
-                    const dsc = document.getElementById('dashboardStatusContainer'); if(dsc) dsc.innerHTML = pBanner + '<p class="text-muted text-center">Empty</p>';
-                    setTxt('profileMargin', "$0.00");
-                } else {
-                    let html = pBanner;
-                    myCoins.forEach(coin => {
-                        const st = stateData.coinStates?.[coin.symbol] || { status: 'Halted', currentPrice: 0, avgEntry: 0, contracts: 0, currentRoi: 0, unrealizedPnl: 0, margin: 0 };
-                        if (st.contracts > 0) pMargin += (parseFloat(st.margin) || 0);
-                        let stCls = st.status === 'Running' ? 'text-green' : (st.status === 'In Position' ? 'text-blue' : 'text-red');
-                        if (globalSet.cyclePauseEnabled && globalSet.cycleCurrentState === 'paused') { st.status = 'Paused'; stCls = 'text-warning'; }
-                        else if (st.lockUntil && Date.now() < st.lockUntil) { st.status = 'Process'; stCls = 'text-warning'; }
-                        const roiCls = st.currentRoi >= 0 ? 'text-green' : 'text-red';
-                        html += '<div class="metric" style="margin-bottom:10px;"><div class="flex-between" style="border-bottom:1px solid #222; padding-bottom:5px; margin-bottom:5px;"><span><b>' + coin.symbol + '</b> [' + (coin.side||profile.side||'long') + '] <span class="' + stCls + '">' + st.status + '</span></span><div><button onclick="toggleCoinBot(\'' + coin.symbol + '\', true)">▶</button> <button class="text-red" style="border-color:#f87171;" onclick="toggleCoinBot(\'' + coin.symbol + '\', false)">■</button></div></div>';
-                        html += '<div class="grid" style="font-size:12px;"><div>Price: ' + fmtP(st.currentPrice) + '</div><div>Entry: ' + fmtP(st.avgEntry) + '</div><div>Size: ' + (st.contracts||0) + '</div><div class="' + roiCls + '">Net: ' + (st.unrealizedPnl||0).toFixed(4) + '</div><div class="' + roiCls + '">ROI: ' + (st.currentRoi||0).toFixed(2) + '%</div></div></div>';
-                    });
-                    const dsc = document.getElementById('dashboardStatusContainer'); if(dsc) dsc.innerHTML = html;
-                    setTxt('profileMargin', "$" + pMargin.toFixed(2));
-                }
-
-                const logsEl = document.getElementById('logs');
-                if(logsEl) {
-                    logsEl.innerHTML = (stateData.logs || []).map(l => {
-                        if(l.includes('❌')) return '<span class="text-red">' + l + '</span>';
-                        if(l.includes('⚡')||l.includes('🛒')) return '<span class="text-blue">' + l + '</span>';
-                        if(l.includes('⚙️')||l.includes('⚖️')) return '<span class="text-warning">' + l + '</span>';
-                        return l;
-                    }).join('<br>');
-                }
-            } catch (err) {}
-        }
-        checkAuth();
-    </script>
-</body>
-</html>
+    '                setTxt(\'profilePnl\', fmtC(profile.realizedPnl||0), (profile.realizedPnl||0)>=0?"text-green":"text-red");',
+    '                ',
+    '                let pMargin = 0;',
+    '                const stateData = allStatuses[profile._id] || { coinStates: {}, logs: [] };',
+    '                let pBanner = (globalSet.cyclePauseEnabled && globalSet.cycleCurrentState === "paused") ? \'<div style="background:#450a0a; color:#f87171; padding:10px; margin-bottom:10px;">[!] Paused by Cycle Timer</div>\' : \'\';',
+    '',
+    '                if(!myCoins || myCoins.length === 0) {',
+    '                    const dsc = document.getElementById(\'dashboardStatusContainer\'); if(dsc) dsc.innerHTML = pBanner + \'<p class="text-muted text-center">Empty</p>\';',
+    '                    setTxt(\'profileMargin\', "$0.00");',
+    '                } else {',
+    '                    let html = pBanner;',
+    '                    myCoins.forEach(coin => {',
+    '                        const st = stateData.coinStates?.[coin.symbol] || { status: \'Halted\', currentPrice: 0, avgEntry: 0, contracts: 0, currentRoi: 0, unrealizedPnl: 0, margin: 0 };',
+    '                        if (st.contracts > 0) pMargin += (parseFloat(st.margin) || 0);',
+    '                        let stCls = st.status === \'Running\' ? \'text-green\' : (st.status === \'In Position\' ? \'text-blue\' : \'text-red\');',
+    '                        if (globalSet.cyclePauseEnabled && globalSet.cycleCurrentState === \'paused\') { st.status = \'Paused\'; stCls = \'text-warning\'; }',
+    '                        else if (st.lockUntil && Date.now() < st.lockUntil) { st.status = \'Process\'; stCls = \'text-warning\'; }',
+    '                        const roiCls = st.currentRoi >= 0 ? \'text-green\' : \'text-red\';',
+    '                        html += \'<div class="metric" style="margin-bottom:10px;"><div class="flex-between" style="border-bottom:1px solid #222; padding-bottom:5px; margin-bottom:5px;"><span><b>\' + coin.symbol + \'</b> [\' + (coin.side||profile.side||\'long\') + \'] <span class="\' + stCls + \'">\' + st.status + \'</span></span><div><button onclick="toggleCoinBot(\\\'\' + coin.symbol + \'\\\', true)">▶</button> <button class="text-red" style="border-color:#f87171;" onclick="toggleCoinBot(\\\'\' + coin.symbol + \'\\\', false)">■</button></div></div>\';',
+    '                        html += \'<div class="grid" style="font-size:12px;"><div>Price: \' + fmtP(st.currentPrice) + \'</div><div>Entry: \' + fmtP(st.avgEntry) + \'</div><div>Size: \' + (st.contracts||0) + \'</div><div class="\' + roiCls + \'">Net: \' + (st.unrealizedPnl||0).toFixed(4) + \'</div><div class="\' + roiCls + \'">ROI: \' + (st.currentRoi||0).toFixed(2) + \'%</div></div></div>\';',
+    '                    });',
+    '                    const dsc = document.getElementById(\'dashboardStatusContainer\'); if(dsc) dsc.innerHTML = html;',
+    '                    setTxt(\'profileMargin\', "$" + pMargin.toFixed(2));',
+    '                }',
+    '',
+    '                const logsEl = document.getElementById(\'logs\');',
+    '                if(logsEl) {',
+    '                    logsEl.innerHTML = (stateData.logs || []).map(l => {',
+    '                        if(l.includes(\'❌\')) return \'<span class="text-red">\' + l + \'</span>\';',
+    '                        if(l.includes(\'⚡\')||l.includes(\'🛒\')) return \'<span class="text-blue">\' + l + \'</span>\';',
+    '                        if(l.includes(\'⚙️\')||l.includes(\'⚖️\')) return \'<span class="text-warning">\' + l + \'</span>\';',
+    '                        return l;',
+    '                    }).join(\'<br>\');',
+    '                }',
+    '            } catch (err) {}',
+    '        }',
+    '        checkAuth();',
+    '    </script>',
+    '</body>',
+    '</html>'
 ];
 
 app.get('*', (req, res) => {
