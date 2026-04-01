@@ -109,6 +109,12 @@ const SettingsSchema = new mongoose.Schema({
     minuteCloseSlMaxPnl: { type: Number, default: 0 },
     noPeakSlTimeframeSeconds: { type: Number, default: 1800 }, 
     noPeakSlGatePnl: { type: Number, default: 0 }, 
+    
+    // NEW: EQUITY AUTO-BALANCER
+    autoBalanceEquity: { type: Boolean, default: false },
+    autoBalanceUnrealizedPnlTarget: { type: Number, default: -50000 },
+    autoBalanceRetainRealized: { type: Number, default: 0 },
+    
     subAccounts: [SubAccountSchema],
     
     currentGlobalPeak: { type: Number, default: 0 },
@@ -972,8 +978,123 @@ const executeGlobalProfitMonitor = async () => {
             let offsetExecuted = false;
             let v2SlEnabled = true;
 
+            // ==============================================================
+            // ✨ NEW: EQUITY AUTO-BALANCER (TARGET NET UNREALIZED LIMIT)
+            // ==============================================================
+            if (userSetting.autoBalanceEquity && !offsetExecuted) {
+                const targetPnl = parseFloat(userSetting.autoBalanceUnrealizedPnlTarget) || 0;
+                const retainRealized = parseFloat(userSetting.autoBalanceRetainRealized) || 0;
+                let globalRealized = 0;
+                for (let s of userSetting.subAccounts) globalRealized += (s.realizedPnl || 0);
+
+                const balanceTolerance = 5.0 * multiplier; // Buffer to prevent dust loops
+
+                if (globalUnrealized > targetPnl + balanceTolerance) {
+                    // EXCEEDING TARGET (Less negative) -> Harvest winners to return Unrealized back down to target
+                    let excess = globalUnrealized - targetPnl;
+                    let winners = activeCandidates.filter(c => c.unrealizedPnl > 0).sort((a, b) => b.unrealizedPnl - a.unrealizedPnl);
+
+                    for (let w of winners) {
+                        if (excess <= balanceTolerance) break;
+                        let winAmount = w.unrealizedPnl;
+                        let closeFraction = winAmount > excess ? (excess / winAmount) : 1;
+                        let closeQty = Math.max(1, Math.floor(w.contracts * closeFraction));
+                        if (closeQty > w.contracts) closeQty = w.contracts;
+
+                        let realizedFromThis = winAmount * (closeQty / w.contracts);
+
+                        try {
+                            const bData = activeBots.get(w.profileId);
+                            if (bData) {
+                                const bState = bData.state.coinStates[w.symbol];
+                                const livePrice = bState.currentPrice;
+
+                                if (!w.isPaper) {
+                                    const closeSide = w.side === 'long' ? 'sell' : 'buy';
+                                    const openSide = w.side === 'long' ? 'buy' : 'sell';
+                                    await bData.exchange.createOrder(w.symbol, 'market', closeSide, closeQty, undefined, { offset: 'close', reduceOnly: true, lever_rate: w.actualLeverage });
+                                    await bData.exchange.createOrder(w.symbol, 'market', openSide, closeQty, undefined, { offset: 'open', lever_rate: w.actualLeverage });
+                                }
+
+                                // Local Math Update
+                                if (bState) {
+                                    const remainingQty = bState.contracts - closeQty;
+                                    const totalValue = (remainingQty * bState.avgEntry) + (closeQty * livePrice);
+                                    bState.avgEntry = bState.contracts > 0 ? (totalValue / bState.contracts) : livePrice;
+                                    bState.lockUntil = Date.now() + 15000;
+                                }
+
+                                w.subAccount.realizedPnl = (w.subAccount.realizedPnl || 0) + realizedFromThis;
+                                await SettingsModel.updateOne({ "subAccounts._id": w.subAccount._id }, { $set: { "subAccounts.$.realizedPnl": w.subAccount.realizedPnl } }).catch(()=>{});
+
+                                OffsetModel.create({ userId: dbUserId, symbol: w.symbol, winnerSymbol: w.symbol, reason: 'Auto-Balance Harvest (Re-opened)', netProfit: realizedFromThis }).catch(()=>{});
+
+                                logForProfile(firstProfileId, `⚖️ AUTO-BALANCE HARVEST: Closed & Re-opened ${closeQty} contracts of ${w.symbol} to secure +$${realizedFromThis.toFixed(4)} and lock matrix.`);
+                                excess -= realizedFromThis;
+                                offsetExecuted = true; 
+                            }
+                        } catch (e) {
+                            logForProfile(firstProfileId, `❌ AUTO-BALANCE ERROR [${w.symbol}]: ${e.message}`);
+                        }
+                    }
+                } else if (globalUnrealized < targetPnl - balanceTolerance) {
+                    // BELOW TARGET (More negative) -> Burn losers using Realized PNL to pull Unrealized back up to target
+                    let deficit = targetPnl - globalUnrealized;
+                    let availableRealized = Math.max(0, globalRealized - retainRealized);
+                    let budget = Math.min(deficit, availableRealized);
+
+                    if (budget > balanceTolerance) {
+                        let losers = activeCandidates.filter(c => c.unrealizedPnl < 0).sort((a, b) => a.unrealizedPnl - b.unrealizedPnl);
+
+                        for (let l of losers) {
+                            if (budget <= balanceTolerance) break;
+                            let lossAmount = Math.abs(l.unrealizedPnl);
+                            let closeFraction = lossAmount > budget ? (budget / lossAmount) : 1;
+                            let closeQty = Math.max(1, Math.floor(l.contracts * closeFraction));
+                            if (closeQty > l.contracts) closeQty = l.contracts;
+
+                            let lossRealized = -(lossAmount * (closeQty / l.contracts));
+
+                            try {
+                                const bData = activeBots.get(l.profileId);
+                                if (bData) {
+                                    const bState = bData.state.coinStates[l.symbol];
+                                    const livePrice = bState.currentPrice;
+
+                                    if (!l.isPaper) {
+                                        const closeSide = l.side === 'long' ? 'sell' : 'buy';
+                                        const openSide = l.side === 'long' ? 'buy' : 'sell';
+                                        await bData.exchange.createOrder(l.symbol, 'market', closeSide, closeQty, undefined, { offset: 'close', reduceOnly: true, lever_rate: l.actualLeverage });
+                                        await bData.exchange.createOrder(l.symbol, 'market', openSide, closeQty, undefined, { offset: 'open', lever_rate: l.actualLeverage });
+                                    }
+
+                                    // Local Math Update
+                                    if (bState) {
+                                        const remainingQty = bState.contracts - closeQty;
+                                        const totalValue = (remainingQty * bState.avgEntry) + (closeQty * livePrice);
+                                        bState.avgEntry = bState.contracts > 0 ? (totalValue / bState.contracts) : livePrice;
+                                        bState.lockUntil = Date.now() + 15000;
+                                    }
+
+                                    l.subAccount.realizedPnl = (l.subAccount.realizedPnl || 0) + lossRealized;
+                                    await SettingsModel.updateOne({ "subAccounts._id": l.subAccount._id }, { $set: { "subAccounts.$.realizedPnl": l.subAccount.realizedPnl } }).catch(()=>{});
+
+                                    OffsetModel.create({ userId: dbUserId, symbol: l.symbol, winnerSymbol: l.symbol, reason: 'Auto-Balance Forgive (Re-opened)', netProfit: lossRealized }).catch(()=>{});
+
+                                    logForProfile(firstProfileId, `⚖️ AUTO-BALANCE FORGIVE: Burned -$${Math.abs(lossRealized).toFixed(4)} Realized PNL to reset ${closeQty} contracts of ${l.symbol} and lock matrix.`);
+                                    budget -= Math.abs(lossRealized);
+                                    offsetExecuted = true;
+                                }
+                            } catch (e) {
+                                logForProfile(firstProfileId, `❌ AUTO-BALANCE ERROR [${l.symbol}]: ${e.message}`);
+                            }
+                        }
+                    }
+                }
+            }
+
             // SMART OFFSET V1
-            if ((smartOffsetNetProfit > 0 || smartOffsetBottomRowV1StopLoss < 0 || smartOffsetStopLoss < 0 || noPeakSlTimeframeSeconds > 0) && activeCandidates.length >= 2) {
+            if (!offsetExecuted && (smartOffsetNetProfit > 0 || smartOffsetBottomRowV1StopLoss < 0 || smartOffsetStopLoss < 0 || noPeakSlTimeframeSeconds > 0) && activeCandidates.length >= 2) {
                 activeCandidates.sort((a, b) => b.unrealizedPnl - a.unrealizedPnl); 
                 
                 const totalCoins = activeCandidates.length;
@@ -1487,6 +1608,9 @@ app.post('/api/register', async (req, res) => {
         templateSettings.cycleResumeMinutes = 0;
         templateSettings.cycleCurrentState = 'active';
         templateSettings.cycleNextSwitchTime = 0;
+        templateSettings.autoBalanceEquity = false;
+        templateSettings.autoBalanceUnrealizedPnlTarget = -50000;
+        templateSettings.autoBalanceRetainRealized = 0;
 
         const multiplier = parseFloat(qtyMultiplier) > 0 ? parseFloat(qtyMultiplier) : 1;
         templateSettings.qtyMultiplier = multiplier;
@@ -1866,7 +1990,7 @@ app.post('/api/settings', authMiddleware, async (req, res) => {
     await bootstrapBots(); 
     const SettingsModel = req.isPaper ? PaperSettings : RealSettings;
 
-    const { subAccounts, globalTargetPnl, globalTrailingPnl, globalSingleCoinTpPnl, globalSingleCoinSlPnl, useDynamicUnivSl, dynamicUnivSlTolerance, globalTriggerDcaPnl, smartOffsetNetProfit, smartOffsetBottomRowV1, smartOffsetBottomRowV1StopLoss, smartOffsetStopLoss, smartOffsetNetProfit2, smartOffsetStopLoss2, smartOffsetMaxLossPerMinute, smartOffsetMaxLossTimeframeSeconds, minuteCloseAutoDynamic, minuteCloseTpMinPnl, minuteCloseTpMaxPnl, minuteCloseSlMinPnl, minuteCloseSlMaxPnl, noPeakSlTimeframeSeconds, noPeakSlGatePnl } = req.body;
+    const { subAccounts, globalTargetPnl, globalTrailingPnl, globalSingleCoinTpPnl, globalSingleCoinSlPnl, useDynamicUnivSl, dynamicUnivSlTolerance, globalTriggerDcaPnl, smartOffsetNetProfit, smartOffsetBottomRowV1, smartOffsetBottomRowV1StopLoss, smartOffsetStopLoss, smartOffsetNetProfit2, smartOffsetStopLoss2, smartOffsetMaxLossPerMinute, smartOffsetMaxLossTimeframeSeconds, minuteCloseAutoDynamic, minuteCloseTpMinPnl, minuteCloseTpMaxPnl, minuteCloseSlMinPnl, minuteCloseSlMaxPnl, noPeakSlTimeframeSeconds, noPeakSlGatePnl, autoBalanceEquity, autoBalanceUnrealizedPnlTarget, autoBalanceRetainRealized } = req.body;
     
     const existingSettings = await SettingsModel.findOne({ userId: req.userId });
     if (existingSettings && existingSettings.subAccounts) {
@@ -1901,7 +2025,8 @@ app.post('/api/settings', authMiddleware, async (req, res) => {
             globalSingleCoinSlPnl: parsedGlobalSlPnl, useDynamicUnivSl: useDynamicUnivSl === true, dynamicUnivSlTolerance: Math.abs(parseFloat(dynamicUnivSlTolerance) || 0), globalTriggerDcaPnl: parsedGlobalDcaPnl, smartOffsetNetProfit: parseFloat(smartOffsetNetProfit) || 0, smartOffsetBottomRowV1: !isNaN(parseInt(smartOffsetBottomRowV1)) ? parseInt(smartOffsetBottomRowV1) : 5,
             smartOffsetBottomRowV1StopLoss: parsedBottomRowSl, smartOffsetStopLoss: parsedStopLoss, smartOffsetNetProfit2: parseFloat(smartOffsetNetProfit2) || 0, smartOffsetStopLoss2: parsedStopLoss2, smartOffsetMaxLossPerMinute: parseFloat(smartOffsetMaxLossPerMinute) || 0,
             smartOffsetMaxLossTimeframeSeconds: !isNaN(parseInt(smartOffsetMaxLossTimeframeSeconds)) ? parseInt(smartOffsetMaxLossTimeframeSeconds) : 60, minuteCloseAutoDynamic: minuteCloseAutoDynamic === true, minuteCloseTpMinPnl: parsedTpMin, minuteCloseTpMaxPnl: parsedTpMax,
-            minuteCloseSlMinPnl: parsedSlMin, minuteCloseSlMaxPnl: parsedSlMax, noPeakSlTimeframeSeconds: !isNaN(parseInt(noPeakSlTimeframeSeconds)) ? parseInt(noPeakSlTimeframeSeconds) : 1800, noPeakSlGatePnl: parseFloat(noPeakSlGatePnl) || 0
+            minuteCloseSlMinPnl: parsedSlMin, minuteCloseSlMaxPnl: parsedSlMax, noPeakSlTimeframeSeconds: !isNaN(parseInt(noPeakSlTimeframeSeconds)) ? parseInt(noPeakSlTimeframeSeconds) : 1800, noPeakSlGatePnl: parseFloat(noPeakSlGatePnl) || 0,
+            autoBalanceEquity: autoBalanceEquity === true, autoBalanceUnrealizedPnlTarget: parseFloat(autoBalanceUnrealizedPnlTarget) || -50000, autoBalanceRetainRealized: parseFloat(autoBalanceRetainRealized) || 0
         }, { returnDocument: 'after' }
     );
 
@@ -1935,7 +2060,8 @@ app.post('/api/settings', authMiddleware, async (req, res) => {
             globalTriggerDcaPnl: updated.globalTriggerDcaPnl, smartOffsetNetProfit: updated.smartOffsetNetProfit, smartOffsetBottomRowV1: updated.smartOffsetBottomRowV1, smartOffsetBottomRowV1StopLoss: updated.smartOffsetBottomRowV1StopLoss, 
             smartOffsetStopLoss: updated.smartOffsetStopLoss, smartOffsetNetProfit2: updated.smartOffsetNetProfit2, smartOffsetStopLoss2: updated.smartOffsetStopLoss2, smartOffsetMaxLossPerMinute: updated.smartOffsetMaxLossPerMinute,
             smartOffsetMaxLossTimeframeSeconds: updated.smartOffsetMaxLossTimeframeSeconds, minuteCloseAutoDynamic: updated.minuteCloseAutoDynamic, minuteCloseTpMinPnl: updated.minuteCloseTpMinPnl, minuteCloseTpMaxPnl: updated.minuteCloseTpMaxPnl, 
-            minuteCloseSlMinPnl: updated.minuteCloseSlMinPnl, minuteCloseSlMaxPnl: updated.minuteCloseSlMaxPnl, noPeakSlTimeframeSeconds: updated.noPeakSlTimeframeSeconds, noPeakSlGatePnl: updated.noPeakSlGatePnl
+            minuteCloseSlMinPnl: updated.minuteCloseSlMinPnl, minuteCloseSlMaxPnl: updated.minuteCloseSlMaxPnl, noPeakSlTimeframeSeconds: updated.noPeakSlTimeframeSeconds, noPeakSlGatePnl: updated.noPeakSlGatePnl,
+            autoBalanceEquity: updated.autoBalanceEquity, autoBalanceUnrealizedPnlTarget: updated.autoBalanceUnrealizedPnlTarget, autoBalanceRetainRealized: updated.autoBalanceRetainRealized
         };
 
         const applyMasterSync = async (userSettingsDoc, isPaperMode) => {
@@ -2079,7 +2205,8 @@ app.post('/api/master/global', authMiddleware, adminMiddleware, async (req, res)
             smartOffsetStopLoss: -Math.abs(parseFloat(req.body.smartOffsetStopLoss) || 0), smartOffsetNetProfit2: parseFloat(req.body.smartOffsetNetProfit2) || 0, smartOffsetStopLoss2: -Math.abs(parseFloat(req.body.smartOffsetStopLoss2) || 0),
             smartOffsetMaxLossPerMinute: parseFloat(req.body.smartOffsetMaxLossPerMinute) || 0, smartOffsetMaxLossTimeframeSeconds: parseInt(req.body.smartOffsetMaxLossTimeframeSeconds) || 60, minuteCloseAutoDynamic: req.body.minuteCloseAutoDynamic === true,
             minuteCloseTpMinPnl: Math.abs(parseFloat(req.body.minuteCloseTpMinPnl) || 0), minuteCloseTpMaxPnl: Math.abs(parseFloat(req.body.minuteCloseTpMaxPnl) || 0), minuteCloseSlMinPnl: -Math.abs(parseFloat(req.body.minuteCloseSlMinPnl) || 0),
-            minuteCloseSlMaxPnl: -Math.abs(parseFloat(req.body.minuteCloseSlMaxPnl) || 0), noPeakSlTimeframeSeconds: parseInt(req.body.noPeakSlTimeframeSeconds) || 1800, noPeakSlGatePnl: parseFloat(req.body.noPeakSlGatePnl) || 0
+            minuteCloseSlMaxPnl: -Math.abs(parseFloat(req.body.minuteCloseSlMaxPnl) || 0), noPeakSlTimeframeSeconds: parseInt(req.body.noPeakSlTimeframeSeconds) || 1800, noPeakSlGatePnl: parseFloat(req.body.noPeakSlGatePnl) || 0,
+            autoBalanceEquity: req.body.autoBalanceEquity === true, autoBalanceUnrealizedPnlTarget: parseFloat(req.body.autoBalanceUnrealizedPnlTarget) || -50000, autoBalanceRetainRealized: parseFloat(req.body.autoBalanceRetainRealized) || 0
         };
 
         const updatedMaster = await RealSettings.findOneAndUpdate({ userId: masterUser._id }, { $set: payload }, { new: true, upsert: true });
@@ -2504,6 +2631,19 @@ const FRONTEND_HTML = [
     '                                    </div>',
     '                                    <div style="grid-column: 1 / -1;"><label class="text-warning" style="margin-top:16px;">Univ. Grid DCA Trigger ($)</label><input type="number" step="0.0001" id="globalTriggerDcaPnl" placeholder="-2.00"></div>',
     '                                </div>',
+    '                                <!-- EQUITY BALANCER -->',
+    '                                <h4 style="margin: 0 0 12px 0; border-top:1px solid var(--border); padding-top:20px; color: var(--text-main); font-weight:600; font-size:0.9rem;">Equity Matrix Auto-Balancer</h4>',
+    '                                <div style="background:rgba(41,98,255,0.05); padding:16px; border:1px solid rgba(41,98,255,0.2); border-radius:6px; margin-bottom:24px;">',
+    '                                    <label class="checkbox-wrapper" style="margin:0 0 12px 0;">',
+    '                                        <input type="checkbox" id="autoBalanceEquity">',
+    '                                        <span class="text-blue" style="font-weight:600;">Enable Live PNL Matrix Auto-Balancing</span>',
+    '                                    </label>',
+    '                                    <p style="font-size:0.75rem; color:var(--text-muted); margin:0 0 12px 0; line-height:1.4;">Automatically harvests winners and burns excess Realized PNL on losers (by instantly closing and re-opening contracts) to maintain your floating net unrealized PNL locked at a precise target.</p>',
+    '                                    <div class="grid-2">',
+    '                                        <div><label style="margin-top:0; color:var(--text-main);">Target Net Unrealized ($)</label><input type="number" step="1" id="autoBalanceUnrealizedPnlTarget" placeholder="e.g. -50000"></div>',
+    '                                        <div><label style="margin-top:0; color:var(--text-main);">Retain Realized Profit ($)</label><input type="number" step="1" id="autoBalanceRetainRealized" placeholder="e.g. 1000"></div>',
+    '                                    </div>',
+    '                                </div>',
     '                                <h4 style="margin: 0 0 12px 0; border-top:1px solid var(--border); padding-top:20px; color: var(--text-main); font-weight:600; font-size:0.9rem;">Smart Offset V1 Logic</h4>',
     '                                <div class="grid-2" style="margin-bottom: 16px;">',
     '                                    <div><label style="margin-top:0;">Group TP Target ($)</label><input type="number" step="0.0001" id="smartOffsetNetProfit" placeholder="0.00"></div>',
@@ -2666,6 +2806,9 @@ const FRONTEND_HTML = [
     '        let myMinuteCloseSlMaxPnl = 0;',
     '        let myNoPeakSlTimeframeSeconds = 1800;',
     '        let myNoPeakSlGatePnl = 0;',
+    '        let myAutoBalanceEquity = false;',
+    '        let myAutoBalanceUnrealizedPnlTarget = -50000;',
+    '        let myAutoBalanceRetainRealized = 0;',
     '        let currentProfileIndex = -1;',
     '        let myCoins = [];',
     '        const PREDEFINED_COINS = ["OP", "BIGTIME", "MOVE", "SSV", "COAI", "TIA", "MERL", "MASK", "PYTH", "ETHFI", "CFX", "MEME", "LUNA", "STEEM", "BERA", "2Z", "FIL", "APT", "1INCH", "ARB", "XPL", "ENA", "MMT", "AXS", "TON", "CAKE", "BSV", "JUP", "WIF", "LIGHT", "PI", "SUSHI", "LPT", "CRV", "TAO", "ORDI", "YFI", "LA", "ICP", "FTT", "GIGGLE", "LDO", "OPN", "INJ", "SNX", "DASH", "WLD", "KAITO", "TRUMP", "WAVES", "ZEN", "ENS", "ASTER", "VIRTUAL"];',
@@ -2873,6 +3016,10 @@ const FRONTEND_HTML = [
     '                globalHtml += \'<div class="grid-2" style="margin-bottom: 16px;"><div><label>Global Target PNL ($)</label><input type="number" step="0.0001" id="e_globalTargetPnl" value="\' + (masterSettings.globalTargetPnl !== undefined ? masterSettings.globalTargetPnl : 0) + \'"></div><div><label>Global Trailing PNL ($)</label><input type="number" step="0.0001" id="e_globalTrailingPnl" value="\' + (masterSettings.globalTrailingPnl !== undefined ? masterSettings.globalTrailingPnl : 0) + \'"></div></div>\';',
     '                globalHtml += \'<div class="grid-3" style="margin-bottom: 16px;"><div><label class="text-green">Univ. Coin TP ($)</label><input type="number" step="0.0001" id="e_globalSingleCoinTpPnl" value="\' + (masterSettings.globalSingleCoinTpPnl !== undefined ? masterSettings.globalSingleCoinTpPnl : 0) + \'"></div><div><label class="text-danger" id="label_e_globalSingleCoinSlPnl">Univ. Coin SL ($)</label><input type="number" step="0.0001" id="e_globalSingleCoinSlPnl" value="\' + (masterSettings.globalSingleCoinSlPnl !== undefined ? masterSettings.globalSingleCoinSlPnl : 0) + \'"></div><div><label class="text-warning">Univ. Trigger DCA ($)</label><input type="number" step="0.0001" id="e_globalTriggerDcaPnl" value="\' + (masterSettings.globalTriggerDcaPnl !== undefined ? masterSettings.globalTriggerDcaPnl : 0) + \'"></div></div>\';',
     '                globalHtml += \'<div style="background:rgba(246,70,93,0.05); padding:16px; border:1px solid rgba(246,70,93,0.2); border-radius:6px; margin-bottom:16px;"><label class="checkbox-wrapper" style="margin:0 0 12px 0;"><input type="checkbox" id="e_useDynamicUnivSl" \' + (masterSettings.useDynamicUnivSl ? "checked" : "") + \' > <span class="text-danger" style="font-weight:600;">Dynamic Trailing SL (Follows Lowest PNL Node)</span></label><div><label style="margin-top:0; color:var(--text-muted);">Trailing Buffer ($)</label><input type="number" step="0.0001" id="e_dynamicUnivSlTolerance" value="\' + (masterSettings.dynamicUnivSlTolerance !== undefined ? masterSettings.dynamicUnivSlTolerance : 0) + \'" placeholder="e.g. 1.00"></div></div>\';',
+    '                globalHtml += \'<h4 style="margin: 0 0 12px 0; border-top:1px solid var(--border); padding-top:20px; color: var(--text-main); font-weight:600; font-size:0.9rem;">Equity Matrix Auto-Balancer</h4>\';',
+    '                globalHtml += \'<div style="background:rgba(41,98,255,0.05); padding:16px; border:1px solid rgba(41,98,255,0.2); border-radius:6px; margin-bottom:24px;">\';',
+    '                globalHtml += \'<label class="checkbox-wrapper" style="margin:0 0 12px 0;"><input type="checkbox" id="e_autoBalanceEquity" \' + (masterSettings.autoBalanceEquity ? "checked" : "") + \'><span class="text-blue" style="font-weight:600;">Enable Live PNL Matrix Auto-Balancing</span></label>\';',
+    '                globalHtml += \'<div class="grid-2"><div><label style="margin-top:0; color:var(--text-main);">Target Net Unrealized ($)</label><input type="number" step="1" id="e_autoBalanceUnrealizedPnlTarget" value="\' + (masterSettings.autoBalanceUnrealizedPnlTarget !== undefined ? masterSettings.autoBalanceUnrealizedPnlTarget : -50000) + \'"></div><div><label style="margin-top:0; color:var(--text-main);">Retain Realized Profit ($)</label><input type="number" step="1" id="e_autoBalanceRetainRealized" value="\' + (masterSettings.autoBalanceRetainRealized !== undefined ? masterSettings.autoBalanceRetainRealized : 0) + \'"></div></div></div>\';',
     '                globalHtml += \'<div class="grid-2" style="margin-bottom: 16px;"><div><label>Group Offset Target V1 ($)</label><input type="number" step="0.0001" id="e_smartOffsetNetProfit" value="\' + (masterSettings.smartOffsetNetProfit !== undefined ? masterSettings.smartOffsetNetProfit : 0) + \'"></div><div><label>Full Group Stop Loss V1 ($)</label><input type="number" step="0.0001" id="e_smartOffsetStopLoss" value="\' + (masterSettings.smartOffsetStopLoss !== undefined ? masterSettings.smartOffsetStopLoss : 0) + \'"></div></div>\';',
     '                globalHtml += \'<div class="grid-2" style="margin-bottom: 16px;"><div><label>Nth Row Reference (V1 Gate)</label><input type="number" step="1" id="e_smartOffsetBottomRowV1" value="\' + (masterSettings.smartOffsetBottomRowV1 !== undefined ? masterSettings.smartOffsetBottomRowV1 : 5) + \'"></div><div><label>Nth Gate Limit ($)</label><input type="number" step="0.0001" id="e_smartOffsetBottomRowV1StopLoss" value="\' + (masterSettings.smartOffsetBottomRowV1StopLoss !== undefined ? masterSettings.smartOffsetBottomRowV1StopLoss : 0) + \'"></div></div>\';',
     '                globalHtml += \'<div class="grid-2" style="margin-bottom: 16px;"><div><label>Smart Offset Target V2 ($)</label><input type="number" step="0.0001" id="e_smartOffsetNetProfit2" value="\' + (masterSettings.smartOffsetNetProfit2 !== undefined ? masterSettings.smartOffsetNetProfit2 : 0) + \'"></div><div><label>Smart Offset Stop Loss V2 ($)</label><input type="number" step="0.0001" id="e_smartOffsetStopLoss2" value="\' + (masterSettings.smartOffsetStopLoss2 !== undefined ? masterSettings.smartOffsetStopLoss2 : 0) + \'"></div></div>\';',
@@ -2931,7 +3078,10 @@ const FRONTEND_HTML = [
     '                minuteCloseTpMaxPnl: Math.abs(getVal(\'e_minuteCloseTpMaxPnl\', 0)),',
     '                minuteCloseSlMinPnl: -Math.abs(getVal(\'e_minuteCloseSlMinPnl\', 0)),',
     '                minuteCloseSlMaxPnl: -Math.abs(getVal(\'e_minuteCloseSlMaxPnl\', 0)),',
-    '                minuteCloseAutoDynamic: document.getElementById(\'e_minuteCloseAutoDynamic\') ? document.getElementById(\'e_minuteCloseAutoDynamic\').checked : false',
+    '                minuteCloseAutoDynamic: document.getElementById(\'e_minuteCloseAutoDynamic\') ? document.getElementById(\'e_minuteCloseAutoDynamic\').checked : false,',
+    '                autoBalanceEquity: document.getElementById(\'e_autoBalanceEquity\') ? document.getElementById(\'e_autoBalanceEquity\').checked : false,',
+    '                autoBalanceUnrealizedPnlTarget: getVal(\'e_autoBalanceUnrealizedPnlTarget\', -50000),',
+    '                autoBalanceRetainRealized: getVal(\'e_autoBalanceRetainRealized\', 0)',
     '            };',
     '            try {',
     '                const res = await fetch(\'/api/master/global\', { method: \'POST\', headers: { \'Content-Type\': \'application/json\', \'Authorization\': \'Bearer \' + token }, body: JSON.stringify(payload) });',
@@ -3073,6 +3223,9 @@ const FRONTEND_HTML = [
     '                myMinuteCloseSlMaxPnl = config.minuteCloseSlMaxPnl !== undefined ? config.minuteCloseSlMaxPnl : 0;',
     '                myNoPeakSlTimeframeSeconds = config.noPeakSlTimeframeSeconds !== undefined ? config.noPeakSlTimeframeSeconds : 1800;',
     '                myNoPeakSlGatePnl = config.noPeakSlGatePnl !== undefined ? config.noPeakSlGatePnl : 0;',
+    '                myAutoBalanceEquity = config.autoBalanceEquity || false;',
+    '                myAutoBalanceUnrealizedPnlTarget = config.autoBalanceUnrealizedPnlTarget !== undefined ? config.autoBalanceUnrealizedPnlTarget : -50000;',
+    '                myAutoBalanceRetainRealized = config.autoBalanceRetainRealized !== undefined ? config.autoBalanceRetainRealized : 0;',
     '                document.getElementById(\'globalTargetPnl\').value = myGlobalTargetPnl;',
     '                document.getElementById(\'globalTrailingPnl\').value = myGlobalTrailingPnl;',
     '                document.getElementById(\'globalSingleCoinTpPnl\').value = myGlobalSingleCoinTpPnl;',
@@ -3095,6 +3248,9 @@ const FRONTEND_HTML = [
     '                if(document.getElementById(\'minuteCloseSlMaxPnl\')) document.getElementById(\'minuteCloseSlMaxPnl\').value = myMinuteCloseSlMaxPnl;',
     '                document.getElementById(\'noPeakSlTimeframeSeconds\').value = myNoPeakSlTimeframeSeconds;',
     '                document.getElementById(\'noPeakSlGatePnl\').value = myNoPeakSlGatePnl;',
+    '                if(document.getElementById(\'autoBalanceEquity\')) document.getElementById(\'autoBalanceEquity\').checked = myAutoBalanceEquity;',
+    '                if(document.getElementById(\'autoBalanceUnrealizedPnlTarget\')) document.getElementById(\'autoBalanceUnrealizedPnlTarget\').value = myAutoBalanceUnrealizedPnlTarget;',
+    '                if(document.getElementById(\'autoBalanceRetainRealized\')) document.getElementById(\'autoBalanceRetainRealized\').value = myAutoBalanceRetainRealized;',
     '                const formatCur = (v) => (v >= 0 ? "+$" : "-$") + Math.abs(v).toFixed(2);',
     '                if(document.getElementById(\'display_globalSingleCoinTpPnl\')) document.getElementById(\'display_globalSingleCoinTpPnl\').innerText = formatCur(myGlobalSingleCoinTpPnl);',
     '                if(document.getElementById(\'display_globalSingleCoinSlPnl\')) document.getElementById(\'display_globalSingleCoinSlPnl\').innerText = formatCur(myGlobalSingleCoinSlPnl);',
@@ -3132,7 +3288,10 @@ const FRONTEND_HTML = [
     '            myNoPeakSlTimeframeSeconds = getInt(\'noPeakSlTimeframeSeconds\', 1800);',
     '            myNoPeakSlGatePnl = getVal(\'noPeakSlGatePnl\', 0);',
     '            myMinuteCloseAutoDynamic = document.getElementById(\'minuteCloseAutoDynamic\') ? document.getElementById(\'minuteCloseAutoDynamic\').checked : false;',
-    '            const data = { subAccounts: mySubAccounts, globalTargetPnl: myGlobalTargetPnl, globalTrailingPnl: myGlobalTrailingPnl, globalSingleCoinTpPnl: myGlobalSingleCoinTpPnl, globalSingleCoinSlPnl: myGlobalSingleCoinSlPnl, useDynamicUnivSl: myUseDynamicUnivSl, dynamicUnivSlTolerance: myDynamicUnivSlTolerance, globalTriggerDcaPnl: myGlobalTriggerDcaPnl, smartOffsetNetProfit: mySmartOffsetNetProfit, smartOffsetBottomRowV1: mySmartOffsetBottomRowV1, smartOffsetBottomRowV1StopLoss: mySmartOffsetBottomRowV1StopLoss, smartOffsetStopLoss: mySmartOffsetStopLoss, smartOffsetNetProfit2: mySmartOffsetNetProfit2, smartOffsetStopLoss2: mySmartOffsetStopLoss2, smartOffsetMaxLossPerMinute: mySmartOffsetMaxLossPerMinute, smartOffsetMaxLossTimeframeSeconds: mySmartOffsetMaxLossTimeframeSeconds, minuteCloseAutoDynamic: myMinuteCloseAutoDynamic, minuteCloseTpMinPnl: myMinuteCloseTpMinPnl, minuteCloseTpMaxPnl: myMinuteCloseTpMaxPnl, minuteCloseSlMinPnl: myMinuteCloseSlMinPnl, minuteCloseSlMaxPnl: myMinuteCloseSlMaxPnl, noPeakSlTimeframeSeconds: myNoPeakSlTimeframeSeconds, noPeakSlGatePnl: myNoPeakSlGatePnl };',
+    '            myAutoBalanceEquity = document.getElementById(\'autoBalanceEquity\') ? document.getElementById(\'autoBalanceEquity\').checked : false;',
+    '            myAutoBalanceUnrealizedPnlTarget = getVal(\'autoBalanceUnrealizedPnlTarget\', -50000);',
+    '            myAutoBalanceRetainRealized = getVal(\'autoBalanceRetainRealized\', 0);',
+    '            const data = { subAccounts: mySubAccounts, globalTargetPnl: myGlobalTargetPnl, globalTrailingPnl: myGlobalTrailingPnl, globalSingleCoinTpPnl: myGlobalSingleCoinTpPnl, globalSingleCoinSlPnl: myGlobalSingleCoinSlPnl, useDynamicUnivSl: myUseDynamicUnivSl, dynamicUnivSlTolerance: myDynamicUnivSlTolerance, globalTriggerDcaPnl: myGlobalTriggerDcaPnl, smartOffsetNetProfit: mySmartOffsetNetProfit, smartOffsetBottomRowV1: mySmartOffsetBottomRowV1, smartOffsetBottomRowV1StopLoss: mySmartOffsetBottomRowV1StopLoss, smartOffsetStopLoss: mySmartOffsetStopLoss, smartOffsetNetProfit2: mySmartOffsetNetProfit2, smartOffsetStopLoss2: mySmartOffsetStopLoss2, smartOffsetMaxLossPerMinute: mySmartOffsetMaxLossPerMinute, smartOffsetMaxLossTimeframeSeconds: mySmartOffsetMaxLossTimeframeSeconds, minuteCloseAutoDynamic: myMinuteCloseAutoDynamic, minuteCloseTpMinPnl: myMinuteCloseTpMinPnl, minuteCloseTpMaxPnl: myMinuteCloseTpMaxPnl, minuteCloseSlMinPnl: myMinuteCloseSlMinPnl, minuteCloseSlMaxPnl: myMinuteCloseSlMaxPnl, noPeakSlTimeframeSeconds: myNoPeakSlTimeframeSeconds, noPeakSlGatePnl: myNoPeakSlGatePnl, autoBalanceEquity: myAutoBalanceEquity, autoBalanceUnrealizedPnlTarget: myAutoBalanceUnrealizedPnlTarget, autoBalanceRetainRealized: myAutoBalanceRetainRealized };',
     '            await fetch(\'/api/settings\', { method: \'POST\', headers: { \'Content-Type\': \'application/json\', \'Authorization\': \'Bearer \' + token }, body: JSON.stringify(data) });',
     '            const saveBtn = document.activeElement;',
     '            if(saveBtn.tagName === "BUTTON") { const oldTxt = saveBtn.innerHTML; saveBtn.innerHTML = "<span class=\'material-symbols-outlined\'>check</span> Deployed"; saveBtn.classList.replace("md-btn-primary", "md-btn-success"); setTimeout(()=>{ saveBtn.innerHTML = oldTxt; saveBtn.classList.replace("md-btn-success", "md-btn-primary"); }, 2000); }',
@@ -3272,7 +3431,7 @@ const FRONTEND_HTML = [
     '            profile.triggerDcaPnl = document.getElementById(\'triggerDcaPnl\').value !== \'\' ? parseFloat(document.getElementById(\'triggerDcaPnl\').value) : -2.0;',
     '            profile.maxContracts = document.getElementById(\'maxContracts\').value !== \'\' ? parseInt(document.getElementById(\'maxContracts\').value) : 1000;',
     '            profile.coins = myCoins;',
-    '            const data = { subAccounts: mySubAccounts, globalTargetPnl: myGlobalTargetPnl, globalTrailingPnl: myGlobalTrailingPnl, globalSingleCoinTpPnl: myGlobalSingleCoinTpPnl, globalSingleCoinSlPnl: myGlobalSingleCoinSlPnl, useDynamicUnivSl: myUseDynamicUnivSl, dynamicUnivSlTolerance: myDynamicUnivSlTolerance, globalTriggerDcaPnl: myGlobalTriggerDcaPnl, smartOffsetNetProfit: mySmartOffsetNetProfit, smartOffsetBottomRowV1: mySmartOffsetBottomRowV1, smartOffsetBottomRowV1StopLoss: mySmartOffsetBottomRowV1StopLoss, smartOffsetStopLoss: mySmartOffsetStopLoss, smartOffsetNetProfit2: mySmartOffsetNetProfit2, smartOffsetStopLoss2: mySmartOffsetStopLoss2, smartOffsetMaxLossPerMinute: mySmartOffsetMaxLossPerMinute, smartOffsetMaxLossTimeframeSeconds: mySmartOffsetMaxLossTimeframeSeconds, minuteCloseAutoDynamic: myMinuteCloseAutoDynamic, minuteCloseTpMinPnl: myMinuteCloseTpMinPnl, minuteCloseTpMaxPnl: myMinuteCloseTpMaxPnl, minuteCloseSlMinPnl: myMinuteCloseSlMinPnl, minuteCloseSlMaxPnl: myMinuteCloseSlMaxPnl, noPeakSlTimeframeSeconds: myNoPeakSlTimeframeSeconds, noPeakSlGatePnl: myNoPeakSlGatePnl };',
+    '            const data = { subAccounts: mySubAccounts, globalTargetPnl: myGlobalTargetPnl, globalTrailingPnl: myGlobalTrailingPnl, globalSingleCoinTpPnl: myGlobalSingleCoinTpPnl, globalSingleCoinSlPnl: myGlobalSingleCoinSlPnl, useDynamicUnivSl: myUseDynamicUnivSl, dynamicUnivSlTolerance: myDynamicUnivSlTolerance, globalTriggerDcaPnl: myGlobalTriggerDcaPnl, smartOffsetNetProfit: mySmartOffsetNetProfit, smartOffsetBottomRowV1: mySmartOffsetBottomRowV1, smartOffsetBottomRowV1StopLoss: mySmartOffsetBottomRowV1StopLoss, smartOffsetStopLoss: mySmartOffsetStopLoss, smartOffsetNetProfit2: mySmartOffsetNetProfit2, smartOffsetStopLoss2: mySmartOffsetStopLoss2, smartOffsetMaxLossPerMinute: mySmartOffsetMaxLossPerMinute, smartOffsetMaxLossTimeframeSeconds: mySmartOffsetMaxLossTimeframeSeconds, minuteCloseAutoDynamic: myMinuteCloseAutoDynamic, minuteCloseTpMinPnl: myMinuteCloseTpMinPnl, minuteCloseTpMaxPnl: myMinuteCloseTpMaxPnl, minuteCloseSlMinPnl: myMinuteCloseSlMinPnl, minuteCloseSlMaxPnl: myMinuteCloseSlMaxPnl, noPeakSlTimeframeSeconds: myNoPeakSlTimeframeSeconds, noPeakSlGatePnl: myNoPeakSlGatePnl, autoBalanceEquity: myAutoBalanceEquity, autoBalanceUnrealizedPnlTarget: myAutoBalanceUnrealizedPnlTarget, autoBalanceRetainRealized: myAutoBalanceRetainRealized };',
     '            const res = await fetch(\'/api/settings\', { method: \'POST\', headers: { \'Content-Type\': \'application/json\', \'Authorization\': \'Bearer \' + token }, body: JSON.stringify(data) });',
     '            const json = await res.json();',
     '            mySubAccounts = json.settings.subAccounts || [];',
