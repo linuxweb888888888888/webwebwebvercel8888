@@ -463,11 +463,17 @@ async function startBot(userId, subAccount, isPaper) {
                                 });
                             }
 
-                            await (isPaper ? PaperOffsetRecord : RealOffsetRecord).create({ 
-                                userId: userId, symbol: coin.symbol, side: activeSide,
-                                openPrice: cState.avgEntry, closePrice: cState.currentPrice, roi: currentRoi,
-                                netProfit: currentPnl, reason: reasonTxt 
-                            }).catch(()=>{});
+                            const OffsetModel = isPaper ? PaperOffsetRecord : RealOffsetRecord;
+                            await OffsetModel.create({ 
+                                userId: userId, 
+                                symbol: coin.symbol, 
+                                side: activeSide,
+                                openPrice: cState.avgEntry,
+                                closePrice: cState.currentPrice,
+                                roi: currentRoi,
+                                netProfit: currentPnl,
+                                reason: reasonTxt 
+                            });
 
                             cState.lockUntil = Date.now() + 15000;
                             cState.dcaCount = 0; 
@@ -477,15 +483,11 @@ async function startBot(userId, subAccount, isPaper) {
                                 cState.contracts = 0; cState.unrealizedPnl = 0; cState.currentRoi = 0; cState.avgEntry = 0;
                             }
 
-                            // BULLETPROOF ATOMIC UPDATE
-                            const parentDoc = await SettingsModel.findOne({ userId: userId });
-                            if (parentDoc) {
-                                const subDoc = parentDoc.subAccounts.id(currentSettings._id);
-                                if (subDoc) {
-                                    subDoc.realizedPnl += currentPnl;
-                                    await parentDoc.save();
-                                }
-                            }
+                            // ATOMIC DB UPDATE
+                            await SettingsModel.updateOne(
+                                { userId: userId, "subAccounts._id": currentSettings._id }, 
+                                { $inc: { "subAccounts.$.realizedPnl": currentPnl } }
+                            );
 
                             logForProfile(profileId, `[${modeTxt}] ⚡ ${coin.symbol} Closed: ${reasonTxt}. Profit: $${currentPnl.toFixed(2)}`);
                             continue; 
@@ -691,7 +693,7 @@ const executeGlobalProfitMonitor = async () => {
                                 const openSide = w.side === 'long' ? 'buy' : 'sell';
                                 
                                 await bData.exchange.createOrder(w.symbol, 'market', closeSide, closeQty, undefined, { offset: 'close', reduceOnly: true, lever_rate: actualLev });
-                                await new Promise(r => setTimeout(r, 1500)); // FIX: HTX Margin Lock Delay
+                                await new Promise(r => setTimeout(r, 1500)); 
                                 await bData.exchange.createOrder(w.symbol, 'market', openSide, closeQty, undefined, { offset: 'open', lever_rate: actualLev });
                             }
 
@@ -701,27 +703,27 @@ const executeGlobalProfitMonitor = async () => {
                                 netProfit: realizedFromThis, reason: 'Balancer Harvest'
                             });
 
-                            const remainingQty = bState.contracts - closeQty;
-                            const totalValue = (remainingQty * bState.avgEntry) + (closeQty * livePrice);
-                            bState.avgEntry = bState.contracts > 0 ? (totalValue / bState.contracts) : livePrice;
+                            if (closeQty >= bState.contracts - 0.0001) {
+                                bState.avgEntry = livePrice;
+                            } else {
+                                const remainingQty = bState.contracts - closeQty;
+                                const totalValue = (remainingQty * bState.avgEntry) + (closeQty * livePrice);
+                                bState.avgEntry = totalValue / bState.contracts;
+                            }
                             bState.lockUntil = Date.now() + 15000;
 
                             w.subAccount.realizedPnl = (w.subAccount.realizedPnl || 0) + realizedFromThis;
                             
-                            // BULLETPROOF DB UPDATE
-                            const parentDoc = await SettingsModel.findOne({ userId: dbUserId });
-                            if (parentDoc) {
-                                const subDoc = parentDoc.subAccounts.id(w.subAccount._id);
-                                if (subDoc) {
-                                    subDoc.realizedPnl += realizedFromThis;
-                                    await parentDoc.save();
-                                }
-                            }
+                            await SettingsModel.updateOne(
+                                { userId: dbUserId, "subAccounts._id": w.subAccount._id }, 
+                                { $inc: { "subAccounts.$.realizedPnl": realizedFromThis } }
+                            );
 
                             logForProfile(firstProfileId, `⚖️ AUTO-BALANCE HARVEST: Secured +$${realizedFromThis.toFixed(4)} on ${w.symbol}.`);
                             excess -= realizedFromThis;
                             offsetExecuted = true; 
                         } catch (e) {
+                            console.error(`[BALANCER] Harvest Error on ${w.symbol}:`, e.message);
                             logForProfile(firstProfileId, `❌ BALANCER HARVEST ERROR [${w.symbol}]: ${e.message}`);
                         }
                     }
@@ -759,7 +761,7 @@ const executeGlobalProfitMonitor = async () => {
                                     const openSide = l.side === 'long' ? 'buy' : 'sell';
                                     
                                     await bData.exchange.createOrder(l.symbol, 'market', closeSide, closeQty, undefined, { offset: 'close', reduceOnly: true, lever_rate: actualLev });
-                                    await new Promise(r => setTimeout(r, 1500)); // FIX: HTX Margin Lock Delay
+                                    await new Promise(r => setTimeout(r, 1500)); 
                                     await bData.exchange.createOrder(l.symbol, 'market', openSide, closeQty, undefined, { offset: 'open', lever_rate: actualLev });
                                 }
 
@@ -769,27 +771,27 @@ const executeGlobalProfitMonitor = async () => {
                                     netProfit: lossRealized, reason: 'Balancer Forgive'
                                 });
 
-                                const remainingQty = bState.contracts - closeQty;
-                                const totalValue = (remainingQty * bState.avgEntry) + (closeQty * livePrice);
-                                bState.avgEntry = bState.contracts > 0 ? (totalValue / bState.contracts) : livePrice;
+                                if (closeQty >= bState.contracts - 0.0001) {
+                                    bState.avgEntry = livePrice;
+                                } else {
+                                    const remainingQty = bState.contracts - closeQty;
+                                    const totalValue = (remainingQty * bState.avgEntry) + (closeQty * livePrice);
+                                    bState.avgEntry = totalValue / bState.contracts;
+                                }
                                 bState.lockUntil = Date.now() + 15000;
 
                                 l.subAccount.realizedPnl = (l.subAccount.realizedPnl || 0) + lossRealized;
                                 
-                                // BULLETPROOF DB UPDATE
-                                const parentDoc = await SettingsModel.findOne({ userId: dbUserId });
-                                if (parentDoc) {
-                                    const subDoc = parentDoc.subAccounts.id(l.subAccount._id);
-                                    if (subDoc) {
-                                        subDoc.realizedPnl += lossRealized;
-                                        await parentDoc.save();
-                                    }
-                                }
+                                await SettingsModel.updateOne(
+                                    { userId: dbUserId, "subAccounts._id": l.subAccount._id }, 
+                                    { $inc: { "subAccounts.$.realizedPnl": lossRealized } }
+                                );
 
                                 logForProfile(firstProfileId, `⚖️ AUTO-BALANCE FORGIVE: Burned -$${Math.abs(lossRealized).toFixed(4)} on ${l.symbol}.`);
                                 budget -= Math.abs(lossRealized);
                                 offsetExecuted = true;
                             } catch (e) {
+                                console.error(`[BALANCER] Forgive Error on ${l.symbol}:`, e.message);
                                 logForProfile(firstProfileId, `❌ BALANCER FORGIVE ERROR [${l.symbol}]: ${e.message}`);
                             }
                         }
@@ -879,14 +881,11 @@ const executeGlobalProfitMonitor = async () => {
                                     
                                     pos.subAccount.realizedPnl = (pos.subAccount.realizedPnl || 0) + pos.unrealizedPnl;
                                     
-                                    const parentDoc = await SettingsModel.findOne({ userId: dbUserId });
-                                    if (parentDoc) {
-                                        const subDoc = parentDoc.subAccounts.id(pos.subAccount._id);
-                                        if (subDoc) {
-                                            subDoc.realizedPnl += pos.unrealizedPnl;
-                                            await parentDoc.save();
-                                        }
-                                    }
+                                    await SettingsModel.updateOne(
+                                        { userId: dbUserId, "subAccounts._id": pos.subAccount._id }, 
+                                        { $inc: { "subAccounts.$.realizedPnl": pos.unrealizedPnl } }
+                                    );
+
                                     offsetExecuted = true;
                                 }
                             } catch (e) {
@@ -1363,14 +1362,10 @@ app.post('/api/close-all', authMiddleware, async (req, res) => {
                         netProfit: closedPnl, reason: 'Emergency Panic Close' 
                     }).catch(()=>{});
 
-                    const parentDoc = await SettingsModel.findOne({ userId: req.userId });
-                    if (parentDoc) {
-                        const subDoc = parentDoc.subAccounts.id(botData.settings._id);
-                        if (subDoc) {
-                            subDoc.realizedPnl += closedPnl;
-                            await parentDoc.save();
-                        }
-                    }
+                    await SettingsModel.updateOne(
+                        { userId: req.userId, "subAccounts._id": botData.settings._id }, 
+                        { $inc: { "subAccounts.$.realizedPnl": closedPnl } }
+                    ).catch(()=>{});
                 }
             }
         }
@@ -1416,14 +1411,10 @@ app.post('/api/close-position', authMiddleware, async (req, res) => {
             botData.settings.realizedPnl = (botData.settings.realizedPnl || 0) + closePnl;
             const SettingsModel = req.isPaper ? PaperSettings : RealSettings;
             
-            const parentDoc = await SettingsModel.findOne({ userId: req.userId });
-            if (parentDoc) {
-                const subDoc = parentDoc.subAccounts.id(botData.settings._id);
-                if (subDoc) {
-                    subDoc.realizedPnl += closePnl;
-                    await parentDoc.save();
-                }
-            }
+            await SettingsModel.updateOne(
+                { userId: req.userId, "subAccounts._id": botData.settings._id }, 
+                { $inc: { "subAccounts.$.realizedPnl": closePnl } }
+            ).catch(()=>{});
 
             closed = true;
             break; 
@@ -2282,8 +2273,6 @@ const FRONTEND_HTML = [
     '                setTxt(\'display_smartOffsetNetProfit\', fmtC(mySmartOffsetNetProfit));',
     '                const abStatus = document.getElementById(\'display_autoBalanceStatus\');',
     '                if(abStatus) abStatus.innerHTML = myAutoBalanceEquity ? \'<span class="text-green">ON</span>\' : \'<span class="text-muted">OFF</span>\';',
-    '                setTxt(\'display_autoBalanceTarget\', fmtC(myAutoBalanceUnrealizedPnlTarget));',
-    '                setTxt(\'display_autoBalanceRetain\', fmtC(myAutoBalanceRetainRealized));',
     '',
     '                mySubAccounts = config.subAccounts || [];',
     '                renderSubAccounts();',
@@ -2494,9 +2483,11 @@ const FRONTEND_HTML = [
     '',
     '                const targetPnl = myAutoBalanceUnrealizedPnlTarget || 0;',
     '                const currentGap = globalUnrealized - targetPnl;',
+    '                const deficit = currentGap < 0 ? Math.abs(currentGap) : 0;',
     '                const availBudget = Math.max(0, globalRealized - (myAutoBalanceRetainRealized || 0));',
-    '                setTxt(\'display_autoBalanceGap\', fmtC(currentGap), currentGap>=0?"text-green":"text-red");',
-    '                setTxt(\'display_autoBalanceBudget\', fmtC(availBudget), "text-blue");',
+    '                setTxt(\'display_autoBalanceTarget\', fmtC(targetPnl));',
+    '                setTxt(\'display_autoBalanceGap\', "-$" + deficit.toFixed(4), deficit > 0 ? "text-red" : "text-muted");',
+    '                setTxt(\'display_autoBalanceBudget\', "+$" + availBudget.toFixed(4), "text-blue");',
     '',
     '                activeCandidates.sort((a, b) => b.pnl - a.pnl);',
     '                const totalCoins = activeCandidates.length, totalPairs = Math.floor(totalCoins / 2);',
