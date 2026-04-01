@@ -409,9 +409,6 @@ async function startBot(userId, subAccount, isPaper) {
                     // 1. OPEN BASE POSITION
                     if (cState.contracts <= 0) {
                         const safeBaseQty = Math.max(1, Math.floor(currentSettings.baseQty));
-                        const modeTxt = isPaper ? "PAPER" : "REAL";
-                        logForProfile(profileId, `[${modeTxt}] 🛒 Opening base position of ${safeBaseQty} contracts (${activeSide}) at ~${cState.currentPrice} using ${cState.actualLeverage}x Leverage.`);
-                        
                         if (!isPaper) {
                             const orderSide = activeSide === 'long' ? 'buy' : 'sell';
                             await exchange.createOrder(coin.symbol, 'market', orderSide, safeBaseQty, undefined, { offset: 'open', lever_rate: cState.actualLeverage });
@@ -458,8 +455,6 @@ async function startBot(userId, subAccount, isPaper) {
                         const reasonTxt = isTakeProfit ? tpReasonTxt : slReasonTxt;
                         const modeTxt = isPaper ? "PAPER" : "REAL";
                         
-                        logForProfile(profileId, `[${modeTxt}] [${coin.symbol}] ⚡ Triggered: ${reasonTxt}. Attempting to close ${cState.contracts} contracts.`);
-                        
                         try {
                             if (!isPaper) {
                                 const closeSide = activeSide === 'long' ? 'sell' : 'buy';
@@ -468,16 +463,10 @@ async function startBot(userId, subAccount, isPaper) {
                                 });
                             }
 
-                            const OffsetModel = isPaper ? PaperOffsetRecord : RealOffsetRecord;
-                            OffsetModel.create({ 
-                                userId: userId, 
-                                symbol: coin.symbol, 
-                                side: activeSide,
-                                openPrice: cState.avgEntry,
-                                closePrice: cState.currentPrice,
-                                roi: currentRoi,
-                                netProfit: currentPnl,
-                                reason: reasonTxt 
+                            await (isPaper ? PaperOffsetRecord : RealOffsetRecord).create({ 
+                                userId: userId, symbol: coin.symbol, side: activeSide,
+                                openPrice: cState.avgEntry, closePrice: cState.currentPrice, roi: currentRoi,
+                                netProfit: currentPnl, reason: reasonTxt 
                             }).catch(()=>{});
 
                             cState.lockUntil = Date.now() + 15000;
@@ -488,11 +477,17 @@ async function startBot(userId, subAccount, isPaper) {
                                 cState.contracts = 0; cState.unrealizedPnl = 0; cState.currentRoi = 0; cState.avgEntry = 0;
                             }
 
-                            // **CRITICAL FIX**: Atomic $inc prevents race condition wiping out realizedPNL
-                            await SettingsModel.updateOne(
-                                { "subAccounts._id": currentSettings._id }, 
-                                { $inc: { "subAccounts.$.realizedPnl": currentPnl } }
-                            ).catch(()=>{});
+                            // BULLETPROOF ATOMIC UPDATE
+                            const parentDoc = await SettingsModel.findOne({ userId: userId });
+                            if (parentDoc) {
+                                const subDoc = parentDoc.subAccounts.id(currentSettings._id);
+                                if (subDoc) {
+                                    subDoc.realizedPnl += currentPnl;
+                                    await parentDoc.save();
+                                }
+                            }
+
+                            logForProfile(profileId, `[${modeTxt}] ⚡ ${coin.symbol} Closed: ${reasonTxt}. Profit: $${currentPnl.toFixed(2)}`);
                             continue; 
 
                         } catch (closeErr) {
@@ -509,18 +504,13 @@ async function startBot(userId, subAccount, isPaper) {
 
                     if (baseTriggerPnl < 0 && cState.unrealizedPnl <= activeTriggerPnl && (Date.now() - (cState.lastDcaTime || 0) > 12000)) {
                         
-                        const targetPnlForDca = activeTriggerPnl / 2;
                         const reqQty = calculateDcaQtyToHalveGap(cState.contracts);
 
                         if (reqQty <= 0) {
                             cState.lastDcaTime = Date.now();
                         } else if ((cState.contracts + reqQty) > currentSettings.maxContracts) {
-                            logForProfile(profileId, `[${isPaper ? 'PAPER' : 'REAL'}] 🛡️ DCA Safety Triggered. Max contracts reached.`);
                             cState.lastDcaTime = Date.now(); 
                         } else {
-                            const nextTarget = baseTriggerPnl * Math.pow(2, currentDcaStep + 1);
-                            logForProfile(profileId, `[${isPaper ? 'PAPER' : 'REAL'}] ⚡ DCA Step ${currentDcaStep + 1}: Buying ${reqQty} contracts at ${cState.actualLeverage}x.`);
-                            
                             if (!isPaper) {
                                 const orderSide = activeSide === 'long' ? 'buy' : 'sell';
                                 await exchange.createOrder(coin.symbol, 'market', orderSide, reqQty, undefined, { offset: 'open', lever_rate: cState.actualLeverage });
@@ -673,6 +663,7 @@ const executeGlobalProfitMonitor = async () => {
 
                 const balanceTolerance = 5.0 * multiplier; 
 
+                // HARVEST WINNERS
                 if (globalUnrealized > targetPnl + balanceTolerance) {
                     let excess = globalUnrealized - targetPnl;
                     let winners = activeCandidates.filter(c => c.unrealizedPnl > 0).sort((a, b) => b.unrealizedPnl - a.unrealizedPnl);
@@ -688,49 +679,62 @@ const executeGlobalProfitMonitor = async () => {
 
                         try {
                             const bData = activeBots.get(w.profileId);
-                            if (bData) {
-                                const bState = bData.state.coinStates[w.symbol];
-                                const livePrice = bState.currentPrice;
+                            if (!bData) continue;
+                            const bState = bData.state.coinStates[w.symbol];
+                            if (!bState) continue;
 
-                                if (!w.isPaper) {
-                                    const closeSide = w.side === 'long' ? 'sell' : 'buy';
-                                    const openSide = w.side === 'long' ? 'buy' : 'sell';
-                                    await bData.exchange.createOrder(w.symbol, 'market', closeSide, closeQty, undefined, { offset: 'close', reduceOnly: true, lever_rate: w.actualLeverage });
-                                    await bData.exchange.createOrder(w.symbol, 'market', openSide, closeQty, undefined, { offset: 'open', lever_rate: w.actualLeverage });
-                                }
+                            const livePrice = bState.currentPrice;
+                            const actualLev = parseInt(w.actualLeverage) || 10;
 
-                                if (bState) {
-                                    OffsetModel.create({
-                                        userId: dbUserId, symbol: w.symbol, side: w.side,
-                                        openPrice: bState.avgEntry, closePrice: bState.currentPrice, roi: bState.currentRoi,
-                                        netProfit: realizedFromThis, reason: 'Balancer Harvest'
-                                    }).catch(()=>{});
-
-                                    const remainingQty = bState.contracts - closeQty;
-                                    const totalValue = (remainingQty * bState.avgEntry) + (closeQty * livePrice);
-                                    bState.avgEntry = bState.contracts > 0 ? (totalValue / bState.contracts) : livePrice;
-                                    bState.lockUntil = Date.now() + 15000;
-                                }
-
-                                w.subAccount.realizedPnl = (w.subAccount.realizedPnl || 0) + realizedFromThis;
-                                await SettingsModel.updateOne(
-                                    { "subAccounts._id": w.subAccount._id }, 
-                                    { $inc: { "subAccounts.$.realizedPnl": realizedFromThis } }
-                                ).catch(()=>{});
-
-                                logForProfile(firstProfileId, `⚖️ AUTO-BALANCE HARVEST: Secured +$${realizedFromThis.toFixed(4)} on ${w.symbol}.`);
-                                excess -= realizedFromThis;
-                                offsetExecuted = true; 
+                            if (!w.isPaper) {
+                                const closeSide = w.side === 'long' ? 'sell' : 'buy';
+                                const openSide = w.side === 'long' ? 'buy' : 'sell';
+                                
+                                await bData.exchange.createOrder(w.symbol, 'market', closeSide, closeQty, undefined, { offset: 'close', reduceOnly: true, lever_rate: actualLev });
+                                await new Promise(r => setTimeout(r, 1500)); // FIX: HTX Margin Lock Delay
+                                await bData.exchange.createOrder(w.symbol, 'market', openSide, closeQty, undefined, { offset: 'open', lever_rate: actualLev });
                             }
-                        } catch (e) {}
+
+                            await OffsetModel.create({
+                                userId: dbUserId, symbol: w.symbol, side: w.side,
+                                openPrice: bState.avgEntry, closePrice: bState.currentPrice, roi: bState.currentRoi,
+                                netProfit: realizedFromThis, reason: 'Balancer Harvest'
+                            });
+
+                            const remainingQty = bState.contracts - closeQty;
+                            const totalValue = (remainingQty * bState.avgEntry) + (closeQty * livePrice);
+                            bState.avgEntry = bState.contracts > 0 ? (totalValue / bState.contracts) : livePrice;
+                            bState.lockUntil = Date.now() + 15000;
+
+                            w.subAccount.realizedPnl = (w.subAccount.realizedPnl || 0) + realizedFromThis;
+                            
+                            // BULLETPROOF DB UPDATE
+                            const parentDoc = await SettingsModel.findOne({ userId: dbUserId });
+                            if (parentDoc) {
+                                const subDoc = parentDoc.subAccounts.id(w.subAccount._id);
+                                if (subDoc) {
+                                    subDoc.realizedPnl += realizedFromThis;
+                                    await parentDoc.save();
+                                }
+                            }
+
+                            logForProfile(firstProfileId, `⚖️ AUTO-BALANCE HARVEST: Secured +$${realizedFromThis.toFixed(4)} on ${w.symbol}.`);
+                            excess -= realizedFromThis;
+                            offsetExecuted = true; 
+                        } catch (e) {
+                            logForProfile(firstProfileId, `❌ BALANCER HARVEST ERROR [${w.symbol}]: ${e.message}`);
+                        }
                     }
-                } else if (globalUnrealized < targetPnl - balanceTolerance) {
+                } 
+                // BURN LOSERS
+                else if (globalUnrealized < targetPnl - balanceTolerance) {
                     let deficit = targetPnl - globalUnrealized;
                     let availableRealized = Math.max(0, globalRealized - retainRealized);
                     let budget = Math.min(deficit, availableRealized);
 
                     if (budget > balanceTolerance) {
                         let losers = activeCandidates.filter(c => c.unrealizedPnl < 0).sort((a, b) => a.unrealizedPnl - b.unrealizedPnl);
+                        logForProfile(firstProfileId, `⚙️ BALANCER: Initiating Burn. Deficit: $${deficit.toFixed(2)} | Budget: $${budget.toFixed(2)} | Losers Found: ${losers.length}`);
 
                         for (let l of losers) {
                             if (budget <= balanceTolerance) break;
@@ -739,46 +743,55 @@ const executeGlobalProfitMonitor = async () => {
                             let closeQty = Math.max(1, Math.floor(l.contracts * closeFraction));
                             if (closeQty > l.contracts) closeQty = l.contracts;
 
-                            // lossRealized is a negative number
                             let lossRealized = -(lossAmount * (closeQty / l.contracts));
 
                             try {
                                 const bData = activeBots.get(l.profileId);
-                                if (bData) {
-                                    const bState = bData.state.coinStates[l.symbol];
-                                    const livePrice = bState.currentPrice;
+                                if (!bData) continue;
+                                const bState = bData.state.coinStates[l.symbol];
+                                if (!bState) continue;
+                                
+                                const livePrice = bState.currentPrice;
+                                const actualLev = parseInt(l.actualLeverage) || 10;
 
-                                    if (!l.isPaper) {
-                                        const closeSide = l.side === 'long' ? 'sell' : 'buy';
-                                        const openSide = l.side === 'long' ? 'buy' : 'sell';
-                                        await bData.exchange.createOrder(l.symbol, 'market', closeSide, closeQty, undefined, { offset: 'close', reduceOnly: true, lever_rate: l.actualLeverage });
-                                        await bData.exchange.createOrder(l.symbol, 'market', openSide, closeQty, undefined, { offset: 'open', lever_rate: l.actualLeverage });
-                                    }
-
-                                    if (bState) {
-                                        OffsetModel.create({
-                                            userId: dbUserId, symbol: l.symbol, side: l.side,
-                                            openPrice: bState.avgEntry, closePrice: bState.currentPrice, roi: bState.currentRoi,
-                                            netProfit: lossRealized, reason: 'Balancer Forgive'
-                                        }).catch(()=>{});
-
-                                        const remainingQty = bState.contracts - closeQty;
-                                        const totalValue = (remainingQty * bState.avgEntry) + (closeQty * livePrice);
-                                        bState.avgEntry = bState.contracts > 0 ? (totalValue / bState.contracts) : livePrice;
-                                        bState.lockUntil = Date.now() + 15000;
-                                    }
-
-                                    l.subAccount.realizedPnl = (l.subAccount.realizedPnl || 0) + lossRealized;
-                                    await SettingsModel.updateOne(
-                                        { "subAccounts._id": l.subAccount._id }, 
-                                        { $inc: { "subAccounts.$.realizedPnl": lossRealized } }
-                                    ).catch(()=>{});
-
-                                    logForProfile(firstProfileId, `⚖️ AUTO-BALANCE FORGIVE: Burned -$${Math.abs(lossRealized).toFixed(4)} on ${l.symbol}.`);
-                                    budget -= Math.abs(lossRealized);
-                                    offsetExecuted = true;
+                                if (!l.isPaper) {
+                                    const closeSide = l.side === 'long' ? 'sell' : 'buy';
+                                    const openSide = l.side === 'long' ? 'buy' : 'sell';
+                                    
+                                    await bData.exchange.createOrder(l.symbol, 'market', closeSide, closeQty, undefined, { offset: 'close', reduceOnly: true, lever_rate: actualLev });
+                                    await new Promise(r => setTimeout(r, 1500)); // FIX: HTX Margin Lock Delay
+                                    await bData.exchange.createOrder(l.symbol, 'market', openSide, closeQty, undefined, { offset: 'open', lever_rate: actualLev });
                                 }
-                            } catch (e) {}
+
+                                await OffsetModel.create({
+                                    userId: dbUserId, symbol: l.symbol, side: l.side,
+                                    openPrice: bState.avgEntry, closePrice: bState.currentPrice, roi: bState.currentRoi,
+                                    netProfit: lossRealized, reason: 'Balancer Forgive'
+                                });
+
+                                const remainingQty = bState.contracts - closeQty;
+                                const totalValue = (remainingQty * bState.avgEntry) + (closeQty * livePrice);
+                                bState.avgEntry = bState.contracts > 0 ? (totalValue / bState.contracts) : livePrice;
+                                bState.lockUntil = Date.now() + 15000;
+
+                                l.subAccount.realizedPnl = (l.subAccount.realizedPnl || 0) + lossRealized;
+                                
+                                // BULLETPROOF DB UPDATE
+                                const parentDoc = await SettingsModel.findOne({ userId: dbUserId });
+                                if (parentDoc) {
+                                    const subDoc = parentDoc.subAccounts.id(l.subAccount._id);
+                                    if (subDoc) {
+                                        subDoc.realizedPnl += lossRealized;
+                                        await parentDoc.save();
+                                    }
+                                }
+
+                                logForProfile(firstProfileId, `⚖️ AUTO-BALANCE FORGIVE: Burned -$${Math.abs(lossRealized).toFixed(4)} on ${l.symbol}.`);
+                                budget -= Math.abs(lossRealized);
+                                offsetExecuted = true;
+                            } catch (e) {
+                                logForProfile(firstProfileId, `❌ BALANCER FORGIVE ERROR [${l.symbol}]: ${e.message}`);
+                            }
                         }
                     }
                 }
@@ -809,10 +822,12 @@ const executeGlobalProfitMonitor = async () => {
                 }
 
                 let triggerOffset = false;
+                let reason = '';
                 let finalPairsToClose = [];
 
                 if (smartOffsetNetProfit > 0 && peakAccumulation >= targetV1 && peakAccumulation >= peakThreshold && peakRowIndex >= 0) {
                     triggerOffset = true;
+                    reason = `Smart Offset V1`;
                     for(let i = 0; i <= peakRowIndex; i++) {
                         const w = activeCandidates[i];
                         if (Math.abs(w.unrealizedPnl) <= winnerThreshold) continue; 
@@ -852,21 +867,26 @@ const executeGlobalProfitMonitor = async () => {
                                     const bState = bData.state.coinStates[pos.symbol];
                                     
                                     if (bState) { 
-                                        OffsetModel.create({
+                                        await OffsetModel.create({
                                             userId: dbUserId, symbol: pos.symbol, side: pos.side,
                                             openPrice: bState.avgEntry, closePrice: bState.currentPrice, roi: bState.currentRoi,
                                             netProfit: pos.unrealizedPnl, reason: 'Smart Offset V1'
-                                        }).catch(()=>{});
+                                        });
 
                                         bState.contracts = 0; bState.unrealizedPnl = 0; bState.avgEntry = 0; bState.dcaCount = 0; 
                                         bState.lockUntil = Date.now() + 60000; 
                                     }
                                     
                                     pos.subAccount.realizedPnl = (pos.subAccount.realizedPnl || 0) + pos.unrealizedPnl;
-                                    await SettingsModel.updateOne(
-                                        { "subAccounts._id": pos.subAccount._id }, 
-                                        { $inc: { "subAccounts.$.realizedPnl": pos.unrealizedPnl } }
-                                    ).catch(()=>{});
+                                    
+                                    const parentDoc = await SettingsModel.findOne({ userId: dbUserId });
+                                    if (parentDoc) {
+                                        const subDoc = parentDoc.subAccounts.id(pos.subAccount._id);
+                                        if (subDoc) {
+                                            subDoc.realizedPnl += pos.unrealizedPnl;
+                                            await parentDoc.save();
+                                        }
+                                    }
                                     offsetExecuted = true;
                                 }
                             } catch (e) {
@@ -1343,10 +1363,14 @@ app.post('/api/close-all', authMiddleware, async (req, res) => {
                         netProfit: closedPnl, reason: 'Emergency Panic Close' 
                     }).catch(()=>{});
 
-                    await SettingsModel.updateOne(
-                        { "subAccounts._id": botData.settings._id }, 
-                        { $inc: { "subAccounts.$.realizedPnl": closedPnl } }
-                    ).catch(()=>{});
+                    const parentDoc = await SettingsModel.findOne({ userId: req.userId });
+                    if (parentDoc) {
+                        const subDoc = parentDoc.subAccounts.id(botData.settings._id);
+                        if (subDoc) {
+                            subDoc.realizedPnl += closedPnl;
+                            await parentDoc.save();
+                        }
+                    }
                 }
             }
         }
@@ -1392,11 +1416,14 @@ app.post('/api/close-position', authMiddleware, async (req, res) => {
             botData.settings.realizedPnl = (botData.settings.realizedPnl || 0) + closePnl;
             const SettingsModel = req.isPaper ? PaperSettings : RealSettings;
             
-            // Atomic update guarantees no race condition overrides
-            await SettingsModel.updateOne(
-                { "subAccounts._id": botData.settings._id }, 
-                { $inc: { "subAccounts.$.realizedPnl": closePnl } }
-            ).catch(()=>{});
+            const parentDoc = await SettingsModel.findOne({ userId: req.userId });
+            if (parentDoc) {
+                const subDoc = parentDoc.subAccounts.id(botData.settings._id);
+                if (subDoc) {
+                    subDoc.realizedPnl += closePnl;
+                    await parentDoc.save();
+                }
+            }
 
             closed = true;
             break; 
@@ -1575,7 +1602,6 @@ app.get('/api/status', authMiddleware, async (req, res) => {
 app.get('/api/offsets', authMiddleware, async (req, res) => {
     res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
     const OffsetModel = req.isPaper ? PaperOffsetRecord : RealOffsetRecord;
-    // Strictly filter out any old residual "Open Position" or "DCA" logs from the database
     const records = await OffsetModel.find({ 
         userId: req.userId,
         reason: { $not: /(Open Base Position|DCA Step)/i }
@@ -2560,7 +2586,7 @@ const FRONTEND_HTML = [
     '                    logsEl.innerHTML = (stateData.logs || []).map(l => {',
     '                        if(l.includes(\'❌\')) return \'<span class="text-red">\' + l + \'</span>\';',
     '                        if(l.includes(\'⚡\')||l.includes(\'🛒\')) return \'<span class="text-blue">\' + l + \'</span>\';',
-    '                        if(l.includes(\'⚖️\')) return \'<span class="text-warning">\' + l + \'</span>\';',
+    '                        if(l.includes(\'⚙️\')||l.includes(\'⚖️\')) return \'<span class="text-warning">\' + l + \'</span>\';',
     '                        return l;',
     '                    }).join(\'<br>\');',
     '                }',
