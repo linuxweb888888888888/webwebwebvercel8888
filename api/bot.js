@@ -664,6 +664,7 @@ const executeGlobalProfitMonitor = async () => {
                 for (let s of userSetting.subAccounts) globalRealized += (s.realizedPnl || 0);
 
                 const balanceTolerance = 5.0 * multiplier; 
+                const microTolerance = 0.05; // 5 cents: Triggers deficit cover immediately
 
                 // 1. SURPLUS HARVEST
                 if (globalUnrealized > targetPnl + balanceTolerance) {
@@ -720,8 +721,8 @@ const executeGlobalProfitMonitor = async () => {
                         }
                     }
                 } 
-                // 2. DEFICIT COVER (Calculate winners to pay for losers and HARD CLOSE)
-                else if (globalUnrealized < targetPnl - balanceTolerance) {
+                // 2. DEFICIT COVER (Instantly close winners & losers to wipe out the deficit)
+                else if (globalUnrealized < targetPnl - microTolerance) {
                     let deficit = targetPnl - globalUnrealized;
                     let availableRealized = Math.max(0, globalRealized - retainRealized);
                     
@@ -734,7 +735,7 @@ const executeGlobalProfitMonitor = async () => {
                         logForProfile(firstProfileId, `⚙️ BALANCER: Deficit ($${deficit.toFixed(2)}) > Cash. Closing winners to cover shortfall ($${shortfall.toFixed(2)})...`);
 
                         for (let w of winners) {
-                            if (shortfall <= balanceTolerance) break;
+                            if (shortfall <= microTolerance) break;
                             let winAmount = w.unrealizedPnl;
                             let closeFraction = winAmount > shortfall ? (shortfall / winAmount) : 1;
                             let closeQty = Math.max(1, Math.floor(w.contracts * closeFraction));
@@ -784,11 +785,11 @@ const executeGlobalProfitMonitor = async () => {
                     // B. Close the LOSERS using the available realized cash to eliminate the deficit completely
                     let budget = Math.min(deficit, availableRealized);
 
-                    if (budget > balanceTolerance && losers.length > 0) {
+                    if (budget >= microTolerance && losers.length > 0) {
                         logForProfile(firstProfileId, `⚙️ BALANCER: Closing losers to eliminate deficit. Budget: $${budget.toFixed(2)}`);
 
                         for (let l of losers) {
-                            if (budget <= balanceTolerance) break;
+                            if (budget <= microTolerance) break;
                             let lossAmount = Math.abs(l.unrealizedPnl);
                             let closeFraction = lossAmount > budget ? (budget / lossAmount) : 1;
                             let closeQty = Math.max(1, Math.floor(l.contracts * closeFraction));
