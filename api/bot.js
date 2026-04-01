@@ -102,7 +102,6 @@ const SettingsSchema = new mongoose.Schema({
     cycleNextSwitchTime: { type: Number, default: 0 }
 });
 
-// UPDATED OFFSET SCHEMA (EXACT EXCHANGE LAYOUT)
 const OffsetRecordSchema = new mongoose.Schema({
     userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
     symbol: { type: String }, 
@@ -489,8 +488,13 @@ async function startBot(userId, subAccount, isPaper) {
                                 cState.contracts = 0; cState.unrealizedPnl = 0; cState.currentRoi = 0; cState.avgEntry = 0;
                             }
 
-                            SettingsModel.updateOne({ "subAccounts._id": currentSettings._id }, { $set: { "subAccounts.$.realizedPnl": currentSettings.realizedPnl } }).catch(()=>{});
+                            // **CRITICAL FIX**: Atomic $inc prevents race condition wiping out realizedPNL
+                            await SettingsModel.updateOne(
+                                { "subAccounts._id": currentSettings._id }, 
+                                { $inc: { "subAccounts.$.realizedPnl": currentPnl } }
+                            ).catch(()=>{});
                             continue; 
+
                         } catch (closeErr) {
                             logForProfile(profileId, `[${modeTxt}] ❌ CLOSE ERROR [${coin.symbol}]: ${closeErr.message}`);
                             continue;
@@ -624,9 +628,7 @@ const executeGlobalProfitMonitor = async () => {
             const SettingsModel = userSetting.isPaper ? PaperSettings : RealSettings;
             const OffsetModel = userSetting.isPaper ? PaperOffsetRecord : RealOffsetRecord;
 
-            let dbUpdates = {}; 
             const multiplier = userSetting.qtyMultiplier || 1;
-            
             const smartOffsetNetProfit = parseFloat(userSetting.smartOffsetNetProfit) || 0;
             const peakThreshold = 0.0001 * multiplier;
             const winnerThreshold = 0.0002 * multiplier;
@@ -711,7 +713,10 @@ const executeGlobalProfitMonitor = async () => {
                                 }
 
                                 w.subAccount.realizedPnl = (w.subAccount.realizedPnl || 0) + realizedFromThis;
-                                await SettingsModel.updateOne({ "subAccounts._id": w.subAccount._id }, { $set: { "subAccounts.$.realizedPnl": w.subAccount.realizedPnl } }).catch(()=>{});
+                                await SettingsModel.updateOne(
+                                    { "subAccounts._id": w.subAccount._id }, 
+                                    { $inc: { "subAccounts.$.realizedPnl": realizedFromThis } }
+                                ).catch(()=>{});
 
                                 logForProfile(firstProfileId, `⚖️ AUTO-BALANCE HARVEST: Secured +$${realizedFromThis.toFixed(4)} on ${w.symbol}.`);
                                 excess -= realizedFromThis;
@@ -734,6 +739,7 @@ const executeGlobalProfitMonitor = async () => {
                             let closeQty = Math.max(1, Math.floor(l.contracts * closeFraction));
                             if (closeQty > l.contracts) closeQty = l.contracts;
 
+                            // lossRealized is a negative number
                             let lossRealized = -(lossAmount * (closeQty / l.contracts));
 
                             try {
@@ -763,7 +769,10 @@ const executeGlobalProfitMonitor = async () => {
                                     }
 
                                     l.subAccount.realizedPnl = (l.subAccount.realizedPnl || 0) + lossRealized;
-                                    await SettingsModel.updateOne({ "subAccounts._id": l.subAccount._id }, { $set: { "subAccounts.$.realizedPnl": l.subAccount.realizedPnl } }).catch(()=>{});
+                                    await SettingsModel.updateOne(
+                                        { "subAccounts._id": l.subAccount._id }, 
+                                        { $inc: { "subAccounts.$.realizedPnl": lossRealized } }
+                                    ).catch(()=>{});
 
                                     logForProfile(firstProfileId, `⚖️ AUTO-BALANCE FORGIVE: Burned -$${Math.abs(lossRealized).toFixed(4)} on ${l.symbol}.`);
                                     budget -= Math.abs(lossRealized);
@@ -800,12 +809,10 @@ const executeGlobalProfitMonitor = async () => {
                 }
 
                 let triggerOffset = false;
-                let reason = '';
                 let finalPairsToClose = [];
 
                 if (smartOffsetNetProfit > 0 && peakAccumulation >= targetV1 && peakAccumulation >= peakThreshold && peakRowIndex >= 0) {
                     triggerOffset = true;
-                    reason = `Smart Offset V1`;
                     for(let i = 0; i <= peakRowIndex; i++) {
                         const w = activeCandidates[i];
                         if (Math.abs(w.unrealizedPnl) <= winnerThreshold) continue; 
@@ -848,7 +855,7 @@ const executeGlobalProfitMonitor = async () => {
                                         OffsetModel.create({
                                             userId: dbUserId, symbol: pos.symbol, side: pos.side,
                                             openPrice: bState.avgEntry, closePrice: bState.currentPrice, roi: bState.currentRoi,
-                                            netProfit: pos.unrealizedPnl, reason: reason
+                                            netProfit: pos.unrealizedPnl, reason: 'Smart Offset V1'
                                         }).catch(()=>{});
 
                                         bState.contracts = 0; bState.unrealizedPnl = 0; bState.avgEntry = 0; bState.dcaCount = 0; 
@@ -856,7 +863,10 @@ const executeGlobalProfitMonitor = async () => {
                                     }
                                     
                                     pos.subAccount.realizedPnl = (pos.subAccount.realizedPnl || 0) + pos.unrealizedPnl;
-                                    await SettingsModel.updateOne({ "subAccounts._id": pos.subAccount._id }, { $set: { "subAccounts.$.realizedPnl": pos.subAccount.realizedPnl } }).catch(()=>{});
+                                    await SettingsModel.updateOne(
+                                        { "subAccounts._id": pos.subAccount._id }, 
+                                        { $inc: { "subAccounts.$.realizedPnl": pos.unrealizedPnl } }
+                                    ).catch(()=>{});
                                     offsetExecuted = true;
                                 }
                             } catch (e) {
@@ -865,10 +875,6 @@ const executeGlobalProfitMonitor = async () => {
                         }
                     }
                 }
-            }
-            
-            if (Object.keys(dbUpdates).length > 0) {
-                await SettingsModel.updateOne({ userId: dbUserId }, { $set: dbUpdates }).catch(console.error);
             }
         }
     } catch (err) {
@@ -1275,7 +1281,10 @@ app.post('/api/admin/users/:id/close-all', authMiddleware, adminMiddleware, asyn
                 cState.lockUntil = Date.now() + 120000; 
             }
             
-            await SettingsModel.updateOne({ "subAccounts._id": botData.settings._id }, { $set: { "subAccounts.$.realizedPnl": botData.settings.realizedPnl } }).catch(()=>{});
+            await SettingsModel.updateOne(
+                { "subAccounts._id": botData.settings._id }, 
+                { $set: { "subAccounts.$.realizedPnl": botData.settings.realizedPnl } } // Resetting/overwriting is fine for total wipe
+            ).catch(()=>{});
         }
     }
     res.json({ success: true, message: `Force closed ${totalClosed} positions for ${targetUser.username}. Trading paused for 2 minutes.` });
@@ -1311,6 +1320,7 @@ app.post('/api/close-all', authMiddleware, async (req, res) => {
     try {
         let totalClosed = 0;
         const OffsetModel = RealOffsetRecord;
+        const SettingsModel = RealSettings;
         for (let [profileId, botData] of activeBots.entries()) {
             if (botData.userId !== req.userId.toString()) continue;
             const positions = await botData.exchange.fetchPositions().catch(()=>[]);
@@ -1332,6 +1342,11 @@ app.post('/api/close-all', authMiddleware, async (req, res) => {
                         openPrice: bState ? bState.avgEntry : 0, closePrice: bState ? bState.currentPrice : 0, roi: bState ? bState.currentRoi : 0,
                         netProfit: closedPnl, reason: 'Emergency Panic Close' 
                     }).catch(()=>{});
+
+                    await SettingsModel.updateOne(
+                        { "subAccounts._id": botData.settings._id }, 
+                        { $inc: { "subAccounts.$.realizedPnl": closedPnl } }
+                    ).catch(()=>{});
                 }
             }
         }
@@ -1376,7 +1391,12 @@ app.post('/api/close-position', authMiddleware, async (req, res) => {
 
             botData.settings.realizedPnl = (botData.settings.realizedPnl || 0) + closePnl;
             const SettingsModel = req.isPaper ? PaperSettings : RealSettings;
-            await SettingsModel.updateOne({ "subAccounts._id": botData.settings._id }, { $set: { "subAccounts.$.realizedPnl": botData.settings.realizedPnl } }).catch(()=>{});
+            
+            // Atomic update guarantees no race condition overrides
+            await SettingsModel.updateOne(
+                { "subAccounts._id": botData.settings._id }, 
+                { $inc: { "subAccounts.$.realizedPnl": closePnl } }
+            ).catch(()=>{});
 
             closed = true;
             break; 
@@ -1555,7 +1575,11 @@ app.get('/api/status', authMiddleware, async (req, res) => {
 app.get('/api/offsets', authMiddleware, async (req, res) => {
     res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
     const OffsetModel = req.isPaper ? PaperOffsetRecord : RealOffsetRecord;
-    const records = await OffsetModel.find({ userId: req.userId }).sort({ timestamp: -1 }).limit(100);
+    // Strictly filter out any old residual "Open Position" or "DCA" logs from the database
+    const records = await OffsetModel.find({ 
+        userId: req.userId,
+        reason: { $not: /(Open Base Position|DCA Step)/i }
+    }).sort({ timestamp: -1 }).limit(100);
     res.json(records);
 });
 
@@ -1823,8 +1847,8 @@ const FRONTEND_HTML = [
     '                        <div class="metric"><div class="metric-label">Retain Rlz</div><div class="metric-val" id="display_autoBalanceRetain">$0.00</div></div>',
     '                    </div>',
     '                    <div class="grid">',
-    '                        <div class="metric" style="border-color:#333;"><div class="metric-label">Current Gap to Target</div><div class="metric-val" id="display_autoBalanceGap" style="font-size:14px;">$0.00</div><div style="font-size:10px; color:#888; margin-top:4px;">(Negative = Need to burn losers)</div></div>',
-    '                        <div class="metric" style="border-color:#333;"><div class="metric-label">Available Budget</div><div class="metric-val" id="display_autoBalanceBudget" style="font-size:14px;">$0.00</div><div style="font-size:10px; color:#888; margin-top:4px;">(Realized available to spend)</div></div>',
+    '                        <div class="metric" style="border-color:#333;"><div class="metric-label">Unrealized Deficit</div><div class="metric-val" id="display_autoBalanceGap" style="font-size:14px;">$0.00</div><div style="font-size:10px; color:#888; margin-top:4px;">(Amount exceeding target)</div></div>',
+    '                        <div class="metric" style="border-color:#333;"><div class="metric-label">Available Budget</div><div class="metric-val" id="display_autoBalanceBudget" style="font-size:14px;">$0.00</div><div style="font-size:10px; color:#888; margin-top:4px;">(Realized available to burn)</div></div>',
     '                    </div>',
     '                </div>',
     '                <div id="user-extremes-display" class="card" style="display:none;">',
@@ -2379,9 +2403,9 @@ const FRONTEND_HTML = [
     '                const dStr = d.toLocaleDateString(undefined,{month:\'short\',day:\'numeric\'}) + \' \' + d.toLocaleTimeString(undefined,{hour12:false});',
     '                const sym = r.symbol || \'?\';',
     '                const net = r.netProfit || 0;',
-    '                const roi = r.roi ? r.roi.toFixed(2)+\'%\' : \'-\';',
-    '                const openP = fmtP(r.openPrice);',
-    '                const closeP = fmtP(r.closePrice);',
+    '                const roi = r.roi !== undefined ? r.roi.toFixed(2)+\'%\' : \'-\';',
+    '                const openP = r.openPrice ? fmtP(r.openPrice) : \'-\';',
+    '                const closeP = r.closePrice ? fmtP(r.closePrice) : \'-\';',
     '                const side = r.side ? \' <span class="text-muted" style="font-size:11px;">[\'+r.side.toUpperCase()+\']</span>\' : \'\';',
     '                ',
     '                const row = \'<tr>\' +',
@@ -2442,7 +2466,6 @@ const FRONTEND_HTML = [
     '                setTxt(\'topGlobalUnrealized\', fmtC(globalUnrealized), globalUnrealized>=0?"text-green":"text-red");',
     '                setTxt(\'globalWinRate\', totalAboveZero + " / " + totalTrading);',
     '',
-    '                // Equity Balancer Info Display',
     '                const targetPnl = myAutoBalanceUnrealizedPnlTarget || 0;',
     '                const currentGap = globalUnrealized - targetPnl;',
     '                const availBudget = Math.max(0, globalRealized - (myAutoBalanceRetainRealized || 0));',
