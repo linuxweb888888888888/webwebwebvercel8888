@@ -505,7 +505,12 @@ async function startBot(userId, subAccount, isPaper) {
 
                     if (isTakeProfit || isStopLoss) {
                         if (isStopLoss && botData.globalSettings && botData.globalSettings.mustCloseProfitNext) {
-                            continue;
+                            // FIXED: Do not block Global PNL or Dynamic Stop Losses with mustCloseProfitNext!
+                            if (globalSlPnlTarget < 0 && currentPnl <= globalSlPnlTarget) {
+                                // Bypass block to allow dynamic safety net to execute
+                            } else {
+                                continue;
+                            }
                         }
 
                         const reasonTxt = isTakeProfit ? tpReasonTxt : slReasonTxt;
