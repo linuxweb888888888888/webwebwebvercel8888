@@ -128,8 +128,7 @@ const SettingsSchema = new mongoose.Schema({
     cyclePauseMinutes: { type: Number, default: 0 },
     cycleResumeMinutes: { type: Number, default: 0 },
     cycleCurrentState: { type: String, default: 'active' }, 
-    cycleNextSwitchTime: { type: Number, default: 0 },
-    mustCloseProfitNext: { type: Boolean, default: false }
+    cycleNextSwitchTime: { type: Number, default: 0 }
 });
 
 // UNIVERSAL HISTORY SCHEMA
@@ -174,7 +173,6 @@ const MainTemplate = mongoose.models.MainTemplate || mongoose.model('MainTemplat
 global.customMaxLeverages = {};
 global.marketSizes = {};
 global.livePrices = global.livePrices || {};
-global.priceChangePct = global.priceChangePct || {};
 let isBinanceFetching = false;
 let isHtxFetching = false;
 
@@ -245,7 +243,6 @@ function startPriceOracle() {
             for (let sym in tickers) { 
                 if (tickers[sym] && tickers[sym].last) {
                     global.livePrices[sym] = tickers[sym].last;
-                    if (tickers[sym].percentage !== undefined) global.priceChangePct[sym] = tickers[sym].percentage;
                 } 
             }
         } catch(e) { } finally { isBinanceFetching = false; }
@@ -259,7 +256,6 @@ function startPriceOracle() {
             for (let sym in tickers) { 
                 if (tickers[sym] && tickers[sym].last) {
                     global.livePrices[sym] = tickers[sym].last;
-                    if (tickers[sym].percentage !== undefined) global.priceChangePct[sym] = tickers[sym].percentage;
                 } 
             }
         } catch(e) { } finally { isHtxFetching = false; }
@@ -367,12 +363,29 @@ async function startBot(userId, subAccount, isPaper) {
                     let cState = state.coinStates[coin.symbol];
                     if (cState.lockUntil && Date.now() < cState.lockUntil) continue;
 
-                    // 24HR CHANGE DIRECTION LOGIC
-                    let activeSide = coin.side || currentSettings.side;
+                    // DYNAMIC LONG/SHORT BALANCER LOGIC
+                    let activeSide = coin.side || currentSettings.side || 'long';
                     if (cState.contracts <= 0) {
-                        const changePct = global.priceChangePct && global.priceChangePct[coin.symbol];
-                        if (changePct !== undefined && changePct !== null) {
-                            activeSide = changePct >= 0 ? 'long' : 'short';
+                        let activeLongs = 0;
+                        let activeShorts = 0;
+                        
+                        // Count currently active positions to find the imbalance
+                        for (let sym in state.coinStates) {
+                            const st = state.coinStates[sym];
+                            if (st.contracts > 0) {
+                                if (st.activeSide === 'long') activeLongs++;
+                                if (st.activeSide === 'short') activeShorts++;
+                            }
+                        }
+
+                        // Force balance: Open whatever side is currently lacking
+                        if (activeLongs > activeShorts) {
+                            activeSide = 'short';
+                        } else if (activeShorts > activeLongs) {
+                            activeSide = 'long';
+                        } else {
+                            // If perfectly balanced, rely on the coin's default setting
+                            activeSide = coin.side || currentSettings.side || 'long';
                         }
                     } else {
                         // Maintain the side it was originally opened with
@@ -510,15 +523,6 @@ async function startBot(userId, subAccount, isPaper) {
                     }
 
                     if (isTakeProfit || isStopLoss) {
-                        if (isStopLoss && botData.globalSettings && botData.globalSettings.mustCloseProfitNext) {
-                            // FIXED: Do not block Global PNL or Dynamic Stop Losses with mustCloseProfitNext!
-                            if (globalSlPnlTarget < 0 && currentPnl <= globalSlPnlTarget) {
-                                // Bypass block to allow dynamic safety net to execute
-                            } else {
-                                continue;
-                            }
-                        }
-
                         const reasonTxt = isTakeProfit ? tpReasonTxt : slReasonTxt;
                         const modeTxt = isPaper ? "PAPER" : "REAL";
                         
@@ -539,14 +543,6 @@ async function startBot(userId, subAccount, isPaper) {
                             
                             const OffsetModel = isPaper ? PaperOffsetRecord : RealOffsetRecord;
                             OffsetModel.create({ userId: userId, symbol: coin.symbol, winnerSymbol: coin.symbol, reason: reasonTxt, netProfit: currentPnl }).catch(()=>{});
-
-                            if (currentPnl < 0) {
-                                if (botData.globalSettings) botData.globalSettings.mustCloseProfitNext = true;
-                                SettingsModel.updateOne({ userId: userId }, { $set: { mustCloseProfitNext: true } }).catch(()=>{});
-                            } else if (currentPnl > 0) {
-                                if (botData.globalSettings) botData.globalSettings.mustCloseProfitNext = false;
-                                SettingsModel.updateOne({ userId: userId }, { $set: { mustCloseProfitNext: false } }).catch(()=>{});
-                            }
 
                             if (isPaper) {
                                 cState.contracts = 0; cState.unrealizedPnl = 0; cState.currentRoi = 0; cState.avgEntry = 0;
@@ -763,7 +759,7 @@ const executeOneMinuteCloser = async () => {
                 runningAccumulation += (w.pnl + l.pnl);
 
                 const isPositiveMatch = (tpMax > 0 && runningAccumulation > 0 && runningAccumulation >= tpMin && runningAccumulation <= tpMax);
-                const isNegativeMatch = (slMin < 0 && runningAccumulation < 0 && runningAccumulation >= slMin && runningAccumulation <= slMax) && !userSetting.mustCloseProfitNext;
+                const isNegativeMatch = (slMin < 0 && runningAccumulation < 0 && runningAccumulation >= slMin && runningAccumulation <= slMax);
 
                 if (!executedGroup && (isPositiveMatch || isNegativeMatch)) {
                     const executionType = isPositiveMatch ? "Group Take Profit" : "Group Stop Loss";
@@ -801,14 +797,6 @@ const executeOneMinuteCloser = async () => {
 
                         const OffsetModel = userSetting.isPaper ? PaperOffsetRecord : RealOffsetRecord;
                         OffsetModel.create({ userId: dbUserId, symbol: `Group of ${i + 1} Coins`, winnerSymbol: `Group of ${i + 1} Coins`, reason: `1-Min Closer Executed (${executionType})`, netProfit: runningAccumulation }).catch(()=>{});
-
-                        if (runningAccumulation < 0) {
-                            await SettingsModel.updateOne({ userId: dbUserId }, { $set: { mustCloseProfitNext: true } }).catch(()=>{});
-                            for (let [pId, bData] of activeBots.entries()) { if (bData.userId === dbUserId && bData.globalSettings) bData.globalSettings.mustCloseProfitNext = true; }
-                        } else if (runningAccumulation > 0) {
-                            await SettingsModel.updateOne({ userId: dbUserId }, { $set: { mustCloseProfitNext: false } }).catch(()=>{});
-                            for (let [pId, bData] of activeBots.entries()) { if (bData.userId === dbUserId && bData.globalSettings) bData.globalSettings.mustCloseProfitNext = false; }
-                        }
                     }
 
                     executedGroup = true;
@@ -1143,7 +1131,7 @@ const executeGlobalProfitMonitor = async () => {
                     }
                     if (finalPairsToClose.length === 0) triggerOffset = false; 
                 } 
-                else if (isFullGroupSl && !userSetting.mustCloseProfitNext) {
+                else if (isFullGroupSl) {
                     let allowSl = false;
                     let limitVal = smartOffsetStopLoss;
                     let projectedLoss = runningAccumulation; 
@@ -1172,7 +1160,6 @@ const executeGlobalProfitMonitor = async () => {
                     if (activeCandidates[0].unrealizedPnl > noPeakSlGatePnl) {
                         allowNoPeakSl = false;
                     }
-                    if (userSetting.mustCloseProfitNext) allowNoPeakSl = false;
 
                     if (allowNoPeakSl) {
                         triggerOffset = true;
@@ -1259,14 +1246,6 @@ const executeGlobalProfitMonitor = async () => {
                                 rollingLossArr.push({ time: Date.now(), amount: Math.abs(finalNetProfit) });
                                 dbUpdates.rollingStopLosses = rollingLossArr;
                             }
-
-                            if (finalNetProfit < 0) {
-                                dbUpdates.mustCloseProfitNext = true; userSetting.mustCloseProfitNext = true;
-                                for (let [pId, bData] of activeBots.entries()) { if (bData.userId === dbUserId && bData.globalSettings) bData.globalSettings.mustCloseProfitNext = true; }
-                            } else if (finalNetProfit > 0) {
-                                dbUpdates.mustCloseProfitNext = false; userSetting.mustCloseProfitNext = false;
-                                for (let [pId, bData] of activeBots.entries()) { if (bData.userId === dbUserId && bData.globalSettings) bData.globalSettings.mustCloseProfitNext = false; }
-                            }
                         }
                     }
                 }
@@ -1291,7 +1270,7 @@ const executeGlobalProfitMonitor = async () => {
 
                     if (smartOffsetNetProfit2 > 0 && netResult >= targetV2) {
                         triggerOffset = true; reason = `V2 Offset Take Profit Executed (Target: $${targetV2.toFixed(4)})`;
-                    } else if (v2SlEnabled && smartOffsetStopLoss2 < 0 && netResult <= smartOffsetStopLoss2 && !userSetting.mustCloseProfitNext) {
+                    } else if (v2SlEnabled && smartOffsetStopLoss2 < 0 && netResult <= smartOffsetStopLoss2) {
                         let allowSl = false;
                         if (smartOffsetMaxLossPerMinute > 0) {
                             if (currentMinuteLoss + Math.abs(netResult) <= smartOffsetMaxLossPerMinute) allowSl = true;
@@ -1363,14 +1342,6 @@ const executeGlobalProfitMonitor = async () => {
                                     rollingLossArr.push({ time: Date.now(), amount: Math.abs(netResult) });
                                     dbUpdates.rollingStopLosses = rollingLossArr;
                                 }
-
-                                if (netResult < 0) {
-                                    dbUpdates.mustCloseProfitNext = true; userSetting.mustCloseProfitNext = true;
-                                    for (let [pId, bData] of activeBots.entries()) { if (bData.userId === dbUserId && bData.globalSettings) bData.globalSettings.mustCloseProfitNext = true; }
-                                } else if (netResult > 0) {
-                                    dbUpdates.mustCloseProfitNext = false; userSetting.mustCloseProfitNext = false;
-                                    for (let [pId, bData] of activeBots.entries()) { if (bData.userId === dbUserId && bData.globalSettings) bData.globalSettings.mustCloseProfitNext = false; }
-                                }
                             }
                         }
                     }
@@ -1438,9 +1409,6 @@ const executeGlobalProfitMonitor = async () => {
 
                         if (successCount > 0) {
                             OffsetModel.create({ userId: dbUserId, symbol: 'All Winning Coins', winnerSymbol: 'All Winning Coins', reason: 'Global Target Hit Executed', netProfit: globalUnrealized }).catch(()=>{});
-
-                            dbUpdates.mustCloseProfitNext = false; userSetting.mustCloseProfitNext = false;
-                            for (let [pId, bData] of activeBots.entries()) { if (bData.userId === dbUserId && bData.globalSettings) bData.globalSettings.mustCloseProfitNext = false; }
                         }
                     }
                 }
@@ -2777,6 +2745,18 @@ const FRONTEND_HTML = [
     '                        </div>',
     '                    </div>',
     '                </div>',
+    '                <!-- PRETTY CLOSED TRADES LOG -->',
+    '                <div class="pro-card" id="user-trades-log" style="margin-top: 24px;">',
+    '                    <h2 class="pro-card-header"><span class="material-symbols-outlined text-green">receipt_long</span> Recent Closed Trades Log</h2>',
+    '                    <div class="table-responsive">',
+    '                        <table class="md-table">',
+    '                            <tr><th>Time</th><th>Asset</th><th>Reason</th><th>Net Profit</th></tr>',
+    '                            <tbody id="pretty-log-tbody">',
+    '                                <tr><td colspan="4" class="text-muted" style="text-align:center;">Loading trade history...</td></tr>',
+    '                            </tbody>',
+    '                        </table>',
+    '                    </div>',
+    '                </div>',
     '                <!-- ACTIVE PROFILES OVERVIEW (NEW) -->',
     '                <div class="pro-card" id="active-profiles-summary" style="margin-top: 24px;">',
     '                    <h2 class="pro-card-header"><span class="material-symbols-outlined text-green">view_list</span> Active Profiles Overview</h2>',
@@ -2940,8 +2920,12 @@ const FRONTEND_HTML = [
     '                    route();',
     '                    if (myUsername !== \'webcoin8888\') {',
     '                        await fetchSettings();',
-    '                        await loadStatus(); ',
-    '                        statusInterval = setInterval(loadStatus, 5000);',
+    '                        await loadStatus();',
+    '                        await loadOffsets();',
+    '                        statusInterval = setInterval(() => {',
+    '                            loadStatus();',
+    '                            loadOffsets();',
+    '                        }, 5000);',
     '                    }',
     '                } catch(e) { logout(); return; }',
     '            } else {',
@@ -3469,13 +3453,19 @@ const FRONTEND_HTML = [
     '            const res = await fetch(\'/api/offsets\', { headers: { \'Authorization\': \'Bearer \' + token } });',
     '            if (!res.ok) return;',
     '            const records = await res.json();',
+    '            ',
+    '            const noData = \'<tr><td colspan="4" class="text-muted" style="padding:20px; text-align:center;">Ledger empty. No trades closed yet.</td></tr>\';',
+    '            ',
     '            if (records.length === 0) {',
-    '                const noData = \'<p class="text-muted" style="padding:20px; text-align:center;">Ledger empty.</p>\';',
     '                if(document.getElementById(\'offsetTableContainer\')) document.getElementById(\'offsetTableContainer\').innerHTML = noData;',
     '                if(document.getElementById(\'offsetTableContainer2\')) document.getElementById(\'offsetTableContainer2\').innerHTML = noData;',
+    '                if(document.getElementById(\'pretty-log-tbody\')) document.getElementById(\'pretty-log-tbody\').innerHTML = noData;',
     '                return;',
     '            }',
-    '            let ih = \'<table class="md-table"><tr><th>Timestamp</th><th>Network Entity</th><th>Directive Reason</th><th>Realized Delta</th></tr>\';',
+    '            ',
+    '            let ihTable = \'<table class="md-table"><tr><th>Timestamp</th><th>Network Entity</th><th>Directive Reason</th><th>Realized Delta</th></tr>\';',
+    '            let prettyRows = \'\';',
+    '            ',
     '            records.forEach(r => {',
     '                const dateObj = new Date(r.timestamp);',
     '                const dStr = dateObj.toLocaleDateString(undefined, {month:\'short\', day:\'numeric\'}) + \' \' + dateObj.toLocaleTimeString(undefined, {hour12:false});',
@@ -3483,16 +3473,22 @@ const FRONTEND_HTML = [
     '                const reasonText = r.reason || (r.loserSymbol ? \'Smart Offset (Legacy)\' : \'Unknown\');',
     '                const net = r.netProfit !== undefined ? r.netProfit : 0;',
     '                const nColor = net >= 0 ? \'text-green\' : \'text-red\';',
-    '                ih += \'<tr>\';',
-    '                ih += \'<td class="text-muted" style="font-size:0.8rem;">\' + dStr + \'</td>\';',
-    '                ih += \'<td class="text-main" style="font-weight:600;">\' + symbolText + \'</td>\';',
-    '                ih += \'<td style="font-weight:500; font-size:0.8rem;">\' + reasonText + \'</td>\';',
-    '                ih += \'<td class="\' + nColor + \'" style="font-weight:700;">\' + (net >= 0 ? \'+\' : \'\') + \'$\' + net.toFixed(4) + \'</td>\';',
-    '                ih += \'</tr>\';',
+    '                ',
+    '                const rowHtml = \'<tr>\' +',
+    '                    \'<td class="text-muted" style="font-size:0.8rem;">\' + dStr + \'</td>\' +',
+    '                    \'<td class="text-main" style="font-weight:600;">\' + symbolText + \'</td>\' +',
+    '                    \'<td style="font-weight:500; font-size:0.8rem;">\' + reasonText + \'</td>\' +',
+    '                    \'<td class="\' + nColor + \'" style="font-weight:700;">\' + (net >= 0 ? \'+\' : \'\') + \'$\' + net.toFixed(4) + \'</td>\' +',
+    '                    \'</tr>\';',
+    '                ',
+    '                ihTable += rowHtml;',
+    '                prettyRows += rowHtml;',
     '            });',
-    '            ih += \'</table>\';',
-    '            if(document.getElementById(\'offsetTableContainer\')) document.getElementById(\'offsetTableContainer\').innerHTML = ih;',
-    '            if(document.getElementById(\'offsetTableContainer2\')) document.getElementById(\'offsetTableContainer2\').innerHTML = ih;',
+    '            ihTable += \'</table>\';',
+    '            ',
+    '            if(document.getElementById(\'offsetTableContainer\')) document.getElementById(\'offsetTableContainer\').innerHTML = ihTable;',
+    '            if(document.getElementById(\'offsetTableContainer2\')) document.getElementById(\'offsetTableContainer2\').innerHTML = ihTable;',
+    '            if(document.getElementById(\'pretty-log-tbody\')) document.getElementById(\'pretty-log-tbody\').innerHTML = prettyRows;',
     '        }',
     '        async function loadStatus() {',
     '            try {',
@@ -3778,7 +3774,7 @@ app.get('*', (req, res) => {
     res.send(FRONTEND_HTML.join('\n'));
 });
 
-// VERCEL EXPORT: Safe Execution Block
+// NODE SERVER EXECUTION
 if (require.main === module) {
     app.listen(PORT, () => console.log(`🚀 Running locally on http://localhost:${PORT}`));
 }
