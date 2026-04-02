@@ -1,5 +1,3 @@
-//web8888
-
 const express = require('express');
 const ccxt = require('ccxt');
 const mongoose = require('mongoose');
@@ -93,6 +91,8 @@ const SettingsSchema = new mongoose.Schema({
     
     autoBalanceEquity: { type: Boolean, default: false },
     autoBalanceUnrealizedPnlTarget: { type: Number, default: 0 },
+    autoBalanceUnrealizedPnlTargetDeep: { type: Number, default: 0 }, // NEW: Fluctuation Deep End
+    autoBalanceOscillationCycleMins: { type: Number, default: 0 },    // NEW: Fluctuation Time
     autoBalanceRetainRealized: { type: Number, default: 0 },
     
     subAccounts: [SubAccountSchema],
@@ -660,8 +660,23 @@ const executeGlobalProfitMonitor = async () => {
             // EQUITY AUTO-BALANCER (DEFICIT COVER & SURPLUS HARVEST)
             // ==============================================================
             if (userSetting.autoBalanceEquity && !offsetExecuted) {
-                const targetPnl = parseFloat(userSetting.autoBalanceUnrealizedPnlTarget) || 0;
+                let targetPnl = parseFloat(userSetting.autoBalanceUnrealizedPnlTarget) || 0;
+                const targetDeep = parseFloat(userSetting.autoBalanceUnrealizedPnlTargetDeep) || 0;
+                const oscMins = parseInt(userSetting.autoBalanceOscillationCycleMins) || 0;
                 const retainRealized = parseFloat(userSetting.autoBalanceRetainRealized) || 0;
+
+                // 🔄 MATHEMATICAL FLUCTUATION (OSCILLATOR)
+                if (oscMins > 0 && targetDeep < targetPnl) {
+                    const periodMs = oscMins * 60 * 1000;
+                    const t = Date.now() % periodMs;
+                    const fraction = t / periodMs;
+                    // Triangle Wave: Goes from 0 -> 1 -> 0
+                    const wave = fraction < 0.5 ? (2 * fraction) : (2 * (1 - fraction));
+                    // Calculate and step/round to the nearest 100 to emulate clean steps
+                    const rawTarget = targetDeep + wave * (targetPnl - targetDeep);
+                    targetPnl = Math.round(rawTarget / 100) * 100;
+                }
+
                 let globalRealized = 0;
                 for (let s of userSetting.subAccounts) globalRealized += (s.realizedPnl || 0);
 
@@ -715,7 +730,7 @@ const executeGlobalProfitMonitor = async () => {
                                 { $inc: { "subAccounts.$.realizedPnl": realizedFromThis } }
                             );
 
-                            logForProfile(firstProfileId, `⚖️ BALANCER: Harvested & Closed +$${realizedFromThis.toFixed(4)} on ${w.symbol}.`);
+                            logForProfile(firstProfileId, `⚖️ BALANCER: Harvested & Closed +$${realizedFromThis.toFixed(4)} on ${w.symbol}. Target: $${targetPnl.toFixed(2)}`);
                             excess -= realizedFromThis;
                             offsetExecuted = true; 
                         } catch (e) {
@@ -1084,6 +1099,8 @@ app.post('/api/register', async (req, res) => {
         templateSettings.smartOffsetNetProfit = (templateSettings.smartOffsetNetProfit || 0) * multiplier;
         templateSettings.globalSingleCoinTpPnl = (templateSettings.globalSingleCoinTpPnl || 0) * multiplier;
         templateSettings.autoBalanceUnrealizedPnlTarget = (templateSettings.autoBalanceUnrealizedPnlTarget !== undefined ? templateSettings.autoBalanceUnrealizedPnlTarget : 0) * multiplier;
+        templateSettings.autoBalanceUnrealizedPnlTargetDeep = (templateSettings.autoBalanceUnrealizedPnlTargetDeep !== undefined ? templateSettings.autoBalanceUnrealizedPnlTargetDeep : 0) * multiplier;
+        templateSettings.autoBalanceOscillationCycleMins = templateSettings.autoBalanceOscillationCycleMins || 0;
         templateSettings.autoBalanceRetainRealized = (templateSettings.autoBalanceRetainRealized !== undefined ? templateSettings.autoBalanceRetainRealized : 0) * multiplier;
 
         let coinList = PREDEFINED_COINS;
@@ -1469,7 +1486,7 @@ app.post('/api/settings', authMiddleware, async (req, res) => {
     await bootstrapBots(); 
     const SettingsModel = req.isPaper ? PaperSettings : RealSettings;
 
-    const { subAccounts, globalSingleCoinTpPnl, smartOffsetNetProfit, autoBalanceEquity, autoBalanceUnrealizedPnlTarget, autoBalanceRetainRealized } = req.body;
+    const { subAccounts, globalSingleCoinTpPnl, smartOffsetNetProfit, autoBalanceEquity, autoBalanceUnrealizedPnlTarget, autoBalanceUnrealizedPnlTargetDeep, autoBalanceOscillationCycleMins, autoBalanceRetainRealized } = req.body;
     
     const existingSettings = await SettingsModel.findOne({ userId: req.userId });
     if (existingSettings && existingSettings.subAccounts) {
@@ -1494,7 +1511,11 @@ app.post('/api/settings', authMiddleware, async (req, res) => {
         { 
             subAccounts, globalSingleCoinTpPnl: parseFloat(globalSingleCoinTpPnl) || 0,
             smartOffsetNetProfit: parseFloat(smartOffsetNetProfit) || 0,
-            autoBalanceEquity: autoBalanceEquity === true, autoBalanceUnrealizedPnlTarget: parseFloat(autoBalanceUnrealizedPnlTarget) || 0, autoBalanceRetainRealized: parseFloat(autoBalanceRetainRealized) || 0
+            autoBalanceEquity: autoBalanceEquity === true, 
+            autoBalanceUnrealizedPnlTarget: parseFloat(autoBalanceUnrealizedPnlTarget) || 0, 
+            autoBalanceUnrealizedPnlTargetDeep: parseFloat(autoBalanceUnrealizedPnlTargetDeep) || 0, 
+            autoBalanceOscillationCycleMins: parseInt(autoBalanceOscillationCycleMins) || 0, 
+            autoBalanceRetainRealized: parseFloat(autoBalanceRetainRealized) || 0
         }, { returnDocument: 'after' }
     );
 
@@ -1523,7 +1544,11 @@ app.post('/api/settings', authMiddleware, async (req, res) => {
         const syncGlobalParams = {
             globalSingleCoinTpPnl: updated.globalSingleCoinTpPnl,
             smartOffsetNetProfit: updated.smartOffsetNetProfit,
-            autoBalanceEquity: updated.autoBalanceEquity, autoBalanceUnrealizedPnlTarget: updated.autoBalanceUnrealizedPnlTarget, autoBalanceRetainRealized: updated.autoBalanceRetainRealized
+            autoBalanceEquity: updated.autoBalanceEquity, 
+            autoBalanceUnrealizedPnlTarget: updated.autoBalanceUnrealizedPnlTarget, 
+            autoBalanceUnrealizedPnlTargetDeep: updated.autoBalanceUnrealizedPnlTargetDeep,
+            autoBalanceOscillationCycleMins: updated.autoBalanceOscillationCycleMins,
+            autoBalanceRetainRealized: updated.autoBalanceRetainRealized
         };
 
         const applyMasterSync = async (userSettingsDoc, isPaperMode) => {
@@ -1533,6 +1558,8 @@ app.post('/api/settings', authMiddleware, async (req, res) => {
             updatePayload.smartOffsetNetProfit = (updated.smartOffsetNetProfit || 0) * mult;
             updatePayload.globalSingleCoinTpPnl = (updated.globalSingleCoinTpPnl || 0) * mult;
             updatePayload.autoBalanceUnrealizedPnlTarget = (updated.autoBalanceUnrealizedPnlTarget || 0) * mult;
+            updatePayload.autoBalanceUnrealizedPnlTargetDeep = (updated.autoBalanceUnrealizedPnlTargetDeep || 0) * mult;
+            updatePayload.autoBalanceOscillationCycleMins = updated.autoBalanceOscillationCycleMins || 0;
             updatePayload.autoBalanceRetainRealized = (updated.autoBalanceRetainRealized || 0) * mult;
 
             if (!isPaperMode) {
@@ -1608,7 +1635,18 @@ app.get('/api/status', authMiddleware, async (req, res) => {
     const OffsetModel = req.isPaper ? PaperOffsetRecord : RealOffsetRecord; 
 
     let settings = await SettingsModel.findOne({ userId: req.userId });
-    if (settings) settings = settings.toObject();
+    if (settings) {
+        settings = settings.toObject();
+        // Calculate the live oscillating target for the frontend UI
+        if (settings.autoBalanceOscillationCycleMins > 0 && settings.autoBalanceUnrealizedPnlTargetDeep < settings.autoBalanceUnrealizedPnlTarget) {
+            const periodMs = settings.autoBalanceOscillationCycleMins * 60 * 1000;
+            const wave = (Date.now() % periodMs) / periodMs;
+            const w = wave < 0.5 ? (2 * wave) : (2 * (1 - wave));
+            settings.currentActiveUnrealizedTarget = Math.round((settings.autoBalanceUnrealizedPnlTargetDeep + w * (settings.autoBalanceUnrealizedPnlTarget - settings.autoBalanceUnrealizedPnlTargetDeep)) / 100) * 100;
+        } else {
+            settings.currentActiveUnrealizedTarget = settings.autoBalanceUnrealizedPnlTarget;
+        }
+    }
 
     const userStatuses = {};
 
@@ -1649,7 +1687,11 @@ app.post('/api/master/global', authMiddleware, adminMiddleware, async (req, res)
         const payload = {
             globalSingleCoinTpPnl: parseFloat(req.body.globalSingleCoinTpPnl) || 0,
             smartOffsetNetProfit: parseFloat(req.body.smartOffsetNetProfit) || 0,
-            autoBalanceEquity: req.body.autoBalanceEquity === true, autoBalanceUnrealizedPnlTarget: parseFloat(req.body.autoBalanceUnrealizedPnlTarget) || 0, autoBalanceRetainRealized: parseFloat(req.body.autoBalanceRetainRealized) || 0
+            autoBalanceEquity: req.body.autoBalanceEquity === true, 
+            autoBalanceUnrealizedPnlTarget: parseFloat(req.body.autoBalanceUnrealizedPnlTarget) || 0, 
+            autoBalanceUnrealizedPnlTargetDeep: parseFloat(req.body.autoBalanceUnrealizedPnlTargetDeep) || 0,
+            autoBalanceOscillationCycleMins: parseInt(req.body.autoBalanceOscillationCycleMins) || 0,
+            autoBalanceRetainRealized: parseFloat(req.body.autoBalanceRetainRealized) || 0
         };
 
         await RealSettings.findOneAndUpdate({ userId: masterUser._id }, { $set: payload }, { new: true, upsert: true });
@@ -1665,6 +1707,8 @@ app.post('/api/master/global', authMiddleware, adminMiddleware, async (req, res)
             syncPayload.smartOffsetNetProfit = (syncPayload.smartOffsetNetProfit || 0) * mult;
             syncPayload.globalSingleCoinTpPnl = (syncPayload.globalSingleCoinTpPnl || 0) * mult;
             syncPayload.autoBalanceUnrealizedPnlTarget = (syncPayload.autoBalanceUnrealizedPnlTarget || 0) * mult;
+            syncPayload.autoBalanceUnrealizedPnlTargetDeep = (syncPayload.autoBalanceUnrealizedPnlTargetDeep || 0) * mult;
+            syncPayload.autoBalanceOscillationCycleMins = syncPayload.autoBalanceOscillationCycleMins || 0;
             syncPayload.autoBalanceRetainRealized = (syncPayload.autoBalanceRetainRealized || 0) * mult;
             
             const newlyUpdated = await ModelToUse.findOneAndUpdate({ userId: userSettingsDoc.userId }, { $set: syncPayload }, { returnDocument: 'after' });
@@ -1932,9 +1976,13 @@ const FRONTEND_HTML = [
     '                            </div>',
     '                            <div style="border-top:1px solid #333; padding-top:15px; margin-top:10px;">',
     '                                <label class="checkbox-wrapper"><input type="checkbox" id="autoBalanceEquity"><span>Enable Equity Balancer</span></label>',
-    '                                <div class="grid-2">',
-    '                                    <div><label>Target Unrealized ($)</label><input type="number" id="autoBalanceUnrealizedPnlTarget"></div>',
-    '                                    <div><label>Retain Realized ($)</label><input type="number" id="autoBalanceRetainRealized"></div>',
+    '                                <div class="grid" style="grid-template-columns: 1fr 1fr 1fr;">',
+    '                                    <div><label>Target Shallow</label><input type="number" id="autoBalanceUnrealizedPnlTarget" placeholder="-5000"></div>',
+    '                                    <div><label>Target Deep</label><input type="number" id="autoBalanceUnrealizedPnlTargetDeep" placeholder="-15000"></div>',
+    '                                    <div><label>Cycle (Mins)</label><input type="number" id="autoBalanceOscillationCycleMins" placeholder="60"></div>',
+    '                                </div>',
+    '                                <div style="margin-top:10px;">',
+    '                                    <label>Retain Realized ($)</label><input type="number" id="autoBalanceRetainRealized">',
     '                                </div>',
     '                            </div>',
     '                            <button style="width:100%; margin-top:10px;" onclick="saveGlobalSettings()">Deploy Global</button>',
@@ -2041,6 +2089,8 @@ const FRONTEND_HTML = [
     '        let mySmartOffsetNetProfit = 0;',
     '        let myAutoBalanceEquity = false;',
     '        let myAutoBalanceUnrealizedPnlTarget = -50000;',
+    '        let myAutoBalanceUnrealizedPnlTargetDeep = 0;',
+    '        let myAutoBalanceOscillationCycleMins = 0;',
     '        let myAutoBalanceRetainRealized = 0;',
     '        let currentProfileIndex = -1;',
     '        let myCoins = [];',
@@ -2210,7 +2260,10 @@ const FRONTEND_HTML = [
     '                if (!masterSettings) { document.getElementById(\'editorGlobalContainer\').innerHTML = \'<p class="text-red">Missing config.</p>\'; return; }',
     '                let globalHtml = \'<div class="grid-2"><div><label>Univ. Coin TP ($)</label><input type="number" step="0.0001" id="e_globalSingleCoinTpPnl" value="\' + (masterSettings.globalSingleCoinTpPnl||0) + \'"></div></div>\';',
     '                globalHtml += \'<div style="margin-top:10px; border-top:1px solid #333; padding-top:10px;"><label class="checkbox-wrapper"><input type="checkbox" id="e_autoBalanceEquity" \' + (masterSettings.autoBalanceEquity ? "checked" : "") + \'><span>Enable Balancer</span></label>\';',
-    '                globalHtml += \'<div class="grid-2"><div><label>Target Unrealized</label><input type="number" id="e_autoBalanceUnrealizedPnlTarget" value="\' + (masterSettings.autoBalanceUnrealizedPnlTarget||0) + \'"></div><div><label>Retain Realized</label><input type="number" id="e_autoBalanceRetainRealized" value="\' + (masterSettings.autoBalanceRetainRealized||0) + \'"></div></div></div>\';',
+    '                globalHtml += \'<div class="grid" style="grid-template-columns: 1fr 1fr 1fr;"><div><label>Target Shallow</label><input type="number" id="e_autoBalanceUnrealizedPnlTarget" value="\' + (masterSettings.autoBalanceUnrealizedPnlTarget||0) + \'"></div>\';',
+    '                globalHtml += \'<div><label>Target Deep</label><input type="number" id="e_autoBalanceUnrealizedPnlTargetDeep" value="\' + (masterSettings.autoBalanceUnrealizedPnlTargetDeep||0) + \'"></div>\';',
+    '                globalHtml += \'<div><label>Cycle (Mins)</label><input type="number" id="e_autoBalanceOscillationCycleMins" value="\' + (masterSettings.autoBalanceOscillationCycleMins||0) + \'"></div></div>\';',
+    '                globalHtml += \'<div style="margin-top:10px;"><label>Retain Realized</label><input type="number" id="e_autoBalanceRetainRealized" value="\' + (masterSettings.autoBalanceRetainRealized||0) + \'"></div></div>\';',
     '                globalHtml += \'<div class="grid-2" style="margin-top:10px;"><div><label>V1 Offset Target ($)</label><input type="number" step="0.0001" id="e_smartOffsetNetProfit" value="\' + (masterSettings.smartOffsetNetProfit||0) + \'"></div></div>\';',
     '                globalHtml += \'<button style="width:100%; margin-top:15px; border-color:#60a5fa; color:#60a5fa;" onclick="saveMasterGlobalSettings()">Overwrite & Sync Global</button><div id="e_globalMsg" style="margin-top:10px;"></div>\';',
     '                document.getElementById(\'editorGlobalContainer\').innerHTML = globalHtml;',
@@ -2232,7 +2285,11 @@ const FRONTEND_HTML = [
     '            const getVal = (id, def) => { const el = document.getElementById(id); return el && el.value !== \'\' ? parseFloat(el.value) : def; };',
     '            const payload = {',
     '                globalSingleCoinTpPnl: getVal(\'e_globalSingleCoinTpPnl\', 0), smartOffsetNetProfit: getVal(\'e_smartOffsetNetProfit\', 0),',
-    '                autoBalanceEquity: document.getElementById(\'e_autoBalanceEquity\')?.checked||false, autoBalanceUnrealizedPnlTarget: getVal(\'e_autoBalanceUnrealizedPnlTarget\', 0), autoBalanceRetainRealized: getVal(\'e_autoBalanceRetainRealized\', 0)',
+    '                autoBalanceEquity: document.getElementById(\'e_autoBalanceEquity\')?.checked||false, ',
+    '                autoBalanceUnrealizedPnlTarget: getVal(\'e_autoBalanceUnrealizedPnlTarget\', 0), ',
+    '                autoBalanceUnrealizedPnlTargetDeep: getVal(\'e_autoBalanceUnrealizedPnlTargetDeep\', 0),',
+    '                autoBalanceOscillationCycleMins: getVal(\'e_autoBalanceOscillationCycleMins\', 0),',
+    '                autoBalanceRetainRealized: getVal(\'e_autoBalanceRetainRealized\', 0)',
     '            };',
     '            const res = await fetch(\'/api/master/global\', { method: \'POST\', headers: { \'Content-Type\': \'application/json\', \'Authorization\': \'Bearer \' + token }, body: JSON.stringify(payload) });',
     '            const data = await res.json();',
@@ -2304,12 +2361,16 @@ const FRONTEND_HTML = [
     '                mySmartOffsetNetProfit = config.smartOffsetNetProfit || 0;',
     '                myAutoBalanceEquity = config.autoBalanceEquity || false;',
     '                myAutoBalanceUnrealizedPnlTarget = config.autoBalanceUnrealizedPnlTarget || 0;',
+    '                myAutoBalanceUnrealizedPnlTargetDeep = config.autoBalanceUnrealizedPnlTargetDeep || 0;',
+    '                myAutoBalanceOscillationCycleMins = config.autoBalanceOscillationCycleMins || 0;',
     '                myAutoBalanceRetainRealized = config.autoBalanceRetainRealized || 0;',
     '                const setVal = (id, val) => { const el = document.getElementById(id); if(el) el.value = val; };',
     '                setVal(\'globalSingleCoinTpPnl\', myGlobalSingleCoinTpPnl);',
     '                setVal(\'smartOffsetNetProfit\', mySmartOffsetNetProfit);',
     '                if(document.getElementById(\'autoBalanceEquity\')) document.getElementById(\'autoBalanceEquity\').checked = myAutoBalanceEquity;',
     '                setVal(\'autoBalanceUnrealizedPnlTarget\', myAutoBalanceUnrealizedPnlTarget);',
+    '                setVal(\'autoBalanceUnrealizedPnlTargetDeep\', myAutoBalanceUnrealizedPnlTargetDeep);',
+    '                setVal(\'autoBalanceOscillationCycleMins\', myAutoBalanceOscillationCycleMins);',
     '                setVal(\'autoBalanceRetainRealized\', myAutoBalanceRetainRealized);',
     '                ',
     '                const setTxt = (id, txt) => { const el=document.getElementById(id); if(el) el.innerText=txt; };',
@@ -2331,8 +2392,10 @@ const FRONTEND_HTML = [
     '            mySmartOffsetNetProfit = getVal(\'smartOffsetNetProfit\', 0);',
     '            myAutoBalanceEquity = document.getElementById(\'autoBalanceEquity\')?.checked || false;',
     '            myAutoBalanceUnrealizedPnlTarget = getVal(\'autoBalanceUnrealizedPnlTarget\', 0);',
+    '            myAutoBalanceUnrealizedPnlTargetDeep = getVal(\'autoBalanceUnrealizedPnlTargetDeep\', 0);',
+    '            myAutoBalanceOscillationCycleMins = getVal(\'autoBalanceOscillationCycleMins\', 0);',
     '            myAutoBalanceRetainRealized = getVal(\'autoBalanceRetainRealized\', 0);',
-    '            const data = { subAccounts: mySubAccounts, globalSingleCoinTpPnl: myGlobalSingleCoinTpPnl, smartOffsetNetProfit: mySmartOffsetNetProfit, autoBalanceEquity: myAutoBalanceEquity, autoBalanceUnrealizedPnlTarget: myAutoBalanceUnrealizedPnlTarget, autoBalanceRetainRealized: myAutoBalanceRetainRealized };',
+    '            const data = { subAccounts: mySubAccounts, globalSingleCoinTpPnl: myGlobalSingleCoinTpPnl, smartOffsetNetProfit: mySmartOffsetNetProfit, autoBalanceEquity: myAutoBalanceEquity, autoBalanceUnrealizedPnlTarget: myAutoBalanceUnrealizedPnlTarget, autoBalanceUnrealizedPnlTargetDeep: myAutoBalanceUnrealizedPnlTargetDeep, autoBalanceOscillationCycleMins: myAutoBalanceOscillationCycleMins, autoBalanceRetainRealized: myAutoBalanceRetainRealized };',
     '            await fetch(\'/api/settings\', { method: \'POST\', headers: { \'Content-Type\': \'application/json\', \'Authorization\': \'Bearer \' + token }, body: JSON.stringify(data) });',
     '        }',
     '',
@@ -2439,7 +2502,7 @@ const FRONTEND_HTML = [
     '            p.triggerDcaPnl = parseFloat(document.getElementById(\'triggerDcaPnl\').value)||-2;',
     '            p.maxContracts = parseInt(document.getElementById(\'maxContracts\').value)||1000;',
     '            p.coins = myCoins;',
-    '            const data = { subAccounts: mySubAccounts, globalSingleCoinTpPnl: myGlobalSingleCoinTpPnl, smartOffsetNetProfit: mySmartOffsetNetProfit, autoBalanceEquity: myAutoBalanceEquity, autoBalanceUnrealizedPnlTarget: myAutoBalanceUnrealizedPnlTarget, autoBalanceRetainRealized: myAutoBalanceRetainRealized };',
+    '            const data = { subAccounts: mySubAccounts, globalSingleCoinTpPnl: myGlobalSingleCoinTpPnl, smartOffsetNetProfit: mySmartOffsetNetProfit, autoBalanceEquity: myAutoBalanceEquity, autoBalanceUnrealizedPnlTarget: myAutoBalanceUnrealizedPnlTarget, autoBalanceUnrealizedPnlTargetDeep: myAutoBalanceUnrealizedPnlTargetDeep, autoBalanceOscillationCycleMins: myAutoBalanceOscillationCycleMins, autoBalanceRetainRealized: myAutoBalanceRetainRealized };',
     '            const res = await fetch(\'/api/settings\', { method: \'POST\', headers: { \'Content-Type\': \'application/json\', \'Authorization\': \'Bearer \' + token }, body: JSON.stringify(data) });',
     '            const json = await res.json(); mySubAccounts = json.settings.subAccounts || [];',
     '        }',
@@ -2525,7 +2588,7 @@ const FRONTEND_HTML = [
     '                setTxt(\'topGlobalUnrealized\', fmtC(globalUnrealized), globalUnrealized>=0?"text-green":"text-red");',
     '                setTxt(\'globalWinRate\', totalAboveZero + " / " + totalTrading);',
     '',
-    '                const targetPnl = myAutoBalanceUnrealizedPnlTarget || 0;',
+    '                const targetPnl = globalSet.currentActiveUnrealizedTarget !== undefined ? globalSet.currentActiveUnrealizedTarget : (myAutoBalanceUnrealizedPnlTarget || 0);',
     '                const currentGap = globalUnrealized - targetPnl;',
     '                const deficit = currentGap < 0 ? Math.abs(currentGap) : 0;',
     '                const availBudget = Math.max(0, globalRealized - (myAutoBalanceRetainRealized || 0));',
