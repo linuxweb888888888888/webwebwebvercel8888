@@ -743,9 +743,10 @@ const executeGlobalProfitMonitor = async () => {
                         }
                     }
                 } 
-                // 2. DEFICIT COVER (Wait for V1 Live, then use those winners to burn losers)
+                // 2. DEFICIT COVER (Incrementally use V1 Live winners to burn losers)
                 else if (globalUnrealized < targetPnl - microTolerance) {
                     let deficit = targetPnl - globalUnrealized;
+                    let availableRealized = Math.max(0, globalRealized - retainRealized);
                     
                     let losers = activeCandidates.filter(c => c.unrealizedPnl < 0).sort((a, b) => a.unrealizedPnl - b.unrealizedPnl);
                     
@@ -768,23 +769,24 @@ const executeGlobalProfitMonitor = async () => {
                         }
                     }
 
-                    // WAIT UNTIL V1 LIVE GETS MORE (>= Deficit)
-                    if (v1PeakRowIndex >= 0 && v1PeakAccumulation >= deficit) {
-                        logForProfile(firstProfileId, `⚙️ BALANCER: V1 Live ($${v1PeakAccumulation.toFixed(2)}) covers Deficit ($${deficit.toFixed(2)}). Harvesting V1 winners...`);
+                    let shortfall = deficit - availableRealized;
+
+                    // A. Incrementally harvest V1 Winners if available to cover the shortfall
+                    if (shortfall > microTolerance && v1PeakRowIndex >= 0 && v1PeakAccumulation > microTolerance) {
+                        let harvestTarget = Math.min(shortfall, v1PeakAccumulation);
+                        logForProfile(firstProfileId, `⚙️ BALANCER: V1 Live ($${v1PeakAccumulation.toFixed(2)}) is partially/fully covering Shortfall ($${shortfall.toFixed(2)}). Harvesting V1 winners...`);
                         
-                        // A. CLOSE V1 WINNERS
                         let v1Winners = [];
                         for(let i = 0; i <= v1PeakRowIndex; i++) {
                             if (v1Candidates[i].unrealizedPnl > 0) v1Winners.push(v1Candidates[i]);
                         }
 
-                        let harvestedRealized = 0;
-                        let shortfall = deficit; // Amount of winners we need to harvest
+                        let remainingToHarvest = harvestTarget;
 
                         for (let w of v1Winners) {
-                            if (shortfall <= microTolerance) break;
+                            if (remainingToHarvest <= microTolerance) break;
                             let winAmount = w.unrealizedPnl;
-                            let closeFraction = winAmount > shortfall ? (shortfall / winAmount) : 1;
+                            let closeFraction = winAmount > remainingToHarvest ? (remainingToHarvest / winAmount) : 1;
                             let closeQty = Math.max(1, Math.floor(w.contracts * closeFraction));
                             if (closeQty > w.contracts) closeQty = w.contracts;
 
@@ -820,78 +822,76 @@ const executeGlobalProfitMonitor = async () => {
                                 await SettingsModel.updateOne({ userId: dbUserId, "subAccounts._id": w.subAccount._id }, { $inc: { "subAccounts.$.realizedPnl": realizedFromThis } });
 
                                 logForProfile(firstProfileId, `⚖️ DEFICIT COVER: Harvested +$${realizedFromThis.toFixed(4)} of ${w.symbol} (V1 Live).`);
-                                shortfall -= realizedFromThis;
-                                harvestedRealized += realizedFromThis;
+                                remainingToHarvest -= realizedFromThis;
+                                availableRealized += realizedFromThis; // Add this newly harvested profit to our budget!
                                 offsetExecuted = true;
                             } catch (e) {
                                 logForProfile(firstProfileId, `❌ DEFICIT WINNER ERR [${w.symbol}]: ${e.message}`);
                             }
                         }
+                    }
 
-                        // B. USE HARVESTED REALIZED PROFIT TO BURN LOSERS
-                        let budget = harvestedRealized;
-                        const cooldownSecs = parseInt(userSetting.autoBalanceLoserCooldownSecs) || 0;
-                        const lastLoserTime = global.lastDeficitLoserCloseTime.get(dbUserId) || 0;
+                    // B. USE THE AVAILABLE REALIZED PROFIT TO BURN LOSERS
+                    let budget = Math.min(deficit, availableRealized);
+                    const cooldownSecs = parseInt(userSetting.autoBalanceLoserCooldownSecs) || 0;
+                    const lastLoserTime = global.lastDeficitLoserCloseTime.get(dbUserId) || 0;
 
-                        if (budget >= microTolerance && losers.length > 0) {
-                            if (Date.now() - lastLoserTime >= cooldownSecs * 1000) {
-                                logForProfile(firstProfileId, `⚙️ BALANCER: Burning losers with harvested V1 Live budget: $${budget.toFixed(2)}`);
+                    if (budget >= microTolerance && losers.length > 0) {
+                        if (Date.now() - lastLoserTime >= cooldownSecs * 1000) {
+                            logForProfile(firstProfileId, `⚙️ BALANCER: Burning losers with available budget: $${budget.toFixed(2)}`);
 
-                                for (let l of losers) {
-                                    if (budget <= microTolerance) break;
-                                    let lossAmount = Math.abs(l.unrealizedPnl);
-                                    let closeFraction = lossAmount > budget ? (budget / lossAmount) : 1;
-                                    let closeQty = Math.max(1, Math.floor(l.contracts * closeFraction));
-                                    if (closeQty > l.contracts) closeQty = l.contracts;
+                            for (let l of losers) {
+                                if (budget <= microTolerance) break;
+                                let lossAmount = Math.abs(l.unrealizedPnl);
+                                let closeFraction = lossAmount > budget ? (budget / lossAmount) : 1;
+                                let closeQty = Math.max(1, Math.floor(l.contracts * closeFraction));
+                                if (closeQty > l.contracts) closeQty = l.contracts;
 
-                                    let lossRealized = -(lossAmount * (closeQty / l.contracts));
+                                let lossRealized = -(lossAmount * (closeQty / l.contracts));
 
-                                    try {
-                                        const bData = activeBots.get(l.profileId);
-                                        if (!bData) continue;
-                                        const bState = bData.state.coinStates[l.symbol];
-                                        if (!bState) continue;
-                                        
-                                        const actualLev = parseInt(l.actualLeverage) || 10;
+                                try {
+                                    const bData = activeBots.get(l.profileId);
+                                    if (!bData) continue;
+                                    const bState = bData.state.coinStates[l.symbol];
+                                    if (!bState) continue;
+                                    
+                                    const actualLev = parseInt(l.actualLeverage) || 10;
 
-                                        // BLOCK IMMEDIATE RE-ENTRY BY SETTING COOLDOWN TIME NOW
-                                        global.lastDeficitLoserCloseTime.set(dbUserId, Date.now());
+                                    // BLOCK IMMEDIATE RE-ENTRY BY SETTING COOLDOWN TIME NOW
+                                    global.lastDeficitLoserCloseTime.set(dbUserId, Date.now());
 
-                                        if (!l.isPaper) {
-                                            const closeSide = l.side === 'long' ? 'sell' : 'buy';
-                                            await bData.exchange.createOrder(l.symbol, 'market', closeSide, closeQty, undefined, { offset: 'close', reduceOnly: true, lever_rate: actualLev });
-                                        }
-
-                                        await OffsetModel.create({
-                                            userId: dbUserId, symbol: l.symbol, side: l.side,
-                                            openPrice: bState.avgEntry, closePrice: bState.currentPrice, roi: bState.currentRoi,
-                                            netProfit: lossRealized, reason: 'Deficit Cover (Loser)'
-                                        });
-
-                                        if (closeQty >= bState.contracts - 0.0001) {
-                                            bState.contracts = 0; bState.unrealizedPnl = 0; bState.avgEntry = 0; bState.dcaCount = 0;
-                                        } else {
-                                            bState.contracts -= closeQty;
-                                        }
-                                        bState.lockUntil = Date.now() + 15000;
-
-                                        l.subAccount.realizedPnl = (l.subAccount.realizedPnl || 0) + lossRealized;
-                                        await SettingsModel.updateOne({ userId: dbUserId, "subAccounts._id": l.subAccount._id }, { $inc: { "subAccounts.$.realizedPnl": lossRealized } });
-
-                                        logForProfile(firstProfileId, `⚖️ DEFICIT COVER: Burned -$${Math.abs(lossRealized).toFixed(4)} of ${l.symbol}.`);
-                                        
-                                        offsetExecuted = true;
-                                        
-                                        // 🛑 BREAK: ONLY 1 LOSER ALLOWED PER COOLDOWN CYCLE!
-                                        break; 
-                                    } catch (e) {
-                                        logForProfile(firstProfileId, `❌ DEFICIT LOSER ERR [${l.symbol}]: ${e.message}`);
+                                    if (!l.isPaper) {
+                                        const closeSide = l.side === 'long' ? 'sell' : 'buy';
+                                        await bData.exchange.createOrder(l.symbol, 'market', closeSide, closeQty, undefined, { offset: 'close', reduceOnly: true, lever_rate: actualLev });
                                     }
+
+                                    await OffsetModel.create({
+                                        userId: dbUserId, symbol: l.symbol, side: l.side,
+                                        openPrice: bState.avgEntry, closePrice: bState.currentPrice, roi: bState.currentRoi,
+                                        netProfit: lossRealized, reason: 'Deficit Cover (Loser)'
+                                    });
+
+                                    if (closeQty >= bState.contracts - 0.0001) {
+                                        bState.contracts = 0; bState.unrealizedPnl = 0; bState.avgEntry = 0; bState.dcaCount = 0;
+                                    } else {
+                                        bState.contracts -= closeQty;
+                                    }
+                                    bState.lockUntil = Date.now() + 15000;
+
+                                    l.subAccount.realizedPnl = (l.subAccount.realizedPnl || 0) + lossRealized;
+                                    await SettingsModel.updateOne({ userId: dbUserId, "subAccounts._id": l.subAccount._id }, { $inc: { "subAccounts.$.realizedPnl": lossRealized } });
+
+                                    logForProfile(firstProfileId, `⚖️ DEFICIT COVER: Burned -$${Math.abs(lossRealized).toFixed(4)} of ${l.symbol}.`);
+                                    
+                                    offsetExecuted = true;
+                                    
+                                    // 🛑 BREAK: ONLY 1 LOSER ALLOWED PER COOLDOWN CYCLE!
+                                    break; 
+                                } catch (e) {
+                                    logForProfile(firstProfileId, `❌ DEFICIT LOSER ERR [${l.symbol}]: ${e.message}`);
                                 }
                             }
                         }
-                    } else {
-                        // DO NOTHING, Wait until V1 Live gets more to cover the entire deficit
                     }
                 }
             }
@@ -2672,36 +2672,41 @@ const FRONTEND_HTML = [
     '                        let planHtml = "";',
     '                        let lList = activeCandidates.filter(c => c.pnl < 0).sort((a,b) => a.pnl - b.pnl);',
     '',
-    '                        if (peakRowIndex >= 0 && peakAccumulation >= deficit) {',
-    '                            planHtml += "<div style=\'margin-bottom:4px; color:#aaa;\'>1. V1 Live ($" + peakAccumulation.toFixed(2) + ") covers Deficit ($" + deficit.toFixed(2) + "). Harvesting V1 winners...</div>";',
+    '                        let sTemp = deficit - availBudget;',
+    '                        let bTemp = availBudget;',
+    '                        ',
+    '                        if (sTemp > 0 && peakRowIndex >= 0 && peakAccumulation > 0) {',
+    '                            let harvestTarget = Math.min(sTemp, peakAccumulation);',
+    '                            planHtml += "<div style=\'margin-bottom:4px; color:#aaa;\'>1. V1 Live ($" + peakAccumulation.toFixed(2) + ") is providing $" + harvestTarget.toFixed(2) + " for Shortfall. Harvesting V1 winners...</div>";',
     '                            let v1Winners = [];',
     '                            for(let i=0; i<=peakRowIndex; i++) { if(activeCandidates[i].pnl > 0) v1Winners.push(activeCandidates[i]); }',
-    '                            let sTemp = deficit;',
-    '                            let bTemp = 0;',
+    '                            ',
+    '                            let remainingHarvest = harvestTarget;',
     '                            for (let w of v1Winners) {',
-    '                                if (sTemp <= 0) break;',
-    '                                let useAmt = Math.min(w.pnl, sTemp);',
+    '                                if (remainingHarvest <= 0) break;',
+    '                                let useAmt = Math.min(w.pnl, remainingHarvest);',
     '                                planHtml += "<div class=\'flex-between text-green\' style=\'padding:4px; background:#0a200a; margin-bottom:2px;\'><span>" + w.symbol + "</span><span>+$" + useAmt.toFixed(4) + "</span></div>";',
+    '                                remainingHarvest -= useAmt;',
     '                                sTemp -= useAmt;',
     '                                bTemp += useAmt;',
     '                            }',
-    '                            ',
-    '                            let eBudget = bTemp;',
-    '                            if (eBudget > 0 && lList.length > 0) {',
-    '                                planHtml += "<div style=\'margin-top:8px; margin-bottom:4px; color:#aaa;\'>2. Target Losers to Burn using V1 Realized Budget ($" + eBudget.toFixed(2) + ")</div>";',
-    '                                for (let l of lList) {',
-    '                                    if (eBudget <= 0) break;',
-    '                                    let lossAmt = Math.abs(l.pnl);',
-    '                                    let useAmt = Math.min(lossAmt, eBudget);',
-    '                                    planHtml += "<div class=\'flex-between text-red\' style=\'padding:4px; background:#200a0a; margin-bottom:2px;\'><span>" + l.symbol + "</span><span>-$" + useAmt.toFixed(4) + "</span></div>";',
-    '                                    eBudget -= useAmt;',
-    '                                }',
-    '                            }',
-    '                        } else {',
-    '                            planHtml += "<div style=\'margin-bottom:4px; color:#aaa;\'>1. Waiting for V1 Live ($" + peakAccumulation.toFixed(2) + ") to reach Deficit ($" + deficit.toFixed(2) + ")</div>";',
-    '                            planHtml += "<div class=\'text-muted\'>Losers will NOT be covered until V1 Live covers the entire deficit.</div>";',
+    '                        } else if (sTemp > 0) {',
+    '                            planHtml += "<div style=\'margin-bottom:4px; color:#aaa;\'>1. Need V1 Live to generate winners to cover Shortfall ($" + sTemp.toFixed(2) + ")</div>";',
     '                        }',
     '                        ',
+    '                        let eBudget = Math.min(deficit, bTemp);',
+    '                        if (eBudget > 0 && lList.length > 0) {',
+    '                            planHtml += "<div style=\'margin-top:8px; margin-bottom:4px; color:#aaa;\'>2. Target Losers to Burn using Budget ($" + eBudget.toFixed(2) + ")</div>";',
+    '                            for (let l of lList) {',
+    '                                if (eBudget <= 0) break;',
+    '                                let lossAmt = Math.abs(l.pnl);',
+    '                                let useAmt = Math.min(lossAmt, eBudget);',
+    '                                planHtml += "<div class=\'flex-between text-red\' style=\'padding:4px; background:#200a0a; margin-bottom:2px;\'><span>" + l.symbol + "</span><span>-$" + useAmt.toFixed(4) + "</span></div>";',
+    '                                eBudget -= useAmt;',
+    '                            }',
+    '                        }',
+    '                        ',
+    '                        if (!planHtml) planHtml = "<span class=\'text-muted\'>No positions available to cover.</span>";',
     '                        document.getElementById("cover-plan-list").innerHTML = planHtml;',
     '                        coverPlanContainer.style.display = "block";',
     '                    } else {',
