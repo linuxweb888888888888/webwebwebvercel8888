@@ -659,28 +659,36 @@ const executeGlobalProfitMonitor = async () => {
             let offsetExecuted = false;
 
             // ==============================================================
-            // GLOBAL DCA RECOVERY (MATH BASED WITH EXPONENTIAL STEP)
+            // GLOBAL DCA RECOVERY (MATH BASED WITH FAST-FORWARD STEP)
             // ==============================================================
             if (userSetting.autoBalanceEquity && !offsetExecuted) {
-                // Target and Base Trigger are already multiplied by qtyMultiplier in DB
                 const targetPnl = parseFloat(userSetting.autoBalanceUnrealizedPnlTarget) || 0;
                 const baseTriggerPnl = parseFloat(userSetting.globalDcaRecoveryTriggerPnl) || -50.0;
-                
-                // Active trigger calculates the exponential step requirement (e.g. -9.9k -> -19.8k -> -39.6k)
-                const currentGlobalStep = userSetting.globalDcaStep || 0;
-                const activeTriggerPnl = baseTriggerPnl * Math.pow(2, currentGlobalStep);
+                let currentGlobalStep = userSetting.globalDcaStep || 0;
 
-                // 1. Reset logic: If PNL has recovered above the base trigger, reset step to 0
+                // Calculate what step we SHOULD be at mathematically based on current PNL
+                let requiredStep = 0;
+                if (baseTriggerPnl < 0 && globalUnrealized < 0) {
+                    let testTrigger = baseTriggerPnl;
+                    while (globalUnrealized <= testTrigger) {
+                        requiredStep++;
+                        testTrigger = baseTriggerPnl * Math.pow(2, requiredStep);
+                    }
+                }
+
+                // 1. Reset logic: If PNL recovered above base trigger, clear step
                 if (globalUnrealized > baseTriggerPnl && currentGlobalStep > 0) {
                     await SettingsModel.updateOne({ _id: userSetting._id }, { $set: { globalDcaStep: 0 } });
-                    userSetting.globalDcaStep = 0; 
+                    userSetting.globalDcaStep = 0;
+                    currentGlobalStep = 0;
                     logForProfile(firstProfileId, `✅ GLOBAL DCA: Net PNL recovered above base trigger ($${baseTriggerPnl.toFixed(2)}). Resetting Global Step to 0.`);
                 }
 
-                // 2. Execute Math Recovery if PNL drops below the ACTIVE step trigger
-                if (baseTriggerPnl < 0 && globalUnrealized <= activeTriggerPnl && activeCandidates.length > 0) {
+                // 2. Execute if we mathematically passed the current active step limit
+                if (baseTriggerPnl < 0 && requiredStep > currentGlobalStep && activeCandidates.length > 0) {
                     
-                    logForProfile(firstProfileId, `⚙️ GLOBAL DCA: Net PNL ($${globalUnrealized.toFixed(2)}) hit active trigger ($${activeTriggerPnl.toFixed(2)} / Step ${currentGlobalStep}). Executing math recovery...`);
+                    const activeTriggerPnl = baseTriggerPnl * Math.pow(2, currentGlobalStep);
+                    logForProfile(firstProfileId, `⚙️ GLOBAL DCA: Net PNL ($${globalUnrealized.toFixed(2)}) breached trigger ($${activeTriggerPnl.toFixed(2)}). Executing math recovery...`);
 
                     const numCoins = activeCandidates.length;
                     const gapToTarget = targetPnl - globalUnrealized; 
@@ -693,8 +701,7 @@ const executeGlobalProfitMonitor = async () => {
                             const bState = bData.state.coinStates[c.symbol];
                             if (!bState) continue;
 
-                            // Skip this individual coin if it's currently locked to prevent API spam,
-                            // but DO NOT block the rest of the portfolio from receiving the global DCA blast.
+                            // If individual coin is locked, skip it, but don't block the portfolio blast
                             if (bState.lockUntil && Date.now() < bState.lockUntil) continue;
 
                             const contractSize = global.marketSizes[c.symbol] || 1;
@@ -718,7 +725,7 @@ const executeGlobalProfitMonitor = async () => {
                             }
 
                             bState.dcaCount = (bState.dcaCount || 0) + 1;
-                            bState.lockUntil = Date.now() + 60000; 
+                            bState.lockUntil = Date.now() + 60000; // 1 min cool-down
                             bState.lastDcaTime = Date.now();
 
                             await OffsetModel.create({
@@ -734,10 +741,10 @@ const executeGlobalProfitMonitor = async () => {
                         }
                     }
 
-                    // Increment Global Step so it doesn't infinitely spam on the very next 6-second tick
+                    // Fast-Forward the step exactly to where PNL currently is so we don't spam orders
                     if (offsetExecuted) {
-                        await SettingsModel.updateOne({ _id: userSetting._id }, { $inc: { globalDcaStep: 1 } });
-                        userSetting.globalDcaStep = currentGlobalStep + 1;
+                        await SettingsModel.updateOne({ _id: userSetting._id }, { $set: { globalDcaStep: requiredStep } });
+                        userSetting.globalDcaStep = requiredStep;
                     }
                 }
             }
