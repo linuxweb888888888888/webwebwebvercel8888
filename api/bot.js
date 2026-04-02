@@ -676,9 +676,10 @@ const executeGlobalProfitMonitor = async () => {
                     const fraction = t / periodMs;
                     // Triangle Wave: Goes from 0 -> 1 -> 0
                     const wave = fraction < 0.5 ? (2 * fraction) : (2 * (1 - fraction));
-                    // Calculate and step/round to the nearest 100 to emulate clean steps
+                    // Calculate dynamic step based on qtyMultiplier
+                    const step = 0.001 * multiplier;
                     const rawTarget = targetDeep + wave * (targetPnl - targetDeep);
-                    targetPnl = Math.round(rawTarget / 100) * 100;
+                    targetPnl = Math.round(rawTarget / step) * step;
                 }
 
                 let globalRealized = 0;
@@ -1662,7 +1663,10 @@ app.get('/api/status', authMiddleware, async (req, res) => {
             const periodMs = settings.autoBalanceOscillationCycleMins * 60 * 1000;
             const wave = (Date.now() % periodMs) / periodMs;
             const w = wave < 0.5 ? (2 * wave) : (2 * (1 - wave));
-            settings.currentActiveUnrealizedTarget = Math.round((settings.autoBalanceUnrealizedPnlTargetDeep + w * (settings.autoBalanceUnrealizedPnlTarget - settings.autoBalanceUnrealizedPnlTargetDeep)) / 100) * 100;
+            const mult = settings.qtyMultiplier || 1;
+            const step = 0.001 * mult;
+            const rawTarget = settings.autoBalanceUnrealizedPnlTargetDeep + w * (settings.autoBalanceUnrealizedPnlTarget - settings.autoBalanceUnrealizedPnlTargetDeep);
+            settings.currentActiveUnrealizedTarget = Math.round(rawTarget / step) * step;
         } else {
             settings.currentActiveUnrealizedTarget = settings.autoBalanceUnrealizedPnlTarget;
         }
