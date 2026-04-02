@@ -93,10 +93,7 @@ const SettingsSchema = new mongoose.Schema({
     
     autoBalanceEquity: { type: Boolean, default: false },
     autoBalanceUnrealizedPnlTarget: { type: Number, default: 0 },
-    autoBalanceUnrealizedPnlTargetDeep: { type: Number, default: 0 }, 
-    autoBalanceOscillationCycleMins: { type: Number, default: 0 },    
     autoBalanceRetainRealized: { type: Number, default: 0 },
-    autoBalanceLoserCooldownSecs: { type: Number, default: 0 }, // Loser Cover Cooldown
     
     subAccounts: [SubAccountSchema],
 
@@ -235,7 +232,6 @@ function startPriceOracle() {
 // 3. MULTI-MODE BOT ENGINE STATE
 // ==========================================
 global.activeBots = global.activeBots || new Map();
-global.lastDeficitLoserCloseTime = global.lastDeficitLoserCloseTime || new Map(); // Cooldown Tracker
 const activeBots = global.activeBots;
 
 function logForProfile(profileId, msg) {
@@ -658,32 +654,14 @@ const executeGlobalProfitMonitor = async () => {
             if (!firstProfileId || activeCandidates.length === 0) continue;
 
             const targetV1 = smartOffsetNetProfit > 0 ? smartOffsetNetProfit : 0;
-            
-            // TRACKER: Prevent Double-Execution on the same coin within a single loop
-            let handledSymbols = new Set();
+            let offsetExecuted = false;
 
             // ==============================================================
             // EQUITY AUTO-BALANCER (DEFICIT COVER & SURPLUS HARVEST)
             // ==============================================================
-            if (userSetting.autoBalanceEquity) {
-                let targetPnl = parseFloat(userSetting.autoBalanceUnrealizedPnlTarget) || 0;
-                const targetDeep = parseFloat(userSetting.autoBalanceUnrealizedPnlTargetDeep) || 0;
-                const oscMins = parseInt(userSetting.autoBalanceOscillationCycleMins) || 0;
+            if (userSetting.autoBalanceEquity && !offsetExecuted) {
+                const targetPnl = parseFloat(userSetting.autoBalanceUnrealizedPnlTarget) || 0;
                 const retainRealized = parseFloat(userSetting.autoBalanceRetainRealized) || 0;
-
-                // 🔄 MATHEMATICAL FLUCTUATION (OSCILLATOR)
-                if (oscMins > 0 && targetDeep < targetPnl) {
-                    const periodMs = oscMins * 60 * 1000;
-                    const t = Date.now() % periodMs;
-                    const fraction = t / periodMs;
-                    // Triangle Wave: Goes from 0 -> 1 -> 0
-                    const wave = fraction < 0.5 ? (2 * fraction) : (2 * (1 - fraction));
-                    // Calculate dynamic step based on qtyMultiplier
-                    const step = 0.001 * multiplier;
-                    const rawTarget = targetDeep + wave * (targetPnl - targetDeep);
-                    targetPnl = Math.round(rawTarget / step) * step;
-                }
-
                 let globalRealized = 0;
                 for (let s of userSetting.subAccounts) globalRealized += (s.realizedPnl || 0);
 
@@ -696,9 +674,7 @@ const executeGlobalProfitMonitor = async () => {
                     let winners = activeCandidates.filter(c => c.unrealizedPnl > 0).sort((a, b) => b.unrealizedPnl - a.unrealizedPnl);
 
                     for (let w of winners) {
-                        if (handledSymbols.has(w.symbol)) continue;
                         if (excess <= balanceTolerance) break;
-                        
                         let winAmount = w.unrealizedPnl;
                         let closeFraction = winAmount > excess ? (excess / winAmount) : 1;
                         let closeQty = Math.max(1, Math.floor(w.contracts * closeFraction));
@@ -739,282 +715,221 @@ const executeGlobalProfitMonitor = async () => {
                                 { $inc: { "subAccounts.$.realizedPnl": realizedFromThis } }
                             );
 
-                            logForProfile(firstProfileId, `⚖️ BALANCER: Harvested & Closed +$${realizedFromThis.toFixed(4)} on ${w.symbol}. Target: $${targetPnl.toFixed(2)}`);
+                            logForProfile(firstProfileId, `⚖️ BALANCER: Harvested & Closed +$${realizedFromThis.toFixed(4)} on ${w.symbol}.`);
                             excess -= realizedFromThis;
-                            handledSymbols.add(w.symbol); // Mark as processed
+                            offsetExecuted = true; 
                         } catch (e) {
                             logForProfile(firstProfileId, `❌ BALANCER HARVEST ERROR [${w.symbol}]: ${e.message}`);
                         }
                     }
                 } 
-                // 2. DEFICIT COVER 
+                // 2. DEFICIT COVER (Instantly close winners & losers to wipe out the deficit)
                 else if (globalUnrealized < targetPnl - microTolerance) {
                     let deficit = targetPnl - globalUnrealized;
-                    let losers = activeCandidates.filter(c => c.unrealizedPnl < 0 && !handledSymbols.has(c.symbol)).sort((a, b) => a.unrealizedPnl - b.unrealizedPnl);
-                    let availBudget = Math.max(0, globalRealized - retainRealized);
-
-                    // Pre-calculate V1 Candidates and Peak to see if combined firepower works
-                    let v1Candidates = [...activeCandidates].filter(c => !handledSymbols.has(c.symbol)).sort((a, b) => b.unrealizedPnl - a.unrealizedPnl);
-                    let v1TotalCoins = v1Candidates.length;
-                    let v1TotalPairs = Math.floor(v1TotalCoins / 2);
-                    let v1PeakAccumulation = 0;
-                    let v1PeakRowIndex = -1;
-                    let v1RunningAccumulation = 0;
+                    let availableRealized = Math.max(0, globalRealized - retainRealized);
                     
-                    for (let i = 0; i < v1TotalPairs; i++) {
-                        const w = v1Candidates[i];
-                        const l = v1Candidates[v1TotalCoins - v1TotalPairs + i];
-                        const netResult = w.unrealizedPnl + l.unrealizedPnl;
-                        v1RunningAccumulation += netResult;
-                        if (v1RunningAccumulation > v1PeakAccumulation) {
-                            v1PeakAccumulation = v1RunningAccumulation;
-                            v1PeakRowIndex = i;
+                    let losers = activeCandidates.filter(c => c.unrealizedPnl < 0).sort((a, b) => a.unrealizedPnl - b.unrealizedPnl);
+                    let winners = activeCandidates.filter(c => c.unrealizedPnl > 0).sort((a, b) => b.unrealizedPnl - a.unrealizedPnl);
+
+                    // A. Calculate and CLOSE WINNERS to generate the cash to cover the deficit
+                    if (availableRealized < deficit && winners.length > 0) {
+                        let shortfall = deficit - availableRealized;
+                        logForProfile(firstProfileId, `⚙️ BALANCER: Deficit ($${deficit.toFixed(2)}) > Cash. Closing winners to cover shortfall ($${shortfall.toFixed(2)})...`);
+
+                        for (let w of winners) {
+                            if (shortfall <= microTolerance) break;
+                            let winAmount = w.unrealizedPnl;
+                            let closeFraction = winAmount > shortfall ? (shortfall / winAmount) : 1;
+                            let closeQty = Math.max(1, Math.floor(w.contracts * closeFraction));
+                            if (closeQty > w.contracts) closeQty = w.contracts;
+
+                            let realizedFromThis = winAmount * (closeQty / w.contracts);
+
+                            try {
+                                const bData = activeBots.get(w.profileId);
+                                if (!bData) continue;
+                                const bState = bData.state.coinStates[w.symbol];
+                                if (!bState) continue;
+
+                                const actualLev = parseInt(w.actualLeverage) || 10;
+
+                                if (!w.isPaper) {
+                                    const closeSide = w.side === 'long' ? 'sell' : 'buy';
+                                    await bData.exchange.createOrder(w.symbol, 'market', closeSide, closeQty, undefined, { offset: 'close', reduceOnly: true, lever_rate: actualLev });
+                                }
+
+                                await OffsetModel.create({
+                                    userId: dbUserId, symbol: w.symbol, side: w.side,
+                                    openPrice: bState.avgEntry, closePrice: bState.currentPrice, roi: bState.currentRoi,
+                                    netProfit: realizedFromThis, reason: 'Deficit Cover (Winner)'
+                                });
+
+                                if (closeQty >= bState.contracts - 0.0001) {
+                                    bState.contracts = 0; bState.unrealizedPnl = 0; bState.avgEntry = 0; bState.dcaCount = 0;
+                                } else {
+                                    bState.contracts -= closeQty;
+                                }
+                                bState.lockUntil = Date.now() + 15000;
+
+                                w.subAccount.realizedPnl = (w.subAccount.realizedPnl || 0) + realizedFromThis;
+                                await SettingsModel.updateOne({ userId: dbUserId, "subAccounts._id": w.subAccount._id }, { $inc: { "subAccounts.$.realizedPnl": realizedFromThis } });
+
+                                logForProfile(firstProfileId, `⚖️ DEFICIT COVER: Closed +$${realizedFromThis.toFixed(4)} of ${w.symbol}.`);
+                                shortfall -= realizedFromThis;
+                                availableRealized += realizedFromThis;
+                                offsetExecuted = true;
+                            } catch (e) {
+                                logForProfile(firstProfileId, `❌ DEFICIT WINNER ERR [${w.symbol}]: ${e.message}`);
+                            }
                         }
                     }
 
-                    let requiresCombined = false;
-                    
-                    // Check if we need to supplement our budget with V1 winners
-                    if (availBudget >= deficit) {
-                        requiresCombined = false;
-                    } else if (v1PeakRowIndex >= 0 && (availBudget + v1PeakAccumulation) >= deficit) {
-                        requiresCombined = true;
-                    }
+                    // B. Close the LOSERS using the available realized cash to eliminate the deficit completely
+                    let budget = Math.min(deficit, availableRealized);
 
-                    // If we have enough firepower (either raw budget, or budget + V1 peak)
-                    if (availBudget >= deficit || requiresCombined) {
-                        let workingBudget = availBudget;
-                        
-                        // Step A: Harvest V1 winners if we need to supplement the budget
-                        if (requiresCombined) {
-                            logForProfile(firstProfileId, `⚙️ BALANCER: Budget ($${availBudget.toFixed(2)}) + V1 Live ($${v1PeakAccumulation.toFixed(2)}) covers Deficit ($${deficit.toFixed(2)}). Harvesting V1 winners...`);
-                            
-                            let v1Winners = [];
-                            for(let i = 0; i <= v1PeakRowIndex; i++) {
-                                if (v1Candidates[i].unrealizedPnl > 0) v1Winners.push(v1Candidates[i]);
-                            }
+                    if (budget >= microTolerance && losers.length > 0) {
+                        logForProfile(firstProfileId, `⚙️ BALANCER: Closing losers to eliminate deficit. Budget: $${budget.toFixed(2)}`);
 
-                            let shortfall = deficit - availBudget; 
+                        for (let l of losers) {
+                            if (budget <= microTolerance) break;
+                            let lossAmount = Math.abs(l.unrealizedPnl);
+                            let closeFraction = lossAmount > budget ? (budget / lossAmount) : 1;
+                            let closeQty = Math.max(1, Math.floor(l.contracts * closeFraction));
+                            if (closeQty > l.contracts) closeQty = l.contracts;
 
-                            for (let w of v1Winners) {
-                                if (handledSymbols.has(w.symbol)) continue;
-                                if (shortfall <= microTolerance) break;
+                            let lossRealized = -(lossAmount * (closeQty / l.contracts));
+
+                            try {
+                                const bData = activeBots.get(l.profileId);
+                                if (!bData) continue;
+                                const bState = bData.state.coinStates[l.symbol];
+                                if (!bState) continue;
                                 
-                                let winAmount = w.unrealizedPnl;
-                                let closeFraction = winAmount > shortfall ? (shortfall / winAmount) : 1;
-                                let closeQty = Math.max(1, Math.floor(w.contracts * closeFraction));
-                                if (closeQty > w.contracts) closeQty = w.contracts;
+                                const actualLev = parseInt(l.actualLeverage) || 10;
 
-                                let realizedFromThis = winAmount * (closeQty / w.contracts);
-
-                                try {
-                                    const bData = activeBots.get(w.profileId);
-                                    if (!bData) continue;
-                                    const bState = bData.state.coinStates[w.symbol];
-                                    if (!bState) continue;
-
-                                    const actualLev = parseInt(w.actualLeverage) || 10;
-
-                                    if (!w.isPaper) {
-                                        const closeSide = w.side === 'long' ? 'sell' : 'buy';
-                                        await bData.exchange.createOrder(w.symbol, 'market', closeSide, closeQty, undefined, { offset: 'close', reduceOnly: true, lever_rate: actualLev });
-                                    }
-
-                                    await OffsetModel.create({
-                                        userId: dbUserId, symbol: w.symbol, side: w.side,
-                                        openPrice: bState.avgEntry, closePrice: bState.currentPrice, roi: bState.currentRoi,
-                                        netProfit: realizedFromThis, reason: 'Deficit Cover (V1 Winner Assisted)'
-                                    });
-
-                                    if (closeQty >= bState.contracts - 0.0001) {
-                                        bState.contracts = 0; bState.unrealizedPnl = 0; bState.avgEntry = 0; bState.dcaCount = 0;
-                                    } else {
-                                        bState.contracts -= closeQty;
-                                    }
-                                    bState.lockUntil = Date.now() + 15000;
-
-                                    w.subAccount.realizedPnl = (w.subAccount.realizedPnl || 0) + realizedFromThis;
-                                    await SettingsModel.updateOne({ userId: dbUserId, "subAccounts._id": w.subAccount._id }, { $inc: { "subAccounts.$.realizedPnl": realizedFromThis } });
-
-                                    logForProfile(firstProfileId, `⚖️ DEFICIT COVER: Harvested +$${realizedFromThis.toFixed(4)} of ${w.symbol} (V1 Live) to assist budget.`);
-                                    
-                                    shortfall -= realizedFromThis;
-                                    workingBudget += realizedFromThis;
-                                    handledSymbols.add(w.symbol);
-                                } catch (e) {
-                                    logForProfile(firstProfileId, `❌ DEFICIT WINNER ERR [${w.symbol}]: ${e.message}`);
+                                if (!l.isPaper) {
+                                    const closeSide = l.side === 'long' ? 'sell' : 'buy';
+                                    await bData.exchange.createOrder(l.symbol, 'market', closeSide, closeQty, undefined, { offset: 'close', reduceOnly: true, lever_rate: actualLev });
                                 }
-                            }
-                        }
 
-                        // Step B: Burn the losers using the working budget
-                        const cooldownSecs = parseInt(userSetting.autoBalanceLoserCooldownSecs) || 0;
-                        const lastLoserTime = global.lastDeficitLoserCloseTime.get(dbUserId) || 0;
+                                await OffsetModel.create({
+                                    userId: dbUserId, symbol: l.symbol, side: l.side,
+                                    openPrice: bState.avgEntry, closePrice: bState.currentPrice, roi: bState.currentRoi,
+                                    netProfit: lossRealized, reason: 'Deficit Cover (Loser)'
+                                });
 
-                        if (workingBudget >= microTolerance && losers.length > 0) {
-                            if (Date.now() - lastLoserTime >= cooldownSecs * 1000) {
-                                logForProfile(firstProfileId, `⚙️ BALANCER: Burning losers with available budget: $${workingBudget.toFixed(2)}`);
-                                
-                                let budgetToBurn = deficit; 
-                                
-                                for (let l of losers) {
-                                    if (handledSymbols.has(l.symbol)) continue;
-                                    if (budgetToBurn <= microTolerance || workingBudget <= microTolerance) break;
-                                    
-                                    let lossAmount = Math.abs(l.unrealizedPnl);
-                                    let limit = Math.min(budgetToBurn, workingBudget);
-                                    let closeFraction = lossAmount > limit ? (limit / lossAmount) : 1;
-                                    let closeQty = Math.max(1, Math.floor(l.contracts * closeFraction));
-                                    if (closeQty > l.contracts) closeQty = l.contracts;
-
-                                    let lossRealized = -(lossAmount * (closeQty / l.contracts));
-
-                                    try {
-                                        const bData = activeBots.get(l.profileId);
-                                        if (!bData) continue;
-                                        const bState = bData.state.coinStates[l.symbol];
-                                        if (!bState) continue;
-                                        
-                                        const actualLev = parseInt(l.actualLeverage) || 10;
-
-                                        global.lastDeficitLoserCloseTime.set(dbUserId, Date.now());
-
-                                        if (!l.isPaper) {
-                                            const closeSide = l.side === 'long' ? 'sell' : 'buy';
-                                            await bData.exchange.createOrder(l.symbol, 'market', closeSide, closeQty, undefined, { offset: 'close', reduceOnly: true, lever_rate: actualLev });
-                                        }
-
-                                        await OffsetModel.create({
-                                            userId: dbUserId, symbol: l.symbol, side: l.side,
-                                            openPrice: bState.avgEntry, closePrice: bState.currentPrice, roi: bState.currentRoi,
-                                            netProfit: lossRealized, reason: 'Deficit Cover (Loser)'
-                                        });
-
-                                        if (closeQty >= bState.contracts - 0.0001) {
-                                            bState.contracts = 0; bState.unrealizedPnl = 0; bState.avgEntry = 0; bState.dcaCount = 0;
-                                        } else {
-                                            bState.contracts -= closeQty;
-                                        }
-                                        bState.lockUntil = Date.now() + 15000;
-
-                                        l.subAccount.realizedPnl = (l.subAccount.realizedPnl || 0) + lossRealized;
-                                        await SettingsModel.updateOne({ userId: dbUserId, "subAccounts._id": l.subAccount._id }, { $inc: { "subAccounts.$.realizedPnl": lossRealized } });
-
-                                        logForProfile(firstProfileId, `⚖️ DEFICIT COVER: Burned -$${Math.abs(lossRealized).toFixed(4)} of ${l.symbol}.`);
-                                        
-                                        workingBudget -= Math.abs(lossRealized);
-                                        budgetToBurn -= Math.abs(lossRealized);
-                                        handledSymbols.add(l.symbol);
-                                        
-                                        break; // ONLY 1 LOSER PER CYCLE!
-                                    } catch (e) {
-                                        logForProfile(firstProfileId, `❌ DEFICIT LOSER ERR [${l.symbol}]: ${e.message}`);
-                                    }
+                                if (closeQty >= bState.contracts - 0.0001) {
+                                    bState.contracts = 0; bState.unrealizedPnl = 0; bState.avgEntry = 0; bState.dcaCount = 0;
+                                } else {
+                                    bState.contracts -= closeQty;
                                 }
+                                bState.lockUntil = Date.now() + 15000;
+
+                                l.subAccount.realizedPnl = (l.subAccount.realizedPnl || 0) + lossRealized;
+                                await SettingsModel.updateOne({ userId: dbUserId, "subAccounts._id": l.subAccount._id }, { $inc: { "subAccounts.$.realizedPnl": lossRealized } });
+
+                                logForProfile(firstProfileId, `⚖️ DEFICIT COVER: Closed -$${Math.abs(lossRealized).toFixed(4)} of ${l.symbol}.`);
+                                budget -= Math.abs(lossRealized);
+                                offsetExecuted = true;
+                            } catch (e) {
+                                logForProfile(firstProfileId, `❌ DEFICIT LOSER ERR [${l.symbol}]: ${e.message}`);
                             }
                         }
                     }
                 }
             }
 
-            // ==============================================================
-            // SMART OFFSET V1 (TP ONLY) - Runs concurrently using untouched coins
-            // ==============================================================
-            if (smartOffsetNetProfit > 0) {
-                // Filter out any candidates already modified by the Balancer in this cycle
-                let availableCandidates = activeCandidates.filter(c => !handledSymbols.has(c.symbol));
+            // SMART OFFSET V1 (TP ONLY)
+            if (!offsetExecuted && smartOffsetNetProfit > 0 && activeCandidates.length >= 2) {
+                activeCandidates.sort((a, b) => b.unrealizedPnl - a.unrealizedPnl); 
                 
-                if (availableCandidates.length >= 2) {
-                    availableCandidates.sort((a, b) => b.unrealizedPnl - a.unrealizedPnl); 
+                const totalCoins = activeCandidates.length;
+                const totalPairs = Math.floor(totalCoins / 2);
+
+                let runningAccumulation = 0;
+                let peakAccumulation = 0;
+                let peakRowIndex = -1;
+
+                for (let i = 0; i < totalPairs; i++) {
+                    const w = activeCandidates[i];
+                    const l = activeCandidates[totalCoins - totalPairs + i];
+                    const netResult = w.unrealizedPnl + l.unrealizedPnl;
                     
-                    const totalCoins = availableCandidates.length;
-                    const totalPairs = Math.floor(totalCoins / 2);
+                    runningAccumulation += netResult;
 
-                    let runningAccumulation = 0;
-                    let peakAccumulation = 0;
-                    let peakRowIndex = -1;
-
-                    for (let i = 0; i < totalPairs; i++) {
-                        const w = availableCandidates[i];
-                        const l = availableCandidates[totalCoins - totalPairs + i];
-                        const netResult = w.unrealizedPnl + l.unrealizedPnl;
-                        
-                        runningAccumulation += netResult;
-
-                        if (runningAccumulation > peakAccumulation) {
-                            peakAccumulation = runningAccumulation;
-                            peakRowIndex = i;
-                        }
+                    if (runningAccumulation > peakAccumulation) {
+                        peakAccumulation = runningAccumulation;
+                        peakRowIndex = i;
                     }
+                }
 
-                    let triggerOffset = false;
-                    let reason = '';
-                    let finalPairsToClose = [];
+                let triggerOffset = false;
+                let reason = '';
+                let finalPairsToClose = [];
 
-                    if (peakAccumulation >= targetV1 && peakAccumulation >= peakThreshold && peakRowIndex >= 0) {
-                        triggerOffset = true;
-                        reason = `Smart Offset V1`;
-                        for(let i = 0; i <= peakRowIndex; i++) {
-                            const w = availableCandidates[i];
-                            if (Math.abs(w.unrealizedPnl) <= winnerThreshold) continue; 
-                            finalPairsToClose.push(w); 
-                        }
-                        if (finalPairsToClose.length === 0) triggerOffset = false; 
-                    } 
+                if (smartOffsetNetProfit > 0 && peakAccumulation >= targetV1 && peakAccumulation >= peakThreshold && peakRowIndex >= 0) {
+                    triggerOffset = true;
+                    reason = `Smart Offset V1`;
+                    for(let i = 0; i <= peakRowIndex; i++) {
+                        const w = activeCandidates[i];
+                        if (Math.abs(w.unrealizedPnl) <= winnerThreshold) continue; 
+                        finalPairsToClose.push(w); 
+                    }
+                    if (finalPairsToClose.length === 0) triggerOffset = false; 
+                } 
+
+                if (triggerOffset) {
+                    let actualPairsToClose = [];
+                    for (let k = 0; k < finalPairsToClose.length; k++) {
+                        const pos = finalPairsToClose[k];
+                        const bState = activeBots.get(pos.profileId).state.coinStates[pos.symbol];
+                        const livePnl = bState ? (parseFloat(bState.unrealizedPnl) || 0) : pos.unrealizedPnl;
+                        if (livePnl <= 0) continue; 
+                        actualPairsToClose.push(pos);
+                    }
+                    finalPairsToClose = actualPairsToClose;
+                    if (finalPairsToClose.length === 0) triggerOffset = false;
 
                     if (triggerOffset) {
-                        let actualPairsToClose = [];
+                        logForProfile(firstProfileId, `⚖️ SMART OFFSET V1: Closing ${finalPairsToClose.length} WINNER coin(s).`);
+
                         for (let k = 0; k < finalPairsToClose.length; k++) {
                             const pos = finalPairsToClose[k];
-                            const bState = activeBots.get(pos.profileId).state.coinStates[pos.symbol];
-                            const livePnl = bState ? (parseFloat(bState.unrealizedPnl) || 0) : pos.unrealizedPnl;
-                            if (livePnl <= 0) continue; 
-                            actualPairsToClose.push(pos);
-                        }
-                        finalPairsToClose = actualPairsToClose;
-                        if (finalPairsToClose.length === 0) triggerOffset = false;
+                            const bData = activeBots.get(pos.profileId);
+                            
+                            try {
+                                if (bData) {
+                                    if (!pos.isPaper) {
+                                        const closeSide = pos.side === 'long' ? 'sell' : 'buy';
+                                        await bData.exchange.createOrder(pos.symbol, 'market', closeSide, pos.contracts, undefined, { 
+                                            offset: 'close', reduceOnly: true, lever_rate: pos.actualLeverage 
+                                        });
+                                    } 
 
-                        if (triggerOffset) {
-                            logForProfile(firstProfileId, `⚖️ SMART OFFSET V1: Closing ${finalPairsToClose.length} WINNER coin(s).`);
+                                    const bState = bData.state.coinStates[pos.symbol];
+                                    
+                                    if (bState) { 
+                                        await OffsetModel.create({
+                                            userId: dbUserId, symbol: pos.symbol, side: pos.side,
+                                            openPrice: bState.avgEntry, closePrice: bState.currentPrice, roi: bState.currentRoi,
+                                            netProfit: pos.unrealizedPnl, reason: 'Smart Offset V1'
+                                        });
 
-                            for (let k = 0; k < finalPairsToClose.length; k++) {
-                                const pos = finalPairsToClose[k];
-                                const bData = activeBots.get(pos.profileId);
-                                
-                                try {
-                                    if (bData) {
-                                        if (!pos.isPaper) {
-                                            const closeSide = pos.side === 'long' ? 'sell' : 'buy';
-                                            await bData.exchange.createOrder(pos.symbol, 'market', closeSide, pos.contracts, undefined, { 
-                                                offset: 'close', reduceOnly: true, lever_rate: pos.actualLeverage 
-                                            });
-                                        } 
-
-                                        const bState = bData.state.coinStates[pos.symbol];
-                                        
-                                        if (bState) { 
-                                            await OffsetModel.create({
-                                                userId: dbUserId, symbol: pos.symbol, side: pos.side,
-                                                openPrice: bState.avgEntry, closePrice: bState.currentPrice, roi: bState.currentRoi,
-                                                netProfit: pos.unrealizedPnl, reason: 'Smart Offset V1'
-                                            });
-
-                                            bState.contracts = 0; bState.unrealizedPnl = 0; bState.avgEntry = 0; bState.dcaCount = 0; 
-                                            bState.lockUntil = Date.now() + 60000; 
-                                        }
-                                        
-                                        pos.subAccount.realizedPnl = (pos.subAccount.realizedPnl || 0) + pos.unrealizedPnl;
-                                        
-                                        await SettingsModel.updateOne(
-                                            { userId: dbUserId, "subAccounts._id": pos.subAccount._id }, 
-                                            { $inc: { "subAccounts.$.realizedPnl": pos.unrealizedPnl } }
-                                        );
-
-                                        handledSymbols.add(pos.symbol); // Mark as processed
+                                        bState.contracts = 0; bState.unrealizedPnl = 0; bState.avgEntry = 0; bState.dcaCount = 0; 
+                                        bState.lockUntil = Date.now() + 60000; 
                                     }
-                                } catch (e) {
-                                    logForProfile(firstProfileId, `❌ CLOSE ERROR [${pos.symbol}]: ${e.message}`);
+                                    
+                                    pos.subAccount.realizedPnl = (pos.subAccount.realizedPnl || 0) + pos.unrealizedPnl;
+                                    
+                                    await SettingsModel.updateOne(
+                                        { userId: dbUserId, "subAccounts._id": pos.subAccount._id }, 
+                                        { $inc: { "subAccounts.$.realizedPnl": pos.unrealizedPnl } }
+                                    );
+
+                                    offsetExecuted = true;
                                 }
+                            } catch (e) {
+                                logForProfile(firstProfileId, `❌ CLOSE ERROR [${pos.symbol}]: ${e.message}`);
                             }
                         }
                     }
@@ -1169,10 +1084,7 @@ app.post('/api/register', async (req, res) => {
         templateSettings.smartOffsetNetProfit = (templateSettings.smartOffsetNetProfit || 0) * multiplier;
         templateSettings.globalSingleCoinTpPnl = (templateSettings.globalSingleCoinTpPnl || 0) * multiplier;
         templateSettings.autoBalanceUnrealizedPnlTarget = (templateSettings.autoBalanceUnrealizedPnlTarget !== undefined ? templateSettings.autoBalanceUnrealizedPnlTarget : 0) * multiplier;
-        templateSettings.autoBalanceUnrealizedPnlTargetDeep = (templateSettings.autoBalanceUnrealizedPnlTargetDeep !== undefined ? templateSettings.autoBalanceUnrealizedPnlTargetDeep : 0) * multiplier;
-        templateSettings.autoBalanceOscillationCycleMins = templateSettings.autoBalanceOscillationCycleMins || 0;
         templateSettings.autoBalanceRetainRealized = (templateSettings.autoBalanceRetainRealized !== undefined ? templateSettings.autoBalanceRetainRealized : 0) * multiplier;
-        templateSettings.autoBalanceLoserCooldownSecs = templateSettings.autoBalanceLoserCooldownSecs || 0;
 
         let coinList = PREDEFINED_COINS;
         if (customCoins) {
@@ -1557,7 +1469,7 @@ app.post('/api/settings', authMiddleware, async (req, res) => {
     await bootstrapBots(); 
     const SettingsModel = req.isPaper ? PaperSettings : RealSettings;
 
-    const { subAccounts, globalSingleCoinTpPnl, smartOffsetNetProfit, autoBalanceEquity, autoBalanceUnrealizedPnlTarget, autoBalanceUnrealizedPnlTargetDeep, autoBalanceOscillationCycleMins, autoBalanceRetainRealized, autoBalanceLoserCooldownSecs } = req.body;
+    const { subAccounts, globalSingleCoinTpPnl, smartOffsetNetProfit, autoBalanceEquity, autoBalanceUnrealizedPnlTarget, autoBalanceRetainRealized } = req.body;
     
     const existingSettings = await SettingsModel.findOne({ userId: req.userId });
     if (existingSettings && existingSettings.subAccounts) {
@@ -1582,12 +1494,7 @@ app.post('/api/settings', authMiddleware, async (req, res) => {
         { 
             subAccounts, globalSingleCoinTpPnl: parseFloat(globalSingleCoinTpPnl) || 0,
             smartOffsetNetProfit: parseFloat(smartOffsetNetProfit) || 0,
-            autoBalanceEquity: autoBalanceEquity === true, 
-            autoBalanceUnrealizedPnlTarget: parseFloat(autoBalanceUnrealizedPnlTarget) || 0, 
-            autoBalanceUnrealizedPnlTargetDeep: parseFloat(autoBalanceUnrealizedPnlTargetDeep) || 0, 
-            autoBalanceOscillationCycleMins: parseInt(autoBalanceOscillationCycleMins) || 0, 
-            autoBalanceRetainRealized: parseFloat(autoBalanceRetainRealized) || 0,
-            autoBalanceLoserCooldownSecs: parseInt(autoBalanceLoserCooldownSecs) || 0
+            autoBalanceEquity: autoBalanceEquity === true, autoBalanceUnrealizedPnlTarget: parseFloat(autoBalanceUnrealizedPnlTarget) || 0, autoBalanceRetainRealized: parseFloat(autoBalanceRetainRealized) || 0
         }, { returnDocument: 'after' }
     );
 
@@ -1616,12 +1523,7 @@ app.post('/api/settings', authMiddleware, async (req, res) => {
         const syncGlobalParams = {
             globalSingleCoinTpPnl: updated.globalSingleCoinTpPnl,
             smartOffsetNetProfit: updated.smartOffsetNetProfit,
-            autoBalanceEquity: updated.autoBalanceEquity, 
-            autoBalanceUnrealizedPnlTarget: updated.autoBalanceUnrealizedPnlTarget, 
-            autoBalanceUnrealizedPnlTargetDeep: updated.autoBalanceUnrealizedPnlTargetDeep,
-            autoBalanceOscillationCycleMins: updated.autoBalanceOscillationCycleMins,
-            autoBalanceRetainRealized: updated.autoBalanceRetainRealized,
-            autoBalanceLoserCooldownSecs: updated.autoBalanceLoserCooldownSecs
+            autoBalanceEquity: updated.autoBalanceEquity, autoBalanceUnrealizedPnlTarget: updated.autoBalanceUnrealizedPnlTarget, autoBalanceRetainRealized: updated.autoBalanceRetainRealized
         };
 
         const applyMasterSync = async (userSettingsDoc, isPaperMode) => {
@@ -1631,10 +1533,7 @@ app.post('/api/settings', authMiddleware, async (req, res) => {
             updatePayload.smartOffsetNetProfit = (updated.smartOffsetNetProfit || 0) * mult;
             updatePayload.globalSingleCoinTpPnl = (updated.globalSingleCoinTpPnl || 0) * mult;
             updatePayload.autoBalanceUnrealizedPnlTarget = (updated.autoBalanceUnrealizedPnlTarget || 0) * mult;
-            updatePayload.autoBalanceUnrealizedPnlTargetDeep = (updated.autoBalanceUnrealizedPnlTargetDeep || 0) * mult;
-            updatePayload.autoBalanceOscillationCycleMins = updated.autoBalanceOscillationCycleMins || 0;
             updatePayload.autoBalanceRetainRealized = (updated.autoBalanceRetainRealized || 0) * mult;
-            updatePayload.autoBalanceLoserCooldownSecs = updated.autoBalanceLoserCooldownSecs || 0;
 
             if (!isPaperMode) {
                 let fallbackApiKey = '';
@@ -1709,21 +1608,7 @@ app.get('/api/status', authMiddleware, async (req, res) => {
     const OffsetModel = req.isPaper ? PaperOffsetRecord : RealOffsetRecord; 
 
     let settings = await SettingsModel.findOne({ userId: req.userId });
-    if (settings) {
-        settings = settings.toObject();
-        // Calculate the live oscillating target for the frontend UI
-        if (settings.autoBalanceOscillationCycleMins > 0 && settings.autoBalanceUnrealizedPnlTargetDeep < settings.autoBalanceUnrealizedPnlTarget) {
-            const periodMs = settings.autoBalanceOscillationCycleMins * 60 * 1000;
-            const wave = (Date.now() % periodMs) / periodMs;
-            const w = wave < 0.5 ? (2 * wave) : (2 * (1 - wave));
-            const mult = settings.qtyMultiplier || 1;
-            const step = 0.001 * mult;
-            const rawTarget = settings.autoBalanceUnrealizedPnlTargetDeep + w * (settings.autoBalanceUnrealizedPnlTarget - settings.autoBalanceUnrealizedPnlTargetDeep);
-            settings.currentActiveUnrealizedTarget = Math.round(rawTarget / step) * step;
-        } else {
-            settings.currentActiveUnrealizedTarget = settings.autoBalanceUnrealizedPnlTarget;
-        }
-    }
+    if (settings) settings = settings.toObject();
 
     const userStatuses = {};
 
@@ -1764,12 +1649,7 @@ app.post('/api/master/global', authMiddleware, adminMiddleware, async (req, res)
         const payload = {
             globalSingleCoinTpPnl: parseFloat(req.body.globalSingleCoinTpPnl) || 0,
             smartOffsetNetProfit: parseFloat(req.body.smartOffsetNetProfit) || 0,
-            autoBalanceEquity: req.body.autoBalanceEquity === true, 
-            autoBalanceUnrealizedPnlTarget: parseFloat(req.body.autoBalanceUnrealizedPnlTarget) || 0, 
-            autoBalanceUnrealizedPnlTargetDeep: parseFloat(req.body.autoBalanceUnrealizedPnlTargetDeep) || 0,
-            autoBalanceOscillationCycleMins: parseInt(req.body.autoBalanceOscillationCycleMins) || 0,
-            autoBalanceRetainRealized: parseFloat(req.body.autoBalanceRetainRealized) || 0,
-            autoBalanceLoserCooldownSecs: parseInt(req.body.autoBalanceLoserCooldownSecs) || 0
+            autoBalanceEquity: req.body.autoBalanceEquity === true, autoBalanceUnrealizedPnlTarget: parseFloat(req.body.autoBalanceUnrealizedPnlTarget) || 0, autoBalanceRetainRealized: parseFloat(req.body.autoBalanceRetainRealized) || 0
         };
 
         await RealSettings.findOneAndUpdate({ userId: masterUser._id }, { $set: payload }, { new: true, upsert: true });
@@ -1785,10 +1665,7 @@ app.post('/api/master/global', authMiddleware, adminMiddleware, async (req, res)
             syncPayload.smartOffsetNetProfit = (syncPayload.smartOffsetNetProfit || 0) * mult;
             syncPayload.globalSingleCoinTpPnl = (syncPayload.globalSingleCoinTpPnl || 0) * mult;
             syncPayload.autoBalanceUnrealizedPnlTarget = (syncPayload.autoBalanceUnrealizedPnlTarget || 0) * mult;
-            syncPayload.autoBalanceUnrealizedPnlTargetDeep = (syncPayload.autoBalanceUnrealizedPnlTargetDeep || 0) * mult;
-            syncPayload.autoBalanceOscillationCycleMins = syncPayload.autoBalanceOscillationCycleMins || 0;
             syncPayload.autoBalanceRetainRealized = (syncPayload.autoBalanceRetainRealized || 0) * mult;
-            syncPayload.autoBalanceLoserCooldownSecs = syncPayload.autoBalanceLoserCooldownSecs || 0;
             
             const newlyUpdated = await ModelToUse.findOneAndUpdate({ userId: userSettingsDoc.userId }, { $set: syncPayload }, { returnDocument: 'after' });
             
@@ -2055,14 +1932,9 @@ const FRONTEND_HTML = [
     '                            </div>',
     '                            <div style="border-top:1px solid #333; padding-top:15px; margin-top:10px;">',
     '                                <label class="checkbox-wrapper"><input type="checkbox" id="autoBalanceEquity"><span>Enable Equity Balancer</span></label>',
-    '                                <div class="grid" style="grid-template-columns: 1fr 1fr 1fr;">',
-    '                                    <div><label>Target Shallow</label><input type="number" id="autoBalanceUnrealizedPnlTarget" placeholder="-5000"></div>',
-    '                                    <div><label>Target Deep</label><input type="number" id="autoBalanceUnrealizedPnlTargetDeep" placeholder="-15000"></div>',
-    '                                    <div><label>Cycle (Mins)</label><input type="number" id="autoBalanceOscillationCycleMins" placeholder="60"></div>',
-    '                                </div>',
-    '                                <div class="grid-2" style="margin-top:10px;">',
+    '                                <div class="grid-2">',
+    '                                    <div><label>Target Unrealized ($)</label><input type="number" id="autoBalanceUnrealizedPnlTarget"></div>',
     '                                    <div><label>Retain Realized ($)</label><input type="number" id="autoBalanceRetainRealized"></div>',
-    '                                    <div><label>Loser Cooldown (Secs)</label><input type="number" id="autoBalanceLoserCooldownSecs" placeholder="60"></div>',
     '                                </div>',
     '                            </div>',
     '                            <button style="width:100%; margin-top:10px;" onclick="saveGlobalSettings()">Deploy Global</button>',
@@ -2169,10 +2041,7 @@ const FRONTEND_HTML = [
     '        let mySmartOffsetNetProfit = 0;',
     '        let myAutoBalanceEquity = false;',
     '        let myAutoBalanceUnrealizedPnlTarget = -50000;',
-    '        let myAutoBalanceUnrealizedPnlTargetDeep = 0;',
-    '        let myAutoBalanceOscillationCycleMins = 0;',
     '        let myAutoBalanceRetainRealized = 0;',
-    '        let myAutoBalanceLoserCooldownSecs = 0;',
     '        let currentProfileIndex = -1;',
     '        let myCoins = [];',
     '        const PREDEFINED_COINS = ["OP", "BIGTIME", "MOVE", "SSV", "COAI", "TIA", "MERL", "MASK", "PYTH", "ETHFI", "CFX", "MEME", "LUNA", "STEEM", "BERA", "2Z", "FIL", "APT", "1INCH", "ARB", "XPL", "ENA", "MMT", "AXS", "TON", "CAKE", "BSV", "JUP", "WIF", "LIGHT", "PI", "SUSHI", "LPT", "CRV", "TAO", "ORDI", "YFI", "LA", "ICP", "FTT", "GIGGLE", "LDO", "OPN", "INJ", "SNX", "DASH", "WLD", "KAITO", "TRUMP", "WAVES", "ZEN", "ENS", "ASTER", "VIRTUAL"];',
@@ -2341,11 +2210,7 @@ const FRONTEND_HTML = [
     '                if (!masterSettings) { document.getElementById(\'editorGlobalContainer\').innerHTML = \'<p class="text-red">Missing config.</p>\'; return; }',
     '                let globalHtml = \'<div class="grid-2"><div><label>Univ. Coin TP ($)</label><input type="number" step="0.0001" id="e_globalSingleCoinTpPnl" value="\' + (masterSettings.globalSingleCoinTpPnl||0) + \'"></div></div>\';',
     '                globalHtml += \'<div style="margin-top:10px; border-top:1px solid #333; padding-top:10px;"><label class="checkbox-wrapper"><input type="checkbox" id="e_autoBalanceEquity" \' + (masterSettings.autoBalanceEquity ? "checked" : "") + \'><span>Enable Balancer</span></label>\';',
-    '                globalHtml += \'<div class="grid" style="grid-template-columns: 1fr 1fr 1fr;"><div><label>Target Shallow</label><input type="number" id="e_autoBalanceUnrealizedPnlTarget" value="\' + (masterSettings.autoBalanceUnrealizedPnlTarget||0) + \'"></div>\';',
-    '                globalHtml += \'<div><label>Target Deep</label><input type="number" id="e_autoBalanceUnrealizedPnlTargetDeep" value="\' + (masterSettings.autoBalanceUnrealizedPnlTargetDeep||0) + \'"></div>\';',
-    '                globalHtml += \'<div><label>Cycle (Mins)</label><input type="number" id="e_autoBalanceOscillationCycleMins" value="\' + (masterSettings.autoBalanceOscillationCycleMins||0) + \'"></div></div>\';',
-    '                globalHtml += \'<div class="grid-2" style="margin-top:10px;"><div><label>Retain Realized</label><input type="number" id="e_autoBalanceRetainRealized" value="\' + (masterSettings.autoBalanceRetainRealized||0) + \'"></div>\';',
-    '                globalHtml += \'<div><label>Loser Cooldown (Secs)</label><input type="number" id="e_autoBalanceLoserCooldownSecs" value="\' + (masterSettings.autoBalanceLoserCooldownSecs||0) + \'"></div></div></div>\';',
+    '                globalHtml += \'<div class="grid-2"><div><label>Target Unrealized</label><input type="number" id="e_autoBalanceUnrealizedPnlTarget" value="\' + (masterSettings.autoBalanceUnrealizedPnlTarget||0) + \'"></div><div><label>Retain Realized</label><input type="number" id="e_autoBalanceRetainRealized" value="\' + (masterSettings.autoBalanceRetainRealized||0) + \'"></div></div></div>\';',
     '                globalHtml += \'<div class="grid-2" style="margin-top:10px;"><div><label>V1 Offset Target ($)</label><input type="number" step="0.0001" id="e_smartOffsetNetProfit" value="\' + (masterSettings.smartOffsetNetProfit||0) + \'"></div></div>\';',
     '                globalHtml += \'<button style="width:100%; margin-top:15px; border-color:#60a5fa; color:#60a5fa;" onclick="saveMasterGlobalSettings()">Overwrite & Sync Global</button><div id="e_globalMsg" style="margin-top:10px;"></div>\';',
     '                document.getElementById(\'editorGlobalContainer\').innerHTML = globalHtml;',
@@ -2367,12 +2232,7 @@ const FRONTEND_HTML = [
     '            const getVal = (id, def) => { const el = document.getElementById(id); return el && el.value !== \'\' ? parseFloat(el.value) : def; };',
     '            const payload = {',
     '                globalSingleCoinTpPnl: getVal(\'e_globalSingleCoinTpPnl\', 0), smartOffsetNetProfit: getVal(\'e_smartOffsetNetProfit\', 0),',
-    '                autoBalanceEquity: document.getElementById(\'e_autoBalanceEquity\')?.checked||false, ',
-    '                autoBalanceUnrealizedPnlTarget: getVal(\'e_autoBalanceUnrealizedPnlTarget\', 0), ',
-    '                autoBalanceUnrealizedPnlTargetDeep: getVal(\'e_autoBalanceUnrealizedPnlTargetDeep\', 0),',
-    '                autoBalanceOscillationCycleMins: getVal(\'e_autoBalanceOscillationCycleMins\', 0),',
-    '                autoBalanceRetainRealized: getVal(\'e_autoBalanceRetainRealized\', 0),',
-    '                autoBalanceLoserCooldownSecs: getVal(\'e_autoBalanceLoserCooldownSecs\', 0)',
+    '                autoBalanceEquity: document.getElementById(\'e_autoBalanceEquity\')?.checked||false, autoBalanceUnrealizedPnlTarget: getVal(\'e_autoBalanceUnrealizedPnlTarget\', 0), autoBalanceRetainRealized: getVal(\'e_autoBalanceRetainRealized\', 0)',
     '            };',
     '            const res = await fetch(\'/api/master/global\', { method: \'POST\', headers: { \'Content-Type\': \'application/json\', \'Authorization\': \'Bearer \' + token }, body: JSON.stringify(payload) });',
     '            const data = await res.json();',
@@ -2444,19 +2304,13 @@ const FRONTEND_HTML = [
     '                mySmartOffsetNetProfit = config.smartOffsetNetProfit || 0;',
     '                myAutoBalanceEquity = config.autoBalanceEquity || false;',
     '                myAutoBalanceUnrealizedPnlTarget = config.autoBalanceUnrealizedPnlTarget || 0;',
-    '                myAutoBalanceUnrealizedPnlTargetDeep = config.autoBalanceUnrealizedPnlTargetDeep || 0;',
-    '                myAutoBalanceOscillationCycleMins = config.autoBalanceOscillationCycleMins || 0;',
     '                myAutoBalanceRetainRealized = config.autoBalanceRetainRealized || 0;',
-    '                myAutoBalanceLoserCooldownSecs = config.autoBalanceLoserCooldownSecs || 0;',
     '                const setVal = (id, val) => { const el = document.getElementById(id); if(el) el.value = val; };',
     '                setVal(\'globalSingleCoinTpPnl\', myGlobalSingleCoinTpPnl);',
     '                setVal(\'smartOffsetNetProfit\', mySmartOffsetNetProfit);',
     '                if(document.getElementById(\'autoBalanceEquity\')) document.getElementById(\'autoBalanceEquity\').checked = myAutoBalanceEquity;',
     '                setVal(\'autoBalanceUnrealizedPnlTarget\', myAutoBalanceUnrealizedPnlTarget);',
-    '                setVal(\'autoBalanceUnrealizedPnlTargetDeep\', myAutoBalanceUnrealizedPnlTargetDeep);',
-    '                setVal(\'autoBalanceOscillationCycleMins\', myAutoBalanceOscillationCycleMins);',
     '                setVal(\'autoBalanceRetainRealized\', myAutoBalanceRetainRealized);',
-    '                setVal(\'autoBalanceLoserCooldownSecs\', myAutoBalanceLoserCooldownSecs);',
     '                ',
     '                const setTxt = (id, txt) => { const el=document.getElementById(id); if(el) el.innerText=txt; };',
     '                setTxt(\'display_globalSingleCoinTpPnl\', fmtC(myGlobalSingleCoinTpPnl));',
@@ -2477,11 +2331,8 @@ const FRONTEND_HTML = [
     '            mySmartOffsetNetProfit = getVal(\'smartOffsetNetProfit\', 0);',
     '            myAutoBalanceEquity = document.getElementById(\'autoBalanceEquity\')?.checked || false;',
     '            myAutoBalanceUnrealizedPnlTarget = getVal(\'autoBalanceUnrealizedPnlTarget\', 0);',
-    '            myAutoBalanceUnrealizedPnlTargetDeep = getVal(\'autoBalanceUnrealizedPnlTargetDeep\', 0);',
-    '            myAutoBalanceOscillationCycleMins = getVal(\'autoBalanceOscillationCycleMins\', 0);',
     '            myAutoBalanceRetainRealized = getVal(\'autoBalanceRetainRealized\', 0);',
-    '            myAutoBalanceLoserCooldownSecs = getVal(\'autoBalanceLoserCooldownSecs\', 0);',
-    '            const data = { subAccounts: mySubAccounts, globalSingleCoinTpPnl: myGlobalSingleCoinTpPnl, smartOffsetNetProfit: mySmartOffsetNetProfit, autoBalanceEquity: myAutoBalanceEquity, autoBalanceUnrealizedPnlTarget: myAutoBalanceUnrealizedPnlTarget, autoBalanceUnrealizedPnlTargetDeep: myAutoBalanceUnrealizedPnlTargetDeep, autoBalanceOscillationCycleMins: myAutoBalanceOscillationCycleMins, autoBalanceRetainRealized: myAutoBalanceRetainRealized, autoBalanceLoserCooldownSecs: myAutoBalanceLoserCooldownSecs };',
+    '            const data = { subAccounts: mySubAccounts, globalSingleCoinTpPnl: myGlobalSingleCoinTpPnl, smartOffsetNetProfit: mySmartOffsetNetProfit, autoBalanceEquity: myAutoBalanceEquity, autoBalanceUnrealizedPnlTarget: myAutoBalanceUnrealizedPnlTarget, autoBalanceRetainRealized: myAutoBalanceRetainRealized };',
     '            await fetch(\'/api/settings\', { method: \'POST\', headers: { \'Content-Type\': \'application/json\', \'Authorization\': \'Bearer \' + token }, body: JSON.stringify(data) });',
     '        }',
     '',
@@ -2588,7 +2439,7 @@ const FRONTEND_HTML = [
     '            p.triggerDcaPnl = parseFloat(document.getElementById(\'triggerDcaPnl\').value)||-2;',
     '            p.maxContracts = parseInt(document.getElementById(\'maxContracts\').value)||1000;',
     '            p.coins = myCoins;',
-    '            const data = { subAccounts: mySubAccounts, globalSingleCoinTpPnl: myGlobalSingleCoinTpPnl, smartOffsetNetProfit: mySmartOffsetNetProfit, autoBalanceEquity: myAutoBalanceEquity, autoBalanceUnrealizedPnlTarget: myAutoBalanceUnrealizedPnlTarget, autoBalanceUnrealizedPnlTargetDeep: myAutoBalanceUnrealizedPnlTargetDeep, autoBalanceOscillationCycleMins: myAutoBalanceOscillationCycleMins, autoBalanceRetainRealized: myAutoBalanceRetainRealized, autoBalanceLoserCooldownSecs: myAutoBalanceLoserCooldownSecs };',
+    '            const data = { subAccounts: mySubAccounts, globalSingleCoinTpPnl: myGlobalSingleCoinTpPnl, smartOffsetNetProfit: mySmartOffsetNetProfit, autoBalanceEquity: myAutoBalanceEquity, autoBalanceUnrealizedPnlTarget: myAutoBalanceUnrealizedPnlTarget, autoBalanceRetainRealized: myAutoBalanceRetainRealized };',
     '            const res = await fetch(\'/api/settings\', { method: \'POST\', headers: { \'Content-Type\': \'application/json\', \'Authorization\': \'Bearer \' + token }, body: JSON.stringify(data) });',
     '            const json = await res.json(); mySubAccounts = json.settings.subAccounts || [];',
     '        }',
@@ -2674,7 +2525,7 @@ const FRONTEND_HTML = [
     '                setTxt(\'topGlobalUnrealized\', fmtC(globalUnrealized), globalUnrealized>=0?"text-green":"text-red");',
     '                setTxt(\'globalWinRate\', totalAboveZero + " / " + totalTrading);',
     '',
-    '                const targetPnl = globalSet.currentActiveUnrealizedTarget !== undefined ? globalSet.currentActiveUnrealizedTarget : (myAutoBalanceUnrealizedPnlTarget || 0);',
+    '                const targetPnl = myAutoBalanceUnrealizedPnlTarget || 0;',
     '                const currentGap = globalUnrealized - targetPnl;',
     '                const deficit = currentGap < 0 ? Math.abs(currentGap) : 0;',
     '                const availBudget = Math.max(0, globalRealized - (myAutoBalanceRetainRealized || 0));',
@@ -2682,75 +2533,53 @@ const FRONTEND_HTML = [
     '                setTxt(\'display_autoBalanceGap\', "-$" + deficit.toFixed(4), deficit > 0 ? "text-red" : "text-muted");',
     '                setTxt(\'display_autoBalanceBudget\', "+$" + availBudget.toFixed(4), "text-blue");',
     '',
-    '                activeCandidates.sort((a, b) => b.pnl - a.pnl);',
-    '                const totalCoins = activeCandidates.length, totalPairs = Math.floor(totalCoins / 2);',
-    '                let peakAccumulation = 0, peakRowIndex = -1;',
-    '                const multiplier = globalSet.qtyMultiplier || 1, peakThreshold = 0.0001 * multiplier;',
-    '                if (totalPairs > 0) { ',
-    '                    let rAcc = 0; ',
-    '                    for (let i = 0; i < totalPairs; i++) { ',
-    '                        rAcc += activeCandidates[i].pnl + activeCandidates[totalCoins - totalPairs + i].pnl; ',
-    '                        if (rAcc > peakAccumulation) { peakAccumulation = rAcc; peakRowIndex = i; } ',
-    '                    } ',
-    '                }',
-    '',
     '                const coverPlanContainer = document.getElementById("cover-plan-container");',
     '                if (coverPlanContainer) {',
     '                    if (myAutoBalanceEquity && deficit > 0) {',
     '                        let planHtml = "";',
+    '                        let dTemp = deficit;',
+    '                        let bTemp = availBudget;',
+    '                        let sTemp = dTemp - bTemp;',
+    '                        ',
+    '                        let wList = activeCandidates.filter(c => c.pnl > 0).sort((a,b) => b.pnl - a.pnl);',
     '                        let lList = activeCandidates.filter(c => c.pnl < 0).sort((a,b) => a.pnl - b.pnl);',
     '',
-    '                        if (availBudget >= deficit) {',
-    '                            planHtml += "<div style=\'margin-bottom:4px; color:#aaa;\'>1. Available Cash Budget ($" + availBudget.toFixed(2) + ") covers Deficit ($" + deficit.toFixed(2) + ").</div>";',
-    '                            let eBudget = deficit; // FIX: UI should only project burning up to the deficit amount',
-    '                            if (eBudget > 0 && lList.length > 0) {',
-    '                                planHtml += "<div style=\'margin-top:8px; margin-bottom:4px; color:#aaa;\'>2. Target Losers to Burn using Budget ($" + eBudget.toFixed(2) + ")</div>";',
-    '                                for (let l of lList) {',
-    '                                    if (eBudget <= 0) break;',
-    '                                    let lossAmt = Math.abs(l.pnl);',
-    '                                    let useAmt = Math.min(lossAmt, eBudget);',
-    '                                    planHtml += "<div class=\'flex-between text-red\' style=\'padding:4px; background:#200a0a; margin-bottom:2px;\'><span>" + l.symbol + "</span><span>-$" + useAmt.toFixed(4) + "</span></div>";',
-    '                                    eBudget -= useAmt;',
-    '                                }',
-    '                            }',
-    '                        } else if (peakRowIndex >= 0 && (availBudget + peakAccumulation) >= deficit) {',
-    '                            planHtml += "<div style=\'margin-bottom:4px; color:#aaa;\'>1. Budget ($" + availBudget.toFixed(2) + ") + V1 Live ($" + peakAccumulation.toFixed(2) + ") covers Deficit ($" + deficit.toFixed(2) + "). Harvesting V1 winners...</div>";',
-    '                            let v1Winners = [];',
-    '                            for(let i=0; i<=peakRowIndex; i++) { if(activeCandidates[i].pnl > 0) v1Winners.push(activeCandidates[i]); }',
-    '                            ',
-    '                            let shortfall = deficit - availBudget;',
-    '                            let bTemp = availBudget;',
-    '                            ',
-    '                            for (let w of v1Winners) {',
-    '                                if (shortfall <= 0) break;',
-    '                                let useAmt = Math.min(w.pnl, shortfall);',
+    '                        if (sTemp > 0 && wList.length > 0) {',
+    '                            planHtml += "<div style=\'margin-bottom:4px; color:#aaa;\'>1. Need to Harvest Winners for Shortfall ($" + sTemp.toFixed(2) + ")</div>";',
+    '                            for (let w of wList) {',
+    '                                if (sTemp <= 0) break;',
+    '                                let useAmt = Math.min(w.pnl, sTemp);',
     '                                planHtml += "<div class=\'flex-between text-green\' style=\'padding:4px; background:#0a200a; margin-bottom:2px;\'><span>" + w.symbol + "</span><span>+$" + useAmt.toFixed(4) + "</span></div>";',
-    '                                shortfall -= useAmt;',
+    '                                sTemp -= useAmt;',
     '                                bTemp += useAmt;',
     '                            }',
-    '                            ',
-    '                            let eBudget = deficit; ',
-    '                            if (eBudget > 0 && lList.length > 0) {',
-    '                                planHtml += "<div style=\'margin-top:8px; margin-bottom:4px; color:#aaa;\'>2. Target Losers to Burn using Combined Budget ($" + eBudget.toFixed(2) + ")</div>";',
-    '                                for (let l of lList) {',
-    '                                    if (eBudget <= 0) break;',
-    '                                    let lossAmt = Math.abs(l.pnl);',
-    '                                    let useAmt = Math.min(lossAmt, eBudget);',
-    '                                    planHtml += "<div class=\'flex-between text-red\' style=\'padding:4px; background:#200a0a; margin-bottom:2px;\'><span>" + l.symbol + "</span><span>-$" + useAmt.toFixed(4) + "</span></div>";',
-    '                                    eBudget -= useAmt;',
-    '                                }',
-    '                            }',
-    '                        } else {',
-    '                            planHtml += "<div style=\'margin-bottom:4px; color:#aaa;\'>1. Waiting for Budget + V1 Live ($" + (availBudget + peakAccumulation).toFixed(2) + ") to reach Deficit ($" + deficit.toFixed(2) + ")</div>";',
-    '                            planHtml += "<div class=\'text-muted\'>Losers will NOT be covered until the combined budget covers the entire deficit.</div>";',
     '                        }',
     '                        ',
+    '                        let eBudget = Math.min(dTemp, bTemp);',
+    '                        if (eBudget > 0 && lList.length > 0) {',
+    '                            planHtml += "<div style=\'margin-top:8px; margin-bottom:4px; color:#aaa;\'>2. Target Losers to Burn using Budget ($" + eBudget.toFixed(2) + ")</div>";',
+    '                            for (let l of lList) {',
+    '                                if (eBudget <= 0) break;',
+    '                                let lossAmt = Math.abs(l.pnl);',
+    '                                let useAmt = Math.min(lossAmt, eBudget);',
+    '                                planHtml += "<div class=\'flex-between text-red\' style=\'padding:4px; background:#200a0a; margin-bottom:2px;\'><span>" + l.symbol + "</span><span>-$" + useAmt.toFixed(4) + "</span></div>";',
+    '                                eBudget -= useAmt;',
+    '                            }',
+    '                        }',
+    '                        ',
+    '                        if (!planHtml) planHtml = "<span class=\'text-muted\'>No positions available to cover.</span>";',
     '                        document.getElementById("cover-plan-list").innerHTML = planHtml;',
     '                        coverPlanContainer.style.display = "block";',
     '                    } else {',
     '                        coverPlanContainer.style.display = "none";',
     '                    }',
     '                }',
+    '',
+    '                activeCandidates.sort((a, b) => b.pnl - a.pnl);',
+    '                const totalCoins = activeCandidates.length, totalPairs = Math.floor(totalCoins / 2);',
+    '                let peakAccumulation = 0;',
+    '                const multiplier = globalSet.qtyMultiplier || 1, peakThreshold = 0.0001 * multiplier;',
+    '                if (totalPairs > 0) { let rAcc = 0; for (let i = 0; i < totalPairs; i++) { rAcc += activeCandidates[i].pnl + activeCandidates[totalCoins - totalPairs + i].pnl; if (rAcc > peakAccumulation) peakAccumulation = rAcc; } }',
     '',
     '                if(document.getElementById("display_highestPnlNode")) {',
     '                    if (activeCandidates.length > 0) {',
