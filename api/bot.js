@@ -96,7 +96,7 @@ const SettingsSchema = new mongoose.Schema({
     autoBalanceUnrealizedPnlTargetDeep: { type: Number, default: 0 }, 
     autoBalanceOscillationCycleMins: { type: Number, default: 0 },    
     autoBalanceRetainRealized: { type: Number, default: 0 },
-    autoBalanceLoserCooldownSecs: { type: Number, default: 0 }, // NEW: Loser Cover Cooldown
+    autoBalanceLoserCooldownSecs: { type: Number, default: 0 }, // Loser Cover Cooldown
     
     subAccounts: [SubAccountSchema],
 
@@ -810,8 +810,7 @@ const executeGlobalProfitMonitor = async () => {
 
                     if (budget >= microTolerance && losers.length > 0) {
                         if (Date.now() - lastLoserTime >= cooldownSecs * 1000) {
-                            logForProfile(firstProfileId, `⚙️ BALANCER: Closing losers to eliminate deficit. Budget: $${budget.toFixed(2)}`);
-                            let executedAnyLoser = false;
+                            logForProfile(firstProfileId, `⚙️ BALANCER: Evaluating loser to cover deficit. Budget: $${budget.toFixed(2)}`);
 
                             for (let l of losers) {
                                 if (budget <= microTolerance) break;
@@ -829,6 +828,9 @@ const executeGlobalProfitMonitor = async () => {
                                     if (!bState) continue;
                                     
                                     const actualLev = parseInt(l.actualLeverage) || 10;
+
+                                    // BLOCK IMMEDIATE RE-ENTRY BY SETTING COOLDOWN TIME NOW
+                                    global.lastDeficitLoserCloseTime.set(dbUserId, Date.now());
 
                                     if (!l.isPaper) {
                                         const closeSide = l.side === 'long' ? 'sell' : 'buy';
@@ -852,19 +854,17 @@ const executeGlobalProfitMonitor = async () => {
                                     await SettingsModel.updateOne({ userId: dbUserId, "subAccounts._id": l.subAccount._id }, { $inc: { "subAccounts.$.realizedPnl": lossRealized } });
 
                                     logForProfile(firstProfileId, `⚖️ DEFICIT COVER: Closed -$${Math.abs(lossRealized).toFixed(4)} of ${l.symbol}.`);
-                                    budget -= Math.abs(lossRealized);
+                                    
                                     offsetExecuted = true;
-                                    executedAnyLoser = true;
+                                    
+                                    // 🛑 BREAK: ONLY 1 LOSER ALLOWED PER COOLDOWN CYCLE!
+                                    break; 
                                 } catch (e) {
                                     logForProfile(firstProfileId, `❌ DEFICIT LOSER ERR [${l.symbol}]: ${e.message}`);
                                 }
                             }
-                            
-                            if (executedAnyLoser) {
-                                global.lastDeficitLoserCloseTime.set(dbUserId, Date.now());
-                            }
                         } else {
-                            // Waiting for cooldown to pass, do nothing
+                            // Cooldown still active, ignoring losers for now
                         }
                     }
                 }
