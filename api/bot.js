@@ -1,5 +1,3 @@
-//web8888
-
 const express = require('express');
 const ccxt = require('ccxt');
 const mongoose = require('mongoose');
@@ -732,9 +730,9 @@ const executeGlobalProfitMonitor = async () => {
                     let winners = activeCandidates.filter(c => c.unrealizedPnl > 0).sort((a, b) => b.unrealizedPnl - a.unrealizedPnl);
 
                     // A. Calculate and CLOSE WINNERS to generate the cash to cover the deficit
-                    if (availableRealized < deficit && winners.length > 0) {
-                        let shortfall = deficit - availableRealized;
-                        logForProfile(firstProfileId, `⚙️ BALANCER: Deficit ($${deficit.toFixed(2)}) > Cash. Closing winners to cover shortfall ($${shortfall.toFixed(2)})...`);
+                    let shortfall = deficit;
+                    if (winners.length > 0) {
+                        logForProfile(firstProfileId, `⚙️ BALANCER: Closing winners to cover deficit ($${deficit.toFixed(2)})...`);
 
                         for (let w of winners) {
                             if (shortfall <= microTolerance) break;
@@ -2539,13 +2537,13 @@ const FRONTEND_HTML = [
     '                        let planHtml = "";',
     '                        let dTemp = deficit;',
     '                        let bTemp = availBudget;',
-    '                        let sTemp = dTemp - bTemp;',
+    '                        let sTemp = dTemp;',
     '                        ',
     '                        let wList = activeCandidates.filter(c => c.pnl > 0).sort((a,b) => b.pnl - a.pnl);',
     '                        let lList = activeCandidates.filter(c => c.pnl < 0).sort((a,b) => a.pnl - b.pnl);',
     '',
     '                        if (sTemp > 0 && wList.length > 0) {',
-    '                            planHtml += "<div style=\'margin-bottom:4px; color:#aaa;\'>1. Need to Harvest Winners for Shortfall ($" + sTemp.toFixed(2) + ")</div>";',
+    '                            planHtml += "<div style=\'margin-bottom:4px; color:#aaa;\'>1. Harvest Winners to Cover Deficit ($" + sTemp.toFixed(2) + ")</div>";',
     '                            for (let w of wList) {',
     '                                if (sTemp <= 0) break;',
     '                                let useAmt = Math.min(w.pnl, sTemp);',
