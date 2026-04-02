@@ -92,7 +92,6 @@ const SettingsSchema = new mongoose.Schema({
     autoBalanceEquity: { type: Boolean, default: false },
     autoBalanceUnrealizedPnlTarget: { type: Number, default: 0 },
     autoBalanceRetainRealized: { type: Number, default: 0 },
-    autoBalanceDelayMins: { type: Number, default: 1 },
     
     subAccounts: [SubAccountSchema],
 
@@ -142,7 +141,6 @@ const MainTemplate = mongoose.models.MainTemplate || mongoose.model('MainTemplat
 global.customMaxLeverages = {};
 global.marketSizes = {};
 global.livePrices = global.livePrices || {};
-global.autoBalanceTriggers = global.autoBalanceTriggers || {};
 let isBinanceFetching = false;
 let isHtxFetching = false;
 
@@ -656,10 +654,6 @@ const executeGlobalProfitMonitor = async () => {
             const targetV1 = smartOffsetNetProfit > 0 ? smartOffsetNetProfit : 0;
             let offsetExecuted = false;
 
-            const delayMs = Math.max(0, parseFloat(userSetting.autoBalanceDelayMins !== undefined ? userSetting.autoBalanceDelayMins : 1) * 60000);
-            if (!global.autoBalanceTriggers[dbUserId]) global.autoBalanceTriggers[dbUserId] = { surplusStart: 0, deficitStart: 0 };
-            const triggerState = global.autoBalanceTriggers[dbUserId];
-
             // ==============================================================
             // EQUITY AUTO-BALANCER (DEFICIT COVER & SURPLUS HARVEST)
             // ==============================================================
@@ -674,20 +668,76 @@ const executeGlobalProfitMonitor = async () => {
 
                 // 1. SURPLUS HARVEST
                 if (globalUnrealized > targetPnl + balanceTolerance) {
-                    triggerState.deficitStart = 0;
-                    if (triggerState.surplusStart === 0) {
-                        triggerState.surplusStart = Date.now();
-                        if (delayMs > 0) logForProfile(firstProfileId, `⏳ BALANCER: Surplus detected. Waiting ${userSetting.autoBalanceDelayMins} min(s) to confirm...`);
-                    }
+                    let excess = globalUnrealized - targetPnl;
+                    let winners = activeCandidates.filter(c => c.unrealizedPnl > 0).sort((a, b) => b.unrealizedPnl - a.unrealizedPnl);
 
-                    if (Date.now() - triggerState.surplusStart >= delayMs) {
-                        let excess = globalUnrealized - targetPnl;
-                        let winners = activeCandidates.filter(c => c.unrealizedPnl > 0).sort((a, b) => b.unrealizedPnl - a.unrealizedPnl);
+                    for (let w of winners) {
+                        if (excess <= balanceTolerance) break;
+                        let winAmount = w.unrealizedPnl;
+                        let closeFraction = winAmount > excess ? (excess / winAmount) : 1;
+                        let closeQty = Math.max(1, Math.floor(w.contracts * closeFraction));
+                        if (closeQty > w.contracts) closeQty = w.contracts;
+
+                        let realizedFromThis = winAmount * (closeQty / w.contracts);
+
+                        try {
+                            const bData = activeBots.get(w.profileId);
+                            if (!bData) continue;
+                            const bState = bData.state.coinStates[w.symbol];
+                            if (!bState) continue;
+
+                            const actualLev = parseInt(w.actualLeverage) || 10;
+
+                            if (!w.isPaper) {
+                                const closeSide = w.side === 'long' ? 'sell' : 'buy';
+                                await bData.exchange.createOrder(w.symbol, 'market', closeSide, closeQty, undefined, { offset: 'close', reduceOnly: true, lever_rate: actualLev });
+                            }
+
+                            await OffsetModel.create({
+                                userId: dbUserId, symbol: w.symbol, side: w.side,
+                                openPrice: bState.avgEntry, closePrice: bState.currentPrice, roi: bState.currentRoi,
+                                netProfit: realizedFromThis, reason: 'Balancer Surplus Harvest'
+                            });
+
+                            if (closeQty >= bState.contracts - 0.0001) {
+                                bState.contracts = 0; bState.unrealizedPnl = 0; bState.avgEntry = 0; bState.dcaCount = 0;
+                            } else {
+                                bState.contracts -= closeQty;
+                            }
+                            bState.lockUntil = Date.now() + 15000;
+
+                            w.subAccount.realizedPnl = (w.subAccount.realizedPnl || 0) + realizedFromThis;
+                            
+                            await SettingsModel.updateOne(
+                                { userId: dbUserId, "subAccounts._id": w.subAccount._id }, 
+                                { $inc: { "subAccounts.$.realizedPnl": realizedFromThis } }
+                            );
+
+                            logForProfile(firstProfileId, `⚖️ BALANCER: Harvested & Closed +$${realizedFromThis.toFixed(4)} on ${w.symbol}.`);
+                            excess -= realizedFromThis;
+                            offsetExecuted = true; 
+                        } catch (e) {
+                            logForProfile(firstProfileId, `❌ BALANCER HARVEST ERROR [${w.symbol}]: ${e.message}`);
+                        }
+                    }
+                } 
+                // 2. DEFICIT COVER (Instantly close winners & losers to wipe out the deficit)
+                else if (globalUnrealized < targetPnl - microTolerance) {
+                    let deficit = targetPnl - globalUnrealized;
+                    let availableRealized = Math.max(0, globalRealized - retainRealized);
+                    
+                    let losers = activeCandidates.filter(c => c.unrealizedPnl < 0).sort((a, b) => a.unrealizedPnl - b.unrealizedPnl);
+                    let winners = activeCandidates.filter(c => c.unrealizedPnl > 0).sort((a, b) => b.unrealizedPnl - a.unrealizedPnl);
+
+                    // A. Calculate and CLOSE WINNERS to generate the cash to cover the deficit
+                    if (availableRealized < deficit && winners.length > 0) {
+                        let shortfall = deficit - availableRealized;
+                        logForProfile(firstProfileId, `⚙️ BALANCER: Deficit ($${deficit.toFixed(2)}) > Cash. Closing winners to cover shortfall ($${shortfall.toFixed(2)})...`);
 
                         for (let w of winners) {
-                            if (excess <= balanceTolerance) break;
+                            if (shortfall <= microTolerance) break;
                             let winAmount = w.unrealizedPnl;
-                            let closeFraction = winAmount > excess ? (excess / winAmount) : 1;
+                            let closeFraction = winAmount > shortfall ? (shortfall / winAmount) : 1;
                             let closeQty = Math.max(1, Math.floor(w.contracts * closeFraction));
                             if (closeQty > w.contracts) closeQty = w.contracts;
 
@@ -709,7 +759,7 @@ const executeGlobalProfitMonitor = async () => {
                                 await OffsetModel.create({
                                     userId: dbUserId, symbol: w.symbol, side: w.side,
                                     openPrice: bState.avgEntry, closePrice: bState.currentPrice, roi: bState.currentRoi,
-                                    netProfit: realizedFromThis, reason: 'Balancer Surplus Harvest'
+                                    netProfit: realizedFromThis, reason: 'Deficit Cover (Winner)'
                                 });
 
                                 if (closeQty >= bState.contracts - 0.0001) {
@@ -720,147 +770,70 @@ const executeGlobalProfitMonitor = async () => {
                                 bState.lockUntil = Date.now() + 15000;
 
                                 w.subAccount.realizedPnl = (w.subAccount.realizedPnl || 0) + realizedFromThis;
-                                
-                                await SettingsModel.updateOne(
-                                    { userId: dbUserId, "subAccounts._id": w.subAccount._id }, 
-                                    { $inc: { "subAccounts.$.realizedPnl": realizedFromThis } }
-                                );
+                                await SettingsModel.updateOne({ userId: dbUserId, "subAccounts._id": w.subAccount._id }, { $inc: { "subAccounts.$.realizedPnl": realizedFromThis } });
 
-                                logForProfile(firstProfileId, `⚖️ BALANCER: Harvested & Closed +$${realizedFromThis.toFixed(4)} on ${w.symbol}.`);
-                                excess -= realizedFromThis;
-                                offsetExecuted = true; 
+                                logForProfile(firstProfileId, `⚖️ DEFICIT COVER: Closed +$${realizedFromThis.toFixed(4)} of ${w.symbol}.`);
+                                shortfall -= realizedFromThis;
+                                availableRealized += realizedFromThis;
+                                offsetExecuted = true;
                             } catch (e) {
-                                logForProfile(firstProfileId, `❌ BALANCER HARVEST ERROR [${w.symbol}]: ${e.message}`);
+                                logForProfile(firstProfileId, `❌ DEFICIT WINNER ERR [${w.symbol}]: ${e.message}`);
                             }
                         }
-                        triggerState.surplusStart = 0;
-                    }
-                } 
-                // 2. DEFICIT COVER (Instantly close winners & losers to wipe out the deficit)
-                else if (globalUnrealized < targetPnl - microTolerance) {
-                    triggerState.surplusStart = 0;
-                    if (triggerState.deficitStart === 0) {
-                        triggerState.deficitStart = Date.now();
-                        if (delayMs > 0) logForProfile(firstProfileId, `⏳ BALANCER: Deficit detected. Waiting ${userSetting.autoBalanceDelayMins} min(s) to confirm...`);
                     }
 
-                    if (Date.now() - triggerState.deficitStart >= delayMs) {
-                        let deficit = targetPnl - globalUnrealized;
-                        let availableRealized = Math.max(0, globalRealized - retainRealized);
-                        
-                        let losers = activeCandidates.filter(c => c.unrealizedPnl < 0).sort((a, b) => a.unrealizedPnl - b.unrealizedPnl);
-                        let winners = activeCandidates.filter(c => c.unrealizedPnl > 0).sort((a, b) => b.unrealizedPnl - a.unrealizedPnl);
+                    // B. Close the LOSERS using the available realized cash to eliminate the deficit completely
+                    let budget = Math.min(deficit, availableRealized);
 
-                        // A. Calculate and CLOSE WINNERS to generate the cash to cover the deficit
-                        let shortfall = deficit;
-                        if (winners.length > 0) {
-                            logForProfile(firstProfileId, `⚙️ BALANCER: Closing winners to cover deficit ($${deficit.toFixed(2)})...`);
+                    if (budget >= microTolerance && losers.length > 0) {
+                        logForProfile(firstProfileId, `⚙️ BALANCER: Closing losers to eliminate deficit. Budget: $${budget.toFixed(2)}`);
 
-                            for (let w of winners) {
-                                if (shortfall <= microTolerance) break;
-                                let winAmount = w.unrealizedPnl;
-                                let closeFraction = winAmount > shortfall ? (shortfall / winAmount) : 1;
-                                let closeQty = Math.max(1, Math.floor(w.contracts * closeFraction));
-                                if (closeQty > w.contracts) closeQty = w.contracts;
+                        for (let l of losers) {
+                            if (budget <= microTolerance) break;
+                            let lossAmount = Math.abs(l.unrealizedPnl);
+                            let closeFraction = lossAmount > budget ? (budget / lossAmount) : 1;
+                            let closeQty = Math.max(1, Math.floor(l.contracts * closeFraction));
+                            if (closeQty > l.contracts) closeQty = l.contracts;
 
-                                let realizedFromThis = winAmount * (closeQty / w.contracts);
+                            let lossRealized = -(lossAmount * (closeQty / l.contracts));
 
-                                try {
-                                    const bData = activeBots.get(w.profileId);
-                                    if (!bData) continue;
-                                    const bState = bData.state.coinStates[w.symbol];
-                                    if (!bState) continue;
+                            try {
+                                const bData = activeBots.get(l.profileId);
+                                if (!bData) continue;
+                                const bState = bData.state.coinStates[l.symbol];
+                                if (!bState) continue;
+                                
+                                const actualLev = parseInt(l.actualLeverage) || 10;
 
-                                    const actualLev = parseInt(w.actualLeverage) || 10;
-
-                                    if (!w.isPaper) {
-                                        const closeSide = w.side === 'long' ? 'sell' : 'buy';
-                                        await bData.exchange.createOrder(w.symbol, 'market', closeSide, closeQty, undefined, { offset: 'close', reduceOnly: true, lever_rate: actualLev });
-                                    }
-
-                                    await OffsetModel.create({
-                                        userId: dbUserId, symbol: w.symbol, side: w.side,
-                                        openPrice: bState.avgEntry, closePrice: bState.currentPrice, roi: bState.currentRoi,
-                                        netProfit: realizedFromThis, reason: 'Deficit Cover (Winner)'
-                                    });
-
-                                    if (closeQty >= bState.contracts - 0.0001) {
-                                        bState.contracts = 0; bState.unrealizedPnl = 0; bState.avgEntry = 0; bState.dcaCount = 0;
-                                    } else {
-                                        bState.contracts -= closeQty;
-                                    }
-                                    bState.lockUntil = Date.now() + 15000;
-
-                                    w.subAccount.realizedPnl = (w.subAccount.realizedPnl || 0) + realizedFromThis;
-                                    await SettingsModel.updateOne({ userId: dbUserId, "subAccounts._id": w.subAccount._id }, { $inc: { "subAccounts.$.realizedPnl": realizedFromThis } });
-
-                                    logForProfile(firstProfileId, `⚖️ DEFICIT COVER: Closed +$${realizedFromThis.toFixed(4)} of ${w.symbol}.`);
-                                    shortfall -= realizedFromThis;
-                                    availableRealized += realizedFromThis;
-                                    offsetExecuted = true;
-                                } catch (e) {
-                                    logForProfile(firstProfileId, `❌ DEFICIT WINNER ERR [${w.symbol}]: ${e.message}`);
+                                if (!l.isPaper) {
+                                    const closeSide = l.side === 'long' ? 'sell' : 'buy';
+                                    await bData.exchange.createOrder(l.symbol, 'market', closeSide, closeQty, undefined, { offset: 'close', reduceOnly: true, lever_rate: actualLev });
                                 }
-                            }
-                        }
 
-                        // B. Close the LOSERS using the available realized cash to eliminate the deficit completely
-                        let budget = Math.min(deficit, availableRealized);
+                                await OffsetModel.create({
+                                    userId: dbUserId, symbol: l.symbol, side: l.side,
+                                    openPrice: bState.avgEntry, closePrice: bState.currentPrice, roi: bState.currentRoi,
+                                    netProfit: lossRealized, reason: 'Deficit Cover (Loser)'
+                                });
 
-                        if (budget >= microTolerance && losers.length > 0) {
-                            logForProfile(firstProfileId, `⚙️ BALANCER: Closing losers to eliminate deficit. Budget: $${budget.toFixed(2)}`);
-
-                            for (let l of losers) {
-                                if (budget <= microTolerance) break;
-                                let lossAmount = Math.abs(l.unrealizedPnl);
-                                let closeFraction = lossAmount > budget ? (budget / lossAmount) : 1;
-                                let closeQty = Math.max(1, Math.floor(l.contracts * closeFraction));
-                                if (closeQty > l.contracts) closeQty = l.contracts;
-
-                                let lossRealized = -(lossAmount * (closeQty / l.contracts));
-
-                                try {
-                                    const bData = activeBots.get(l.profileId);
-                                    if (!bData) continue;
-                                    const bState = bData.state.coinStates[l.symbol];
-                                    if (!bState) continue;
-                                    
-                                    const actualLev = parseInt(l.actualLeverage) || 10;
-
-                                    if (!l.isPaper) {
-                                        const closeSide = l.side === 'long' ? 'sell' : 'buy';
-                                        await bData.exchange.createOrder(l.symbol, 'market', closeSide, closeQty, undefined, { offset: 'close', reduceOnly: true, lever_rate: actualLev });
-                                    }
-
-                                    await OffsetModel.create({
-                                        userId: dbUserId, symbol: l.symbol, side: l.side,
-                                        openPrice: bState.avgEntry, closePrice: bState.currentPrice, roi: bState.currentRoi,
-                                        netProfit: lossRealized, reason: 'Deficit Cover (Loser)'
-                                    });
-
-                                    if (closeQty >= bState.contracts - 0.0001) {
-                                        bState.contracts = 0; bState.unrealizedPnl = 0; bState.avgEntry = 0; bState.dcaCount = 0;
-                                    } else {
-                                        bState.contracts -= closeQty;
-                                    }
-                                    bState.lockUntil = Date.now() + 15000;
-
-                                    l.subAccount.realizedPnl = (l.subAccount.realizedPnl || 0) + lossRealized;
-                                    await SettingsModel.updateOne({ userId: dbUserId, "subAccounts._id": l.subAccount._id }, { $inc: { "subAccounts.$.realizedPnl": lossRealized } });
-
-                                    logForProfile(firstProfileId, `⚖️ DEFICIT COVER: Closed -$${Math.abs(lossRealized).toFixed(4)} of ${l.symbol}.`);
-                                    budget -= Math.abs(lossRealized);
-                                    offsetExecuted = true;
-                                } catch (e) {
-                                    logForProfile(firstProfileId, `❌ DEFICIT LOSER ERR [${l.symbol}]: ${e.message}`);
+                                if (closeQty >= bState.contracts - 0.0001) {
+                                    bState.contracts = 0; bState.unrealizedPnl = 0; bState.avgEntry = 0; bState.dcaCount = 0;
+                                } else {
+                                    bState.contracts -= closeQty;
                                 }
+                                bState.lockUntil = Date.now() + 15000;
+
+                                l.subAccount.realizedPnl = (l.subAccount.realizedPnl || 0) + lossRealized;
+                                await SettingsModel.updateOne({ userId: dbUserId, "subAccounts._id": l.subAccount._id }, { $inc: { "subAccounts.$.realizedPnl": lossRealized } });
+
+                                logForProfile(firstProfileId, `⚖️ DEFICIT COVER: Closed -$${Math.abs(lossRealized).toFixed(4)} of ${l.symbol}.`);
+                                budget -= Math.abs(lossRealized);
+                                offsetExecuted = true;
+                            } catch (e) {
+                                logForProfile(firstProfileId, `❌ DEFICIT LOSER ERR [${l.symbol}]: ${e.message}`);
                             }
                         }
-                        triggerState.deficitStart = 0;
                     }
-                } else {
-                    triggerState.surplusStart = 0;
-                    triggerState.deficitStart = 0;
                 }
             }
 
@@ -1494,7 +1467,7 @@ app.post('/api/settings', authMiddleware, async (req, res) => {
     await bootstrapBots(); 
     const SettingsModel = req.isPaper ? PaperSettings : RealSettings;
 
-    const { subAccounts, globalSingleCoinTpPnl, smartOffsetNetProfit, autoBalanceEquity, autoBalanceUnrealizedPnlTarget, autoBalanceRetainRealized, autoBalanceDelayMins } = req.body;
+    const { subAccounts, globalSingleCoinTpPnl, smartOffsetNetProfit, autoBalanceEquity, autoBalanceUnrealizedPnlTarget, autoBalanceRetainRealized } = req.body;
     
     const existingSettings = await SettingsModel.findOne({ userId: req.userId });
     if (existingSettings && existingSettings.subAccounts) {
@@ -1519,8 +1492,7 @@ app.post('/api/settings', authMiddleware, async (req, res) => {
         { 
             subAccounts, globalSingleCoinTpPnl: parseFloat(globalSingleCoinTpPnl) || 0,
             smartOffsetNetProfit: parseFloat(smartOffsetNetProfit) || 0,
-            autoBalanceEquity: autoBalanceEquity === true, autoBalanceUnrealizedPnlTarget: parseFloat(autoBalanceUnrealizedPnlTarget) || 0, autoBalanceRetainRealized: parseFloat(autoBalanceRetainRealized) || 0,
-            autoBalanceDelayMins: parseFloat(autoBalanceDelayMins) || 0
+            autoBalanceEquity: autoBalanceEquity === true, autoBalanceUnrealizedPnlTarget: parseFloat(autoBalanceUnrealizedPnlTarget) || 0, autoBalanceRetainRealized: parseFloat(autoBalanceRetainRealized) || 0
         }, { returnDocument: 'after' }
     );
 
@@ -1549,8 +1521,7 @@ app.post('/api/settings', authMiddleware, async (req, res) => {
         const syncGlobalParams = {
             globalSingleCoinTpPnl: updated.globalSingleCoinTpPnl,
             smartOffsetNetProfit: updated.smartOffsetNetProfit,
-            autoBalanceEquity: updated.autoBalanceEquity, autoBalanceUnrealizedPnlTarget: updated.autoBalanceUnrealizedPnlTarget, autoBalanceRetainRealized: updated.autoBalanceRetainRealized,
-            autoBalanceDelayMins: updated.autoBalanceDelayMins
+            autoBalanceEquity: updated.autoBalanceEquity, autoBalanceUnrealizedPnlTarget: updated.autoBalanceUnrealizedPnlTarget, autoBalanceRetainRealized: updated.autoBalanceRetainRealized
         };
 
         const applyMasterSync = async (userSettingsDoc, isPaperMode) => {
@@ -1654,9 +1625,7 @@ app.get('/api/status', authMiddleware, async (req, res) => {
     const firstOffset = await OffsetModel.findOne({ userId: req.userId }).sort({ timestamp: 1 }).lean();
     const startTime = firstOffset ? firstOffset.timestamp : null;
 
-    const abState = global.autoBalanceTriggers?.[req.userId.toString()] || { surplusStart: 0, deficitStart: 0 };
-
-    res.json({ states: userStatuses, subAccounts: settings ? settings.subAccounts : [], globalSettings: settings, startTime, abState });
+    res.json({ states: userStatuses, subAccounts: settings ? settings.subAccounts : [], globalSettings: settings, startTime });
 });
 
 app.get('/api/offsets', authMiddleware, async (req, res) => {
@@ -1678,8 +1647,7 @@ app.post('/api/master/global', authMiddleware, adminMiddleware, async (req, res)
         const payload = {
             globalSingleCoinTpPnl: parseFloat(req.body.globalSingleCoinTpPnl) || 0,
             smartOffsetNetProfit: parseFloat(req.body.smartOffsetNetProfit) || 0,
-            autoBalanceEquity: req.body.autoBalanceEquity === true, autoBalanceUnrealizedPnlTarget: parseFloat(req.body.autoBalanceUnrealizedPnlTarget) || 0, autoBalanceRetainRealized: parseFloat(req.body.autoBalanceRetainRealized) || 0,
-            autoBalanceDelayMins: parseFloat(req.body.autoBalanceDelayMins) || 0
+            autoBalanceEquity: req.body.autoBalanceEquity === true, autoBalanceUnrealizedPnlTarget: parseFloat(req.body.autoBalanceUnrealizedPnlTarget) || 0, autoBalanceRetainRealized: parseFloat(req.body.autoBalanceRetainRealized) || 0
         };
 
         await RealSettings.findOneAndUpdate({ userId: masterUser._id }, { $set: payload }, { new: true, upsert: true });
@@ -1962,10 +1930,9 @@ const FRONTEND_HTML = [
     '                            </div>',
     '                            <div style="border-top:1px solid #333; padding-top:15px; margin-top:10px;">',
     '                                <label class="checkbox-wrapper"><input type="checkbox" id="autoBalanceEquity"><span>Enable Equity Balancer</span></label>',
-    '                                <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:15px;">',
+    '                                <div class="grid-2">',
     '                                    <div><label>Target Unrealized ($)</label><input type="number" id="autoBalanceUnrealizedPnlTarget"></div>',
     '                                    <div><label>Retain Realized ($)</label><input type="number" id="autoBalanceRetainRealized"></div>',
-    '                                    <div><label>Delay (Mins)</label><input type="number" step="0.1" id="autoBalanceDelayMins"></div>',
     '                                </div>',
     '                            </div>',
     '                            <button style="width:100%; margin-top:10px;" onclick="saveGlobalSettings()">Deploy Global</button>',
@@ -2073,7 +2040,6 @@ const FRONTEND_HTML = [
     '        let myAutoBalanceEquity = false;',
     '        let myAutoBalanceUnrealizedPnlTarget = -50000;',
     '        let myAutoBalanceRetainRealized = 0;',
-    '        let myAutoBalanceDelayMins = 1;',
     '        let currentProfileIndex = -1;',
     '        let myCoins = [];',
     '        const PREDEFINED_COINS = ["OP", "BIGTIME", "MOVE", "SSV", "COAI", "TIA", "MERL", "MASK", "PYTH", "ETHFI", "CFX", "MEME", "LUNA", "STEEM", "BERA", "2Z", "FIL", "APT", "1INCH", "ARB", "XPL", "ENA", "MMT", "AXS", "TON", "CAKE", "BSV", "JUP", "WIF", "LIGHT", "PI", "SUSHI", "LPT", "CRV", "TAO", "ORDI", "YFI", "LA", "ICP", "FTT", "GIGGLE", "LDO", "OPN", "INJ", "SNX", "DASH", "WLD", "KAITO", "TRUMP", "WAVES", "ZEN", "ENS", "ASTER", "VIRTUAL"];',
@@ -2242,7 +2208,7 @@ const FRONTEND_HTML = [
     '                if (!masterSettings) { document.getElementById(\'editorGlobalContainer\').innerHTML = \'<p class="text-red">Missing config.</p>\'; return; }',
     '                let globalHtml = \'<div class="grid-2"><div><label>Univ. Coin TP ($)</label><input type="number" step="0.0001" id="e_globalSingleCoinTpPnl" value="\' + (masterSettings.globalSingleCoinTpPnl||0) + \'"></div></div>\';',
     '                globalHtml += \'<div style="margin-top:10px; border-top:1px solid #333; padding-top:10px;"><label class="checkbox-wrapper"><input type="checkbox" id="e_autoBalanceEquity" \' + (masterSettings.autoBalanceEquity ? "checked" : "") + \'><span>Enable Balancer</span></label>\';',
-    '                globalHtml += \'<div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:15px;"><div><label>Target Unrealized</label><input type="number" id="e_autoBalanceUnrealizedPnlTarget" value="\' + (masterSettings.autoBalanceUnrealizedPnlTarget||0) + \'"></div><div><label>Retain Realized</label><input type="number" id="e_autoBalanceRetainRealized" value="\' + (masterSettings.autoBalanceRetainRealized||0) + \'"></div><div><label>Delay (Mins)</label><input type="number" id="e_autoBalanceDelayMins" value="\' + (masterSettings.autoBalanceDelayMins!==undefined?masterSettings.autoBalanceDelayMins:1) + \'"></div></div></div>\';',
+    '                globalHtml += \'<div class="grid-2"><div><label>Target Unrealized</label><input type="number" id="e_autoBalanceUnrealizedPnlTarget" value="\' + (masterSettings.autoBalanceUnrealizedPnlTarget||0) + \'"></div><div><label>Retain Realized</label><input type="number" id="e_autoBalanceRetainRealized" value="\' + (masterSettings.autoBalanceRetainRealized||0) + \'"></div></div></div>\';',
     '                globalHtml += \'<div class="grid-2" style="margin-top:10px;"><div><label>V1 Offset Target ($)</label><input type="number" step="0.0001" id="e_smartOffsetNetProfit" value="\' + (masterSettings.smartOffsetNetProfit||0) + \'"></div></div>\';',
     '                globalHtml += \'<button style="width:100%; margin-top:15px; border-color:#60a5fa; color:#60a5fa;" onclick="saveMasterGlobalSettings()">Overwrite & Sync Global</button><div id="e_globalMsg" style="margin-top:10px;"></div>\';',
     '                document.getElementById(\'editorGlobalContainer\').innerHTML = globalHtml;',
@@ -2264,8 +2230,7 @@ const FRONTEND_HTML = [
     '            const getVal = (id, def) => { const el = document.getElementById(id); return el && el.value !== \'\' ? parseFloat(el.value) : def; };',
     '            const payload = {',
     '                globalSingleCoinTpPnl: getVal(\'e_globalSingleCoinTpPnl\', 0), smartOffsetNetProfit: getVal(\'e_smartOffsetNetProfit\', 0),',
-    '                autoBalanceEquity: document.getElementById(\'e_autoBalanceEquity\')?.checked||false, autoBalanceUnrealizedPnlTarget: getVal(\'e_autoBalanceUnrealizedPnlTarget\', 0), autoBalanceRetainRealized: getVal(\'e_autoBalanceRetainRealized\', 0),',
-    '                autoBalanceDelayMins: getVal(\'e_autoBalanceDelayMins\', 1)',
+    '                autoBalanceEquity: document.getElementById(\'e_autoBalanceEquity\')?.checked||false, autoBalanceUnrealizedPnlTarget: getVal(\'e_autoBalanceUnrealizedPnlTarget\', 0), autoBalanceRetainRealized: getVal(\'e_autoBalanceRetainRealized\', 0)',
     '            };',
     '            const res = await fetch(\'/api/master/global\', { method: \'POST\', headers: { \'Content-Type\': \'application/json\', \'Authorization\': \'Bearer \' + token }, body: JSON.stringify(payload) });',
     '            const data = await res.json();',
@@ -2338,18 +2303,18 @@ const FRONTEND_HTML = [
     '                myAutoBalanceEquity = config.autoBalanceEquity || false;',
     '                myAutoBalanceUnrealizedPnlTarget = config.autoBalanceUnrealizedPnlTarget || 0;',
     '                myAutoBalanceRetainRealized = config.autoBalanceRetainRealized || 0;',
-    '                myAutoBalanceDelayMins = config.autoBalanceDelayMins !== undefined ? config.autoBalanceDelayMins : 1;',
     '                const setVal = (id, val) => { const el = document.getElementById(id); if(el) el.value = val; };',
     '                setVal(\'globalSingleCoinTpPnl\', myGlobalSingleCoinTpPnl);',
     '                setVal(\'smartOffsetNetProfit\', mySmartOffsetNetProfit);',
     '                if(document.getElementById(\'autoBalanceEquity\')) document.getElementById(\'autoBalanceEquity\').checked = myAutoBalanceEquity;',
     '                setVal(\'autoBalanceUnrealizedPnlTarget\', myAutoBalanceUnrealizedPnlTarget);',
     '                setVal(\'autoBalanceRetainRealized\', myAutoBalanceRetainRealized);',
-    '                setVal(\'autoBalanceDelayMins\', myAutoBalanceDelayMins);',
     '                ',
     '                const setTxt = (id, txt) => { const el=document.getElementById(id); if(el) el.innerText=txt; };',
     '                setTxt(\'display_globalSingleCoinTpPnl\', fmtC(myGlobalSingleCoinTpPnl));',
     '                setTxt(\'display_smartOffsetNetProfit\', fmtC(mySmartOffsetNetProfit));',
+    '                const abStatus = document.getElementById(\'display_autoBalanceStatus\');',
+    '                if(abStatus) abStatus.innerHTML = myAutoBalanceEquity ? \'<span class="text-green">ON</span>\' : \'<span class="text-muted">OFF</span>\';',
     '',
     '                mySubAccounts = config.subAccounts || [];',
     '                renderSubAccounts();',
@@ -2365,8 +2330,7 @@ const FRONTEND_HTML = [
     '            myAutoBalanceEquity = document.getElementById(\'autoBalanceEquity\')?.checked || false;',
     '            myAutoBalanceUnrealizedPnlTarget = getVal(\'autoBalanceUnrealizedPnlTarget\', 0);',
     '            myAutoBalanceRetainRealized = getVal(\'autoBalanceRetainRealized\', 0);',
-    '            myAutoBalanceDelayMins = getVal(\'autoBalanceDelayMins\', 1);',
-    '            const data = { subAccounts: mySubAccounts, globalSingleCoinTpPnl: myGlobalSingleCoinTpPnl, smartOffsetNetProfit: mySmartOffsetNetProfit, autoBalanceEquity: myAutoBalanceEquity, autoBalanceUnrealizedPnlTarget: myAutoBalanceUnrealizedPnlTarget, autoBalanceRetainRealized: myAutoBalanceRetainRealized, autoBalanceDelayMins: myAutoBalanceDelayMins };',
+    '            const data = { subAccounts: mySubAccounts, globalSingleCoinTpPnl: myGlobalSingleCoinTpPnl, smartOffsetNetProfit: mySmartOffsetNetProfit, autoBalanceEquity: myAutoBalanceEquity, autoBalanceUnrealizedPnlTarget: myAutoBalanceUnrealizedPnlTarget, autoBalanceRetainRealized: myAutoBalanceRetainRealized };',
     '            await fetch(\'/api/settings\', { method: \'POST\', headers: { \'Content-Type\': \'application/json\', \'Authorization\': \'Bearer \' + token }, body: JSON.stringify(data) });',
     '        }',
     '',
@@ -2473,7 +2437,7 @@ const FRONTEND_HTML = [
     '            p.triggerDcaPnl = parseFloat(document.getElementById(\'triggerDcaPnl\').value)||-2;',
     '            p.maxContracts = parseInt(document.getElementById(\'maxContracts\').value)||1000;',
     '            p.coins = myCoins;',
-    '            const data = { subAccounts: mySubAccounts, globalSingleCoinTpPnl: myGlobalSingleCoinTpPnl, smartOffsetNetProfit: mySmartOffsetNetProfit, autoBalanceEquity: myAutoBalanceEquity, autoBalanceUnrealizedPnlTarget: myAutoBalanceUnrealizedPnlTarget, autoBalanceRetainRealized: myAutoBalanceRetainRealized, autoBalanceDelayMins: myAutoBalanceDelayMins };',
+    '            const data = { subAccounts: mySubAccounts, globalSingleCoinTpPnl: myGlobalSingleCoinTpPnl, smartOffsetNetProfit: mySmartOffsetNetProfit, autoBalanceEquity: myAutoBalanceEquity, autoBalanceUnrealizedPnlTarget: myAutoBalanceUnrealizedPnlTarget, autoBalanceRetainRealized: myAutoBalanceRetainRealized };',
     '            const res = await fetch(\'/api/settings\', { method: \'POST\', headers: { \'Content-Type\': \'application/json\', \'Authorization\': \'Bearer \' + token }, body: JSON.stringify(data) });',
     '            const json = await res.json(); mySubAccounts = json.settings.subAccounts || [];',
     '        }',
@@ -2567,34 +2531,19 @@ const FRONTEND_HTML = [
     '                setTxt(\'display_autoBalanceGap\', "-$" + deficit.toFixed(4), deficit > 0 ? "text-red" : "text-muted");',
     '                setTxt(\'display_autoBalanceBudget\', "+$" + availBudget.toFixed(4), "text-blue");',
     '',
-    '                let abStatusTxt = myAutoBalanceEquity ? \'<span class="text-green">ON</span>\' : \'<span class="text-muted">OFF</span>\';',
-    '                if (myAutoBalanceEquity && data.abState) {',
-    '                    const now = Date.now();',
-    '                    const delayMs = myAutoBalanceDelayMins * 60000;',
-    '                    if (data.abState.surplusStart > 0) {',
-    '                        const left = Math.max(0, delayMs - (now - data.abState.surplusStart));',
-    '                        abStatusTxt = \'<span class="text-warning">⏳ Surplus (\' + Math.ceil(left/1000) + \'s)</span>\';',
-    '                    } else if (data.abState.deficitStart > 0) {',
-    '                        const left = Math.max(0, delayMs - (now - data.abState.deficitStart));',
-    '                        abStatusTxt = \'<span class="text-warning">⏳ Deficit (\' + Math.ceil(left/1000) + \'s)</span>\';',
-    '                    }',
-    '                }',
-    '                const abStatusEl = document.getElementById(\'display_autoBalanceStatus\');',
-    '                if(abStatusEl) abStatusEl.innerHTML = abStatusTxt;',
-    '',
     '                const coverPlanContainer = document.getElementById("cover-plan-container");',
     '                if (coverPlanContainer) {',
     '                    if (myAutoBalanceEquity && deficit > 0) {',
     '                        let planHtml = "";',
     '                        let dTemp = deficit;',
     '                        let bTemp = availBudget;',
-    '                        let sTemp = dTemp;',
+    '                        let sTemp = dTemp - bTemp;',
     '                        ',
     '                        let wList = activeCandidates.filter(c => c.pnl > 0).sort((a,b) => b.pnl - a.pnl);',
     '                        let lList = activeCandidates.filter(c => c.pnl < 0).sort((a,b) => a.pnl - b.pnl);',
     '',
     '                        if (sTemp > 0 && wList.length > 0) {',
-    '                            planHtml += "<div style=\'margin-bottom:4px; color:#aaa;\'>1. Harvest Winners to Cover Deficit ($" + sTemp.toFixed(2) + ")</div>";',
+    '                            planHtml += "<div style=\'margin-bottom:4px; color:#aaa;\'>1. Need to Harvest Winners for Shortfall ($" + sTemp.toFixed(2) + ")</div>";',
     '                            for (let w of wList) {',
     '                                if (sTemp <= 0) break;',
     '                                let useAmt = Math.min(w.pnl, sTemp);',
