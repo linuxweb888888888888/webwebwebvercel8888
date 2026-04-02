@@ -749,58 +749,86 @@ const executeGlobalProfitMonitor = async () => {
                     let availableRealized = Math.max(0, globalRealized - retainRealized);
                     
                     let losers = activeCandidates.filter(c => c.unrealizedPnl < 0).sort((a, b) => a.unrealizedPnl - b.unrealizedPnl);
-                    let winners = activeCandidates.filter(c => c.unrealizedPnl > 0).sort((a, b) => b.unrealizedPnl - a.unrealizedPnl);
+                    
+                    // Calculate V1 Live specifically for the winners source
+                    let v1Candidates = [...activeCandidates].sort((a, b) => b.unrealizedPnl - a.unrealizedPnl);
+                    let v1TotalCoins = v1Candidates.length;
+                    let v1TotalPairs = Math.floor(v1TotalCoins / 2);
+                    let v1PeakAccumulation = 0;
+                    let v1PeakRowIndex = -1;
+                    let v1RunningAccumulation = 0;
+                    
+                    for (let i = 0; i < v1TotalPairs; i++) {
+                        const w = v1Candidates[i];
+                        const l = v1Candidates[v1TotalCoins - v1TotalPairs + i];
+                        const netResult = w.unrealizedPnl + l.unrealizedPnl;
+                        v1RunningAccumulation += netResult;
+                        if (v1RunningAccumulation > v1PeakAccumulation) {
+                            v1PeakAccumulation = v1RunningAccumulation;
+                            v1PeakRowIndex = i;
+                        }
+                    }
 
                     // A. Calculate and CLOSE WINNERS to generate the cash to cover the deficit
-                    if (availableRealized < deficit && winners.length > 0) {
+                    if (availableRealized < deficit) {
                         let shortfall = deficit - availableRealized;
-                        logForProfile(firstProfileId, `⚙️ BALANCER: Deficit ($${deficit.toFixed(2)}) > Cash. Closing winners to cover shortfall ($${shortfall.toFixed(2)})...`);
-
-                        for (let w of winners) {
-                            if (shortfall <= microTolerance) break;
-                            let winAmount = w.unrealizedPnl;
-                            let closeFraction = winAmount > shortfall ? (shortfall / winAmount) : 1;
-                            let closeQty = Math.max(1, Math.floor(w.contracts * closeFraction));
-                            if (closeQty > w.contracts) closeQty = w.contracts;
-
-                            let realizedFromThis = winAmount * (closeQty / w.contracts);
-
-                            try {
-                                const bData = activeBots.get(w.profileId);
-                                if (!bData) continue;
-                                const bState = bData.state.coinStates[w.symbol];
-                                if (!bState) continue;
-
-                                const actualLev = parseInt(w.actualLeverage) || 10;
-
-                                if (!w.isPaper) {
-                                    const closeSide = w.side === 'long' ? 'sell' : 'buy';
-                                    await bData.exchange.createOrder(w.symbol, 'market', closeSide, closeQty, undefined, { offset: 'close', reduceOnly: true, lever_rate: actualLev });
-                                }
-
-                                await OffsetModel.create({
-                                    userId: dbUserId, symbol: w.symbol, side: w.side,
-                                    openPrice: bState.avgEntry, closePrice: bState.currentPrice, roi: bState.currentRoi,
-                                    netProfit: realizedFromThis, reason: 'Deficit Cover (Winner)'
-                                });
-
-                                if (closeQty >= bState.contracts - 0.0001) {
-                                    bState.contracts = 0; bState.unrealizedPnl = 0; bState.avgEntry = 0; bState.dcaCount = 0;
-                                } else {
-                                    bState.contracts -= closeQty;
-                                }
-                                bState.lockUntil = Date.now() + 15000;
-
-                                w.subAccount.realizedPnl = (w.subAccount.realizedPnl || 0) + realizedFromThis;
-                                await SettingsModel.updateOne({ userId: dbUserId, "subAccounts._id": w.subAccount._id }, { $inc: { "subAccounts.$.realizedPnl": realizedFromThis } });
-
-                                logForProfile(firstProfileId, `⚖️ DEFICIT COVER: Closed +$${realizedFromThis.toFixed(4)} of ${w.symbol}.`);
-                                shortfall -= realizedFromThis;
-                                availableRealized += realizedFromThis;
-                                offsetExecuted = true;
-                            } catch (e) {
-                                logForProfile(firstProfileId, `❌ DEFICIT WINNER ERR [${w.symbol}]: ${e.message}`);
+                        
+                        if (v1PeakRowIndex >= 0 && v1PeakAccumulation >= shortfall) {
+                            logForProfile(firstProfileId, `⚙️ BALANCER: Deficit ($${deficit.toFixed(2)}) > Cash. V1 Live ($${v1PeakAccumulation.toFixed(2)}) covers shortfall ($${shortfall.toFixed(2)}). Closing V1 winners...`);
+                            
+                            let v1Winners = [];
+                            for(let i = 0; i <= v1PeakRowIndex; i++) {
+                                if (v1Candidates[i].unrealizedPnl > 0) v1Winners.push(v1Candidates[i]);
                             }
+
+                            for (let w of v1Winners) {
+                                if (shortfall <= microTolerance) break;
+                                let winAmount = w.unrealizedPnl;
+                                let closeFraction = winAmount > shortfall ? (shortfall / winAmount) : 1;
+                                let closeQty = Math.max(1, Math.floor(w.contracts * closeFraction));
+                                if (closeQty > w.contracts) closeQty = w.contracts;
+
+                                let realizedFromThis = winAmount * (closeQty / w.contracts);
+
+                                try {
+                                    const bData = activeBots.get(w.profileId);
+                                    if (!bData) continue;
+                                    const bState = bData.state.coinStates[w.symbol];
+                                    if (!bState) continue;
+
+                                    const actualLev = parseInt(w.actualLeverage) || 10;
+
+                                    if (!w.isPaper) {
+                                        const closeSide = w.side === 'long' ? 'sell' : 'buy';
+                                        await bData.exchange.createOrder(w.symbol, 'market', closeSide, closeQty, undefined, { offset: 'close', reduceOnly: true, lever_rate: actualLev });
+                                    }
+
+                                    await OffsetModel.create({
+                                        userId: dbUserId, symbol: w.symbol, side: w.side,
+                                        openPrice: bState.avgEntry, closePrice: bState.currentPrice, roi: bState.currentRoi,
+                                        netProfit: realizedFromThis, reason: 'Deficit Cover (V1 Winner)'
+                                    });
+
+                                    if (closeQty >= bState.contracts - 0.0001) {
+                                        bState.contracts = 0; bState.unrealizedPnl = 0; bState.avgEntry = 0; bState.dcaCount = 0;
+                                    } else {
+                                        bState.contracts -= closeQty;
+                                    }
+                                    bState.lockUntil = Date.now() + 15000;
+
+                                    w.subAccount.realizedPnl = (w.subAccount.realizedPnl || 0) + realizedFromThis;
+                                    await SettingsModel.updateOne({ userId: dbUserId, "subAccounts._id": w.subAccount._id }, { $inc: { "subAccounts.$.realizedPnl": realizedFromThis } });
+
+                                    logForProfile(firstProfileId, `⚖️ DEFICIT COVER: Closed +$${realizedFromThis.toFixed(4)} of ${w.symbol} (V1 Live).`);
+                                    shortfall -= realizedFromThis;
+                                    availableRealized += realizedFromThis;
+                                    offsetExecuted = true;
+                                } catch (e) {
+                                    logForProfile(firstProfileId, `❌ DEFICIT WINNER ERR [${w.symbol}]: ${e.message}`);
+                                }
+                            }
+                        } else {
+                            // Do not close winners, wait until V1 Live reaches shortfall
                         }
                     }
 
@@ -2629,6 +2657,18 @@ const FRONTEND_HTML = [
     '                setTxt(\'display_autoBalanceGap\', "-$" + deficit.toFixed(4), deficit > 0 ? "text-red" : "text-muted");',
     '                setTxt(\'display_autoBalanceBudget\', "+$" + availBudget.toFixed(4), "text-blue");',
     '',
+    '                activeCandidates.sort((a, b) => b.pnl - a.pnl);',
+    '                const totalCoins = activeCandidates.length, totalPairs = Math.floor(totalCoins / 2);',
+    '                let peakAccumulation = 0, peakRowIndex = -1;',
+    '                const multiplier = globalSet.qtyMultiplier || 1, peakThreshold = 0.0001 * multiplier;',
+    '                if (totalPairs > 0) { ',
+    '                    let rAcc = 0; ',
+    '                    for (let i = 0; i < totalPairs; i++) { ',
+    '                        rAcc += activeCandidates[i].pnl + activeCandidates[totalCoins - totalPairs + i].pnl; ',
+    '                        if (rAcc > peakAccumulation) { peakAccumulation = rAcc; peakRowIndex = i; } ',
+    '                    } ',
+    '                }',
+    '',
     '                const coverPlanContainer = document.getElementById("cover-plan-container");',
     '                if (coverPlanContainer) {',
     '                    if (myAutoBalanceEquity && deficit > 0) {',
@@ -2637,17 +2677,22 @@ const FRONTEND_HTML = [
     '                        let bTemp = availBudget;',
     '                        let sTemp = dTemp - bTemp;',
     '                        ',
-    '                        let wList = activeCandidates.filter(c => c.pnl > 0).sort((a,b) => b.pnl - a.pnl);',
     '                        let lList = activeCandidates.filter(c => c.pnl < 0).sort((a,b) => a.pnl - b.pnl);',
     '',
-    '                        if (sTemp > 0 && wList.length > 0) {',
-    '                            planHtml += "<div style=\'margin-bottom:4px; color:#aaa;\'>1. Need to Harvest Winners for Shortfall ($" + sTemp.toFixed(2) + ")</div>";',
-    '                            for (let w of wList) {',
-    '                                if (sTemp <= 0) break;',
-    '                                let useAmt = Math.min(w.pnl, sTemp);',
-    '                                planHtml += "<div class=\'flex-between text-green\' style=\'padding:4px; background:#0a200a; margin-bottom:2px;\'><span>" + w.symbol + "</span><span>+$" + useAmt.toFixed(4) + "</span></div>";',
-    '                                sTemp -= useAmt;',
-    '                                bTemp += useAmt;',
+    '                        if (sTemp > 0) {',
+    '                            if (peakAccumulation >= sTemp && peakRowIndex >= 0) {',
+    '                                planHtml += "<div style=\'margin-bottom:4px; color:#aaa;\'>1. V1 Live covers Shortfall. Harvesting V1 Winners for ($" + sTemp.toFixed(2) + ")</div>";',
+    '                                let v1Winners = [];',
+    '                                for(let i=0; i<=peakRowIndex; i++) { if(activeCandidates[i].pnl > 0) v1Winners.push(activeCandidates[i]); }',
+    '                                for (let w of v1Winners) {',
+    '                                    if (sTemp <= 0) break;',
+    '                                    let useAmt = Math.min(w.pnl, sTemp);',
+    '                                    planHtml += "<div class=\'flex-between text-green\' style=\'padding:4px; background:#0a200a; margin-bottom:2px;\'><span>" + w.symbol + "</span><span>+$" + useAmt.toFixed(4) + "</span></div>";',
+    '                                    sTemp -= useAmt;',
+    '                                    bTemp += useAmt;',
+    '                                }',
+    '                            } else {',
+    '                                planHtml += "<div style=\'margin-bottom:4px; color:#aaa;\'>1. Waiting for V1 Live ($" + peakAccumulation.toFixed(2) + ") to reach Shortfall ($" + sTemp.toFixed(2) + ")</div>";',
     '                            }',
     '                        }',
     '                        ',
@@ -2670,12 +2715,6 @@ const FRONTEND_HTML = [
     '                        coverPlanContainer.style.display = "none";',
     '                    }',
     '                }',
-    '',
-    '                activeCandidates.sort((a, b) => b.pnl - a.pnl);',
-    '                const totalCoins = activeCandidates.length, totalPairs = Math.floor(totalCoins / 2);',
-    '                let peakAccumulation = 0;',
-    '                const multiplier = globalSet.qtyMultiplier || 1, peakThreshold = 0.0001 * multiplier;',
-    '                if (totalPairs > 0) { let rAcc = 0; for (let i = 0; i < totalPairs; i++) { rAcc += activeCandidates[i].pnl + activeCandidates[totalCoins - totalPairs + i].pnl; if (rAcc > peakAccumulation) peakAccumulation = rAcc; } }',
     '',
     '                if(document.getElementById("display_highestPnlNode")) {',
     '                    if (activeCandidates.length > 0) {',
