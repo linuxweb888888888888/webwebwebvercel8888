@@ -94,7 +94,8 @@ const SettingsSchema = new mongoose.Schema({
     // Global DCA Recovery Settings
     autoBalanceEquity: { type: Boolean, default: false }, 
     autoBalanceUnrealizedPnlTarget: { type: Number, default: 0 }, 
-    globalDcaRecoveryTriggerPnl: { type: Number, default: -50 }, 
+    globalDcaRecoveryTriggerPnl: { type: Number, default: -50 },
+    globalDcaStep: { type: Number, default: 0 }, // Tracks exponential DCA trigger depth
     
     subAccounts: [SubAccountSchema],
 
@@ -658,71 +659,85 @@ const executeGlobalProfitMonitor = async () => {
             let offsetExecuted = false;
 
             // ==============================================================
-            // GLOBAL DCA RECOVERY (MATH BASED)
+            // GLOBAL DCA RECOVERY (MATH BASED WITH EXPONENTIAL STEP)
             // ==============================================================
             if (userSetting.autoBalanceEquity && !offsetExecuted) {
-                // Notice: targetPnl and triggerPnl are already multiplied by qtyMultiplier in the DB.
+                // Target and Base Trigger are already multiplied by qtyMultiplier in DB
                 const targetPnl = parseFloat(userSetting.autoBalanceUnrealizedPnlTarget) || 0;
-                const triggerPnl = parseFloat(userSetting.globalDcaRecoveryTriggerPnl) || -50.0;
+                const baseTriggerPnl = parseFloat(userSetting.globalDcaRecoveryTriggerPnl) || -50.0;
+                
+                // Active trigger calculates the exponential step requirement (e.g. -9.9k -> -19.8k -> -39.6k)
+                const currentGlobalStep = userSetting.globalDcaStep || 0;
+                const activeTriggerPnl = baseTriggerPnl * Math.pow(2, currentGlobalStep);
 
-                // Fire only if current Global PNL drops below the trigger
-                if (triggerPnl < 0 && globalUnrealized <= triggerPnl && activeCandidates.length > 0) {
+                // 1. Reset logic: If PNL has recovered above the base trigger, reset step to 0
+                if (globalUnrealized > baseTriggerPnl && currentGlobalStep > 0) {
+                    await SettingsModel.updateOne({ _id: userSetting._id }, { $set: { globalDcaStep: 0 } });
+                    userSetting.globalDcaStep = 0; 
+                    logForProfile(firstProfileId, `✅ GLOBAL DCA: Net PNL recovered above base trigger ($${baseTriggerPnl.toFixed(2)}). Resetting Global Step to 0.`);
+                }
+
+                // 2. Execute Math Recovery if PNL drops below the ACTIVE step trigger
+                if (baseTriggerPnl < 0 && globalUnrealized <= activeTriggerPnl && activeCandidates.length > 0) {
                     
-                    const allReady = activeCandidates.every(c => {
-                        const bState = activeBots.get(c.profileId)?.state?.coinStates[c.symbol];
-                        return bState && (!bState.lockUntil || Date.now() >= bState.lockUntil);
-                    });
+                    logForProfile(firstProfileId, `⚙️ GLOBAL DCA: Net PNL ($${globalUnrealized.toFixed(2)}) hit active trigger ($${activeTriggerPnl.toFixed(2)} / Step ${currentGlobalStep}). Executing math recovery...`);
 
-                    if (allReady) {
-                        logForProfile(firstProfileId, `⚙️ GLOBAL DCA: Net PNL ($${globalUnrealized.toFixed(2)}) hit trigger ($${triggerPnl.toFixed(2)}). Executing math recovery...`);
+                    const numCoins = activeCandidates.length;
+                    const gapToTarget = targetPnl - globalUnrealized; 
+                    const gapPerCoin = gapToTarget / numCoins;
 
-                        const numCoins = activeCandidates.length;
-                        const gapToTarget = targetPnl - globalUnrealized; 
-                        const gapPerCoin = gapToTarget / numCoins;
+                    for (let c of activeCandidates) {
+                        try {
+                            const bData = activeBots.get(c.profileId);
+                            if (!bData) continue;
+                            const bState = bData.state.coinStates[c.symbol];
+                            if (!bState) continue;
 
-                        for (let c of activeCandidates) {
-                            try {
-                                const bData = activeBots.get(c.profileId);
-                                if (!bData) continue;
-                                const bState = bData.state.coinStates[c.symbol];
-                                if (!bState) continue;
+                            // Skip this individual coin if it's currently locked to prevent API spam,
+                            // but DO NOT block the rest of the portfolio from receiving the global DCA blast.
+                            if (bState.lockUntil && Date.now() < bState.lockUntil) continue;
 
-                                const contractSize = global.marketSizes[c.symbol] || 1;
-                                
-                                // Standard proxy: target a 1% price bounce
-                                const bouncePct = 0.01;
-                                const favorablePriceMove = bState.currentPrice * bouncePct;
-                                
-                                let addQty = gapPerCoin / (favorablePriceMove * contractSize);
-                                addQty = Math.max(1, Math.ceil(addQty)); // Absolute minimum is 1 unit
+                            const contractSize = global.marketSizes[c.symbol] || 1;
+                            
+                            // Target a 1% price bounce
+                            const bouncePct = 0.01;
+                            const favorablePriceMove = bState.currentPrice * bouncePct;
+                            
+                            let addQty = gapPerCoin / (favorablePriceMove * contractSize);
+                            addQty = Math.max(1, Math.ceil(addQty)); 
 
-                                const actualLev = parseInt(c.actualLeverage) || 10;
+                            const actualLev = parseInt(c.actualLeverage) || 10;
 
-                                if (!c.isPaper) {
-                                    const orderSide = c.side === 'long' ? 'buy' : 'sell';
-                                    await bData.exchange.createOrder(c.symbol, 'market', orderSide, addQty, undefined, { offset: 'open', lever_rate: actualLev });
-                                } else {
-                                    const totalValue = (bState.contracts * bState.avgEntry) + (addQty * bState.currentPrice);
-                                    bState.contracts += addQty;
-                                    bState.avgEntry = totalValue / bState.contracts;
-                                }
-
-                                bState.dcaCount = (bState.dcaCount || 0) + 1;
-                                bState.lockUntil = Date.now() + 60000; // 1 min cool-down
-                                bState.lastDcaTime = Date.now();
-
-                                await OffsetModel.create({
-                                    userId: dbUserId, symbol: c.symbol, side: c.side,
-                                    openPrice: bState.avgEntry, closePrice: bState.currentPrice, roi: bState.currentRoi,
-                                    netProfit: 0, reason: `Global DCA Recovery (+${addQty})`
-                                });
-
-                                logForProfile(firstProfileId, `⚙️ RECOVERY: Added ${addQty} qty to ${c.symbol} (Math: Cover gap on 1% bounce).`);
-                                offsetExecuted = true;
-                            } catch (e) {
-                                logForProfile(firstProfileId, `❌ RECOVERY ERR [${c.symbol}]: ${e.message}`);
+                            if (!c.isPaper) {
+                                const orderSide = c.side === 'long' ? 'buy' : 'sell';
+                                await bData.exchange.createOrder(c.symbol, 'market', orderSide, addQty, undefined, { offset: 'open', lever_rate: actualLev });
+                            } else {
+                                const totalValue = (bState.contracts * bState.avgEntry) + (addQty * bState.currentPrice);
+                                bState.contracts += addQty;
+                                bState.avgEntry = totalValue / bState.contracts;
                             }
+
+                            bState.dcaCount = (bState.dcaCount || 0) + 1;
+                            bState.lockUntil = Date.now() + 60000; 
+                            bState.lastDcaTime = Date.now();
+
+                            await OffsetModel.create({
+                                userId: dbUserId, symbol: c.symbol, side: c.side,
+                                openPrice: bState.avgEntry, closePrice: bState.currentPrice, roi: bState.currentRoi,
+                                netProfit: 0, reason: `Global DCA Recovery (+${addQty})`
+                            });
+
+                            logForProfile(firstProfileId, `⚙️ RECOVERY: Added ${addQty} qty to ${c.symbol} (Math: Cover gap on 1% bounce).`);
+                            offsetExecuted = true;
+                        } catch (e) {
+                            logForProfile(firstProfileId, `❌ RECOVERY ERR [${c.symbol}]: ${e.message}`);
                         }
+                    }
+
+                    // Increment Global Step so it doesn't infinitely spam on the very next 6-second tick
+                    if (offsetExecuted) {
+                        await SettingsModel.updateOne({ _id: userSetting._id }, { $inc: { globalDcaStep: 1 } });
+                        userSetting.globalDcaStep = currentGlobalStep + 1;
                     }
                 }
             }
@@ -966,6 +981,7 @@ app.post('/api/register', async (req, res) => {
         templateSettings.cycleResumeMinutes = 0;
         templateSettings.cycleCurrentState = 'active';
         templateSettings.cycleNextSwitchTime = 0;
+        templateSettings.globalDcaStep = 0;
 
         const multiplier = parseFloat(qtyMultiplier) > 0 ? parseFloat(qtyMultiplier) : 1;
         templateSettings.qtyMultiplier = multiplier;
@@ -1382,7 +1398,9 @@ app.post('/api/settings', authMiddleware, async (req, res) => {
         { 
             subAccounts, globalSingleCoinTpPnl: parseFloat(globalSingleCoinTpPnl) || 0,
             smartOffsetNetProfit: parseFloat(smartOffsetNetProfit) || 0,
-            autoBalanceEquity: autoBalanceEquity === true, autoBalanceUnrealizedPnlTarget: parseFloat(autoBalanceUnrealizedPnlTarget) || 0, globalDcaRecoveryTriggerPnl: parseFloat(globalDcaRecoveryTriggerPnl) || -50
+            autoBalanceEquity: autoBalanceEquity === true, 
+            autoBalanceUnrealizedPnlTarget: parseFloat(autoBalanceUnrealizedPnlTarget) || 0, 
+            globalDcaRecoveryTriggerPnl: parseFloat(globalDcaRecoveryTriggerPnl) || -50
         }, { returnDocument: 'after' }
     );
 
@@ -1392,7 +1410,7 @@ app.post('/api/settings', authMiddleware, async (req, res) => {
             const profileId = sub._id.toString();
             activeSubIds.push(profileId);
             if (sub.coins && sub.coins.length > 0) {
-                sub.coins.forEach(c => c.botActive = true); // Force active
+                sub.coins.forEach(c => c.botActive = true); 
                 startBot(req.userId.toString(), sub, req.isPaper).catch(err => console.error("startBot Error:", err)); 
             } else { stopBot(profileId); }
         });
@@ -1411,7 +1429,9 @@ app.post('/api/settings', authMiddleware, async (req, res) => {
         const syncGlobalParams = {
             globalSingleCoinTpPnl: updated.globalSingleCoinTpPnl,
             smartOffsetNetProfit: updated.smartOffsetNetProfit,
-            autoBalanceEquity: updated.autoBalanceEquity, autoBalanceUnrealizedPnlTarget: updated.autoBalanceUnrealizedPnlTarget, globalDcaRecoveryTriggerPnl: updated.globalDcaRecoveryTriggerPnl
+            autoBalanceEquity: updated.autoBalanceEquity, 
+            autoBalanceUnrealizedPnlTarget: updated.autoBalanceUnrealizedPnlTarget, 
+            globalDcaRecoveryTriggerPnl: updated.globalDcaRecoveryTriggerPnl
         };
 
         const applyMasterSync = async (userSettingsDoc, isPaperMode) => {
@@ -1471,7 +1491,7 @@ app.post('/api/settings', authMiddleware, async (req, res) => {
                     const profileId = sub._id.toString();
                     userActiveSubIds.push(profileId);
                     if (sub.coins && sub.coins.length > 0 && sub.apiKey && sub.secret) {
-                        sub.coins.forEach(c => c.botActive = true); // Force active
+                        sub.coins.forEach(c => c.botActive = true); 
                         startBot(newlyUpdatedUser.userId.toString(), sub, isPaperMode).catch(()=>{}); 
                     } else { stopBot(profileId); }
                 });
@@ -1537,7 +1557,9 @@ app.post('/api/master/global', authMiddleware, adminMiddleware, async (req, res)
         const payload = {
             globalSingleCoinTpPnl: parseFloat(req.body.globalSingleCoinTpPnl) || 0,
             smartOffsetNetProfit: parseFloat(req.body.smartOffsetNetProfit) || 0,
-            autoBalanceEquity: req.body.autoBalanceEquity === true, autoBalanceUnrealizedPnlTarget: parseFloat(req.body.autoBalanceUnrealizedPnlTarget) || 0, globalDcaRecoveryTriggerPnl: parseFloat(req.body.globalDcaRecoveryTriggerPnl) || -50
+            autoBalanceEquity: req.body.autoBalanceEquity === true, 
+            autoBalanceUnrealizedPnlTarget: parseFloat(req.body.autoBalanceUnrealizedPnlTarget) || 0, 
+            globalDcaRecoveryTriggerPnl: parseFloat(req.body.globalDcaRecoveryTriggerPnl) || -50
         };
 
         await RealSettings.findOneAndUpdate({ userId: masterUser._id }, { $set: payload }, { new: true, upsert: true });
@@ -1785,11 +1807,12 @@ const FRONTEND_HTML = [
     '                    </div>',
     '                </div>',
     '                <div id="user-autobalance-display" class="card" style="display:none;">',
-    '                    <h3>Global DCA Recovery</h3>',
+    '                    <h3>Global DCA Recovery <span style="font-size:11px; font-weight:normal; color:#aaa; text-transform:none;">(Master Switch)</span></h3>',
     '                    <div class="grid" style="margin-bottom:15px;">',
     '                        <div class="metric"><div class="metric-label">Status</div><div class="metric-val" id="display_autoBalanceStatus">-</div></div>',
     '                        <div class="metric"><div class="metric-label">Target Net PNL</div><div class="metric-val text-green" id="display_dcaTarget">$0.00</div></div>',
-    '                        <div class="metric"><div class="metric-label">Trigger Net PNL</div><div class="metric-val text-red" id="display_dcaTrigger">-$0.00</div></div>',
+    '                        <div class="metric"><div class="metric-label">Base Trigger PNL</div><div class="metric-val text-red" id="display_dcaTrigger">-$0.00</div></div>',
+    '                        <div class="metric"><div class="metric-label">Active Trigger (Step)</div><div class="metric-val text-warning" id="display_activeDcaTrigger">-$0.00 (Step 0)</div></div>',
     '                    </div>',
     '                </div>',
     '                <div id="user-extremes-display" class="card" style="display:none;">',
@@ -2090,7 +2113,7 @@ const FRONTEND_HTML = [
     '                if (!masterSettings) { document.getElementById(\'editorGlobalContainer\').innerHTML = \'<p class="text-red">Missing config.</p>\'; return; }',
     '                let globalHtml = \'<div class="grid-2"><div><label>Univ. Coin TP ($)</label><input type="number" step="0.0001" id="e_globalSingleCoinTpPnl" value="\' + (masterSettings.globalSingleCoinTpPnl||0) + \'"></div></div>\';',
     '                globalHtml += \'<div style="margin-top:10px; border-top:1px solid #333; padding-top:10px;"><label class="checkbox-wrapper"><input type="checkbox" id="e_autoBalanceEquity" \' + (masterSettings.autoBalanceEquity ? "checked" : "") + \'><span>Enable Global DCA Recovery</span></label>\';',
-    '                globalHtml += \'<div class="grid-2"><div><label>Target Net PNL ($)</label><input type="number" id="e_autoBalanceUnrealizedPnlTarget" value="\' + (masterSettings.autoBalanceUnrealizedPnlTarget||0) + \'"></div><div><label>Trigger Net PNL ($)</label><input type="number" id="e_globalDcaRecoveryTriggerPnl" value="\' + (masterSettings.globalDcaRecoveryTriggerPnl||-50) + \'"></div></div></div>\';',
+    '                globalHtml += \'<div class="grid-2"><div><label>Target Net PNL ($)</label><input type="number" id="e_autoBalanceUnrealizedPnlTarget" value="\' + (masterSettings.autoBalanceUnrealizedPnlTarget||0) + \'"></div><div><label>Base Trigger PNL ($)</label><input type="number" id="e_globalDcaRecoveryTriggerPnl" value="\' + (masterSettings.globalDcaRecoveryTriggerPnl||-50) + \'"></div></div></div>\';',
     '                globalHtml += \'<div class="grid-2" style="margin-top:10px;"><div><label>V1 Offset Target ($)</label><input type="number" step="0.0001" id="e_smartOffsetNetProfit" value="\' + (masterSettings.smartOffsetNetProfit||0) + \'"></div></div>\';',
     '                globalHtml += \'<button style="width:100%; margin-top:15px; border-color:#60a5fa; color:#60a5fa;" onclick="saveMasterGlobalSettings()">Overwrite & Sync Global</button><div id="e_globalMsg" style="margin-top:10px;"></div>\';',
     '                document.getElementById(\'editorGlobalContainer\').innerHTML = globalHtml;',
@@ -2407,6 +2430,13 @@ const FRONTEND_HTML = [
     '                setTxt(\'globalPnl\', fmtC(globalTotal), globalTotal>=0?"text-green":"text-red");',
     '                setTxt(\'topGlobalUnrealized\', fmtC(globalUnrealized), globalUnrealized>=0?"text-green":"text-red");',
     '                setTxt(\'globalWinRate\', totalAboveZero + " / " + totalTrading);',
+    '',
+    '                const baseTrigger = globalSet.globalDcaRecoveryTriggerPnl || -50;',
+    '                const step = globalSet.globalDcaStep || 0;',
+    '                const activeTrigger = baseTrigger * Math.pow(2, step);',
+    '                if (document.getElementById(\'display_activeDcaTrigger\')) {',
+    '                    document.getElementById(\'display_activeDcaTrigger\').innerHTML = fmtC(activeTrigger) + " <span style=\'font-size:12px;color:#888;\'>[Step " + step + "]</span>";',
+    '                }',
     '',
     '                activeCandidates.sort((a, b) => b.pnl - a.pnl);',
     '                const totalCoins = activeCandidates.length, totalPairs = Math.floor(totalCoins / 2);',
