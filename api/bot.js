@@ -411,30 +411,17 @@ async function startBot(userId, subAccount, isPaper) {
                     // 1. OPEN BASE POSITION
                     if (cState.contracts <= 0) {
                         const safeBaseQty = Math.max(1, Math.floor(currentSettings.baseQty));
-                        const orderSide = activeSide === 'long' ? 'buy' : 'sell';
-                        const cachedLeverage = cState.actualLeverage;
-
-                        cState.lockUntil = Date.now() + 15000; 
-
-                        if (isPaper) {
+                        if (!isPaper) {
+                            const orderSide = activeSide === 'long' ? 'buy' : 'sell';
+                            await exchange.createOrder(coin.symbol, 'market', orderSide, safeBaseQty, undefined, { offset: 'open', lever_rate: cState.actualLeverage });
+                        } else {
                             cState.avgEntry = cState.currentPrice; 
                             cState.contracts = safeBaseQty; 
                             cState.currentRoi = 0; 
                             cState.unrealizedPnl = 0; 
-                            cState.margin = (cState.avgEntry * cState.contracts * contractSize) / cachedLeverage;
-                        } else {
-                            cState.contracts = safeBaseQty; 
+                            cState.margin = (cState.avgEntry * cState.contracts * contractSize) / activeLeverage;
                         }
-
-                        Promise.resolve().then(async () => {
-                            try {
-                                if (!isPaper) {
-                                    await exchange.createOrder(coin.symbol, 'market', orderSide, safeBaseQty, undefined, { offset: 'open', lever_rate: cachedLeverage });
-                                }
-                            } catch (e) {
-                                logForProfile(profileId, `[${isPaper ? "PAPER" : "REAL"}] ❌ OPEN ERROR [${coin.symbol}]: ${e.message}`);
-                            }
-                        });
+                        cState.lockUntil = Date.now() + 15000; 
                         continue; 
                     }
 
@@ -470,53 +457,47 @@ async function startBot(userId, subAccount, isPaper) {
                         const reasonTxt = isTakeProfit ? tpReasonTxt : slReasonTxt;
                         const modeTxt = isPaper ? "PAPER" : "REAL";
                         
-                        const closeSide = activeSide === 'long' ? 'sell' : 'buy';
-                        const cachedContracts = cState.contracts;
-                        const cachedLeverage = cState.actualLeverage;
-                        const cachedAvgEntry = cState.avgEntry;
-                        
-                        cState.lockUntil = Date.now() + 15000;
-                        cState.dcaCount = 0; 
-                        currentSettings.realizedPnl = (currentSettings.realizedPnl || 0) + currentPnl;
-                        
-                        if (isPaper) {
-                            cState.contracts = 0; cState.unrealizedPnl = 0; cState.currentRoi = 0; cState.avgEntry = 0;
-                        } else {
-                            cState.contracts = 0; 
-                        }
-
-                        Promise.resolve().then(async () => {
-                            try {
-                                if (!isPaper) {
-                                    await exchange.createOrder(coin.symbol, 'market', closeSide, cachedContracts, undefined, { 
-                                        offset: 'close', reduceOnly: true, lever_rate: cachedLeverage 
-                                    });
-                                }
-
-                                const OffsetModel = isPaper ? PaperOffsetRecord : RealOffsetRecord;
-                                await OffsetModel.create({ 
-                                    userId: userId, 
-                                    symbol: coin.symbol, 
-                                    side: activeSide,
-                                    openPrice: cachedAvgEntry,
-                                    closePrice: cState.currentPrice,
-                                    roi: currentRoi,
-                                    netProfit: currentPnl,
-                                    reason: reasonTxt 
+                        try {
+                            if (!isPaper) {
+                                const closeSide = activeSide === 'long' ? 'sell' : 'buy';
+                                await exchange.createOrder(coin.symbol, 'market', closeSide, cState.contracts, undefined, { 
+                                    offset: 'close', reduceOnly: true, lever_rate: cState.actualLeverage 
                                 });
-
-                                // ATOMIC DB UPDATE
-                                await SettingsModel.updateOne(
-                                    { userId: userId, "subAccounts._id": currentSettings._id }, 
-                                    { $inc: { "subAccounts.$.realizedPnl": currentPnl } }
-                                );
-
-                                logForProfile(profileId, `[${modeTxt}] ⚡ ${coin.symbol} Closed: ${reasonTxt}. Profit: $${currentPnl.toFixed(2)}`);
-                            } catch (closeErr) {
-                                logForProfile(profileId, `[${modeTxt}] ❌ CLOSE ERROR [${coin.symbol}]: ${closeErr.message}`);
                             }
-                        });
-                        continue;
+
+                            const OffsetModel = isPaper ? PaperOffsetRecord : RealOffsetRecord;
+                            await OffsetModel.create({ 
+                                userId: userId, 
+                                symbol: coin.symbol, 
+                                side: activeSide,
+                                openPrice: cState.avgEntry,
+                                closePrice: cState.currentPrice,
+                                roi: currentRoi,
+                                netProfit: currentPnl,
+                                reason: reasonTxt 
+                            });
+
+                            cState.lockUntil = Date.now() + 15000;
+                            cState.dcaCount = 0; 
+                            currentSettings.realizedPnl = (currentSettings.realizedPnl || 0) + currentPnl;
+                            
+                            if (isPaper) {
+                                cState.contracts = 0; cState.unrealizedPnl = 0; cState.currentRoi = 0; cState.avgEntry = 0;
+                            }
+
+                            // ATOMIC DB UPDATE
+                            await SettingsModel.updateOne(
+                                { userId: userId, "subAccounts._id": currentSettings._id }, 
+                                { $inc: { "subAccounts.$.realizedPnl": currentPnl } }
+                            );
+
+                            logForProfile(profileId, `[${modeTxt}] ⚡ ${coin.symbol} Closed: ${reasonTxt}. Profit: $${currentPnl.toFixed(2)}`);
+                            continue; 
+
+                        } catch (closeErr) {
+                            logForProfile(profileId, `[${modeTxt}] ❌ CLOSE ERROR [${coin.symbol}]: ${closeErr.message}`);
+                            continue;
+                        }
                     }
 
                     // 3. DCA PNL STEP GRID TRIGGER
@@ -534,30 +515,17 @@ async function startBot(userId, subAccount, isPaper) {
                         } else if ((cState.contracts + reqQty) > currentSettings.maxContracts) {
                             cState.lastDcaTime = Date.now(); 
                         } else {
-                            cState.dcaCount = currentDcaStep + 1; 
-                            cState.lockUntil = Date.now() + 10000; 
-                            cState.lastDcaTime = Date.now(); 
-                            
-                            const orderSide = activeSide === 'long' ? 'buy' : 'sell';
-                            const cachedLeverage = cState.actualLeverage;
-
-                            if (isPaper) {
+                            if (!isPaper) {
+                                const orderSide = activeSide === 'long' ? 'buy' : 'sell';
+                                await exchange.createOrder(coin.symbol, 'market', orderSide, reqQty, undefined, { offset: 'open', lever_rate: cState.actualLeverage });
+                            } else {
                                 const totalValue = (cState.contracts * cState.avgEntry) + (reqQty * cState.currentPrice);
                                 cState.contracts += reqQty;
                                 cState.avgEntry = totalValue / cState.contracts;
-                            } else {
-                                cState.contracts += reqQty; 
                             }
-
-                            Promise.resolve().then(async () => {
-                                try {
-                                    if (!isPaper) {
-                                        await exchange.createOrder(coin.symbol, 'market', orderSide, reqQty, undefined, { offset: 'open', lever_rate: cachedLeverage });
-                                    }
-                                } catch (e) {
-                                    logForProfile(profileId, `[${isPaper ? "PAPER" : "REAL"}] ❌ DCA ERROR [${coin.symbol}]: ${e.message}`);
-                                }
-                            });
+                            cState.dcaCount = currentDcaStep + 1; 
+                            cState.lockUntil = Date.now() + 10000; 
+                            cState.lastDcaTime = Date.now(); 
                         }
                     }
                 } catch (coinErr) {
@@ -686,11 +654,12 @@ const executeGlobalProfitMonitor = async () => {
             if (!firstProfileId || activeCandidates.length === 0) continue;
 
             const targetV1 = smartOffsetNetProfit > 0 ? smartOffsetNetProfit : 0;
+            let offsetExecuted = false;
 
             // ==============================================================
             // EQUITY AUTO-BALANCER (DEFICIT COVER & SURPLUS HARVEST)
             // ==============================================================
-            if (userSetting.autoBalanceEquity) {
+            if (userSetting.autoBalanceEquity && !offsetExecuted) {
                 const targetPnl = parseFloat(userSetting.autoBalanceUnrealizedPnlTarget) || 0;
                 const retainRealized = parseFloat(userSetting.autoBalanceRetainRealized) || 0;
                 let globalRealized = 0;
@@ -720,10 +689,17 @@ const executeGlobalProfitMonitor = async () => {
                             if (!bState) continue;
 
                             const actualLev = parseInt(w.actualLeverage) || 10;
-                            const closeSide = w.side === 'long' ? 'sell' : 'buy';
-                            const cachedEntry = bState.avgEntry;
-                            const cachedPrice = bState.currentPrice;
-                            const cachedRoi = bState.currentRoi;
+
+                            if (!w.isPaper) {
+                                const closeSide = w.side === 'long' ? 'sell' : 'buy';
+                                await bData.exchange.createOrder(w.symbol, 'market', closeSide, closeQty, undefined, { offset: 'close', reduceOnly: true, lever_rate: actualLev });
+                            }
+
+                            await OffsetModel.create({
+                                userId: dbUserId, symbol: w.symbol, side: w.side,
+                                openPrice: bState.avgEntry, closePrice: bState.currentPrice, roi: bState.currentRoi,
+                                netProfit: realizedFromThis, reason: 'Balancer Surplus Harvest'
+                            });
 
                             if (closeQty >= bState.contracts - 0.0001) {
                                 bState.contracts = 0; bState.unrealizedPnl = 0; bState.avgEntry = 0; bState.dcaCount = 0;
@@ -733,30 +709,15 @@ const executeGlobalProfitMonitor = async () => {
                             bState.lockUntil = Date.now() + 15000;
 
                             w.subAccount.realizedPnl = (w.subAccount.realizedPnl || 0) + realizedFromThis;
+                            
+                            await SettingsModel.updateOne(
+                                { userId: dbUserId, "subAccounts._id": w.subAccount._id }, 
+                                { $inc: { "subAccounts.$.realizedPnl": realizedFromThis } }
+                            );
+
+                            logForProfile(firstProfileId, `⚖️ BALANCER: Harvested & Closed +$${realizedFromThis.toFixed(4)} on ${w.symbol}.`);
                             excess -= realizedFromThis;
-
-                            Promise.resolve().then(async () => {
-                                try {
-                                    if (!w.isPaper) {
-                                        await bData.exchange.createOrder(w.symbol, 'market', closeSide, closeQty, undefined, { offset: 'close', reduceOnly: true, lever_rate: actualLev });
-                                    }
-
-                                    await OffsetModel.create({
-                                        userId: dbUserId, symbol: w.symbol, side: w.side,
-                                        openPrice: cachedEntry, closePrice: cachedPrice, roi: cachedRoi,
-                                        netProfit: realizedFromThis, reason: 'Balancer Surplus Harvest'
-                                    });
-                                    
-                                    await SettingsModel.updateOne(
-                                        { userId: dbUserId, "subAccounts._id": w.subAccount._id }, 
-                                        { $inc: { "subAccounts.$.realizedPnl": realizedFromThis } }
-                                    );
-
-                                    logForProfile(firstProfileId, `⚖️ BALANCER: Harvested & Closed +$${realizedFromThis.toFixed(4)} on ${w.symbol}.`);
-                                } catch (e) {
-                                    logForProfile(firstProfileId, `❌ BALANCER HARVEST ERROR [${w.symbol}]: ${e.message}`);
-                                }
-                            });
+                            offsetExecuted = true; 
                         } catch (e) {
                             logForProfile(firstProfileId, `❌ BALANCER HARVEST ERROR [${w.symbol}]: ${e.message}`);
                         }
@@ -791,10 +752,17 @@ const executeGlobalProfitMonitor = async () => {
                                 if (!bState) continue;
 
                                 const actualLev = parseInt(w.actualLeverage) || 10;
-                                const closeSide = w.side === 'long' ? 'sell' : 'buy';
-                                const cachedEntry = bState.avgEntry;
-                                const cachedPrice = bState.currentPrice;
-                                const cachedRoi = bState.currentRoi;
+
+                                if (!w.isPaper) {
+                                    const closeSide = w.side === 'long' ? 'sell' : 'buy';
+                                    await bData.exchange.createOrder(w.symbol, 'market', closeSide, closeQty, undefined, { offset: 'close', reduceOnly: true, lever_rate: actualLev });
+                                }
+
+                                await OffsetModel.create({
+                                    userId: dbUserId, symbol: w.symbol, side: w.side,
+                                    openPrice: bState.avgEntry, closePrice: bState.currentPrice, roi: bState.currentRoi,
+                                    netProfit: realizedFromThis, reason: 'Deficit Cover (Winner)'
+                                });
 
                                 if (closeQty >= bState.contracts - 0.0001) {
                                     bState.contracts = 0; bState.unrealizedPnl = 0; bState.avgEntry = 0; bState.dcaCount = 0;
@@ -804,27 +772,12 @@ const executeGlobalProfitMonitor = async () => {
                                 bState.lockUntil = Date.now() + 15000;
 
                                 w.subAccount.realizedPnl = (w.subAccount.realizedPnl || 0) + realizedFromThis;
+                                await SettingsModel.updateOne({ userId: dbUserId, "subAccounts._id": w.subAccount._id }, { $inc: { "subAccounts.$.realizedPnl": realizedFromThis } });
+
+                                logForProfile(firstProfileId, `⚖️ DEFICIT COVER: Closed +$${realizedFromThis.toFixed(4)} of ${w.symbol}.`);
                                 shortfall -= realizedFromThis;
                                 availableRealized += realizedFromThis;
-
-                                Promise.resolve().then(async () => {
-                                    try {
-                                        if (!w.isPaper) {
-                                            await bData.exchange.createOrder(w.symbol, 'market', closeSide, closeQty, undefined, { offset: 'close', reduceOnly: true, lever_rate: actualLev });
-                                        }
-
-                                        await OffsetModel.create({
-                                            userId: dbUserId, symbol: w.symbol, side: w.side,
-                                            openPrice: cachedEntry, closePrice: cachedPrice, roi: cachedRoi,
-                                            netProfit: realizedFromThis, reason: 'Deficit Cover (Winner)'
-                                        });
-                                        await SettingsModel.updateOne({ userId: dbUserId, "subAccounts._id": w.subAccount._id }, { $inc: { "subAccounts.$.realizedPnl": realizedFromThis } });
-
-                                        logForProfile(firstProfileId, `⚖️ DEFICIT COVER: Closed +$${realizedFromThis.toFixed(4)} of ${w.symbol}.`);
-                                    } catch (e) {
-                                        logForProfile(firstProfileId, `❌ DEFICIT WINNER ERR [${w.symbol}]: ${e.message}`);
-                                    }
-                                });
+                                offsetExecuted = true;
                             } catch (e) {
                                 logForProfile(firstProfileId, `❌ DEFICIT WINNER ERR [${w.symbol}]: ${e.message}`);
                             }
@@ -853,10 +806,17 @@ const executeGlobalProfitMonitor = async () => {
                                 if (!bState) continue;
                                 
                                 const actualLev = parseInt(l.actualLeverage) || 10;
-                                const closeSide = l.side === 'long' ? 'sell' : 'buy';
-                                const cachedEntry = bState.avgEntry;
-                                const cachedPrice = bState.currentPrice;
-                                const cachedRoi = bState.currentRoi;
+
+                                if (!l.isPaper) {
+                                    const closeSide = l.side === 'long' ? 'sell' : 'buy';
+                                    await bData.exchange.createOrder(l.symbol, 'market', closeSide, closeQty, undefined, { offset: 'close', reduceOnly: true, lever_rate: actualLev });
+                                }
+
+                                await OffsetModel.create({
+                                    userId: dbUserId, symbol: l.symbol, side: l.side,
+                                    openPrice: bState.avgEntry, closePrice: bState.currentPrice, roi: bState.currentRoi,
+                                    netProfit: lossRealized, reason: 'Deficit Cover (Loser)'
+                                });
 
                                 if (closeQty >= bState.contracts - 0.0001) {
                                     bState.contracts = 0; bState.unrealizedPnl = 0; bState.avgEntry = 0; bState.dcaCount = 0;
@@ -866,26 +826,11 @@ const executeGlobalProfitMonitor = async () => {
                                 bState.lockUntil = Date.now() + 15000;
 
                                 l.subAccount.realizedPnl = (l.subAccount.realizedPnl || 0) + lossRealized;
+                                await SettingsModel.updateOne({ userId: dbUserId, "subAccounts._id": l.subAccount._id }, { $inc: { "subAccounts.$.realizedPnl": lossRealized } });
+
+                                logForProfile(firstProfileId, `⚖️ DEFICIT COVER: Closed -$${Math.abs(lossRealized).toFixed(4)} of ${l.symbol}.`);
                                 budget -= Math.abs(lossRealized);
-
-                                Promise.resolve().then(async () => {
-                                    try {
-                                        if (!l.isPaper) {
-                                            await bData.exchange.createOrder(l.symbol, 'market', closeSide, closeQty, undefined, { offset: 'close', reduceOnly: true, lever_rate: actualLev });
-                                        }
-
-                                        await OffsetModel.create({
-                                            userId: dbUserId, symbol: l.symbol, side: l.side,
-                                            openPrice: cachedEntry, closePrice: cachedPrice, roi: cachedRoi,
-                                            netProfit: lossRealized, reason: 'Deficit Cover (Loser)'
-                                        });
-                                        await SettingsModel.updateOne({ userId: dbUserId, "subAccounts._id": l.subAccount._id }, { $inc: { "subAccounts.$.realizedPnl": lossRealized } });
-
-                                        logForProfile(firstProfileId, `⚖️ DEFICIT COVER: Closed -$${Math.abs(lossRealized).toFixed(4)} of ${l.symbol}.`);
-                                    } catch (e) {
-                                        logForProfile(firstProfileId, `❌ DEFICIT LOSER ERR [${l.symbol}]: ${e.message}`);
-                                    }
-                                });
+                                offsetExecuted = true;
                             } catch (e) {
                                 logForProfile(firstProfileId, `❌ DEFICIT LOSER ERR [${l.symbol}]: ${e.message}`);
                             }
@@ -895,7 +840,7 @@ const executeGlobalProfitMonitor = async () => {
             }
 
             // SMART OFFSET V1 (TP ONLY)
-            if (smartOffsetNetProfit > 0 && activeCandidates.length >= 2) {
+            if (!offsetExecuted && smartOffsetNetProfit > 0 && activeCandidates.length >= 2) {
                 activeCandidates.sort((a, b) => b.unrealizedPnl - a.unrealizedPnl); 
                 
                 const totalCoins = activeCandidates.length;
@@ -954,42 +899,34 @@ const executeGlobalProfitMonitor = async () => {
                             
                             try {
                                 if (bData) {
+                                    if (!pos.isPaper) {
+                                        const closeSide = pos.side === 'long' ? 'sell' : 'buy';
+                                        await bData.exchange.createOrder(pos.symbol, 'market', closeSide, pos.contracts, undefined, { 
+                                            offset: 'close', reduceOnly: true, lever_rate: pos.actualLeverage 
+                                        });
+                                    } 
+
                                     const bState = bData.state.coinStates[pos.symbol];
+                                    
                                     if (bState) { 
-                                        const cachedEntry = bState.avgEntry;
-                                        const cachedPrice = bState.currentPrice;
-                                        const cachedRoi = bState.currentRoi;
-                                        const cachedContracts = bState.contracts;
+                                        await OffsetModel.create({
+                                            userId: dbUserId, symbol: pos.symbol, side: pos.side,
+                                            openPrice: bState.avgEntry, closePrice: bState.currentPrice, roi: bState.currentRoi,
+                                            netProfit: pos.unrealizedPnl, reason: 'Smart Offset V1'
+                                        });
 
                                         bState.contracts = 0; bState.unrealizedPnl = 0; bState.avgEntry = 0; bState.dcaCount = 0; 
                                         bState.lockUntil = Date.now() + 60000; 
-
-                                        pos.subAccount.realizedPnl = (pos.subAccount.realizedPnl || 0) + pos.unrealizedPnl;
-
-                                        Promise.resolve().then(async () => {
-                                            try {
-                                                if (!pos.isPaper) {
-                                                    const closeSide = pos.side === 'long' ? 'sell' : 'buy';
-                                                    await bData.exchange.createOrder(pos.symbol, 'market', closeSide, cachedContracts, undefined, { 
-                                                        offset: 'close', reduceOnly: true, lever_rate: pos.actualLeverage 
-                                                    });
-                                                } 
-                                                
-                                                await OffsetModel.create({
-                                                    userId: dbUserId, symbol: pos.symbol, side: pos.side,
-                                                    openPrice: cachedEntry, closePrice: cachedPrice, roi: cachedRoi,
-                                                    netProfit: pos.unrealizedPnl, reason: 'Smart Offset V1'
-                                                });
-                                                
-                                                await SettingsModel.updateOne(
-                                                    { userId: dbUserId, "subAccounts._id": pos.subAccount._id }, 
-                                                    { $inc: { "subAccounts.$.realizedPnl": pos.unrealizedPnl } }
-                                                );
-                                            } catch (e) {
-                                                logForProfile(firstProfileId, `❌ CLOSE ERROR [${pos.symbol}]: ${e.message}`);
-                                            }
-                                        });
                                     }
+                                    
+                                    pos.subAccount.realizedPnl = (pos.subAccount.realizedPnl || 0) + pos.unrealizedPnl;
+                                    
+                                    await SettingsModel.updateOne(
+                                        { userId: dbUserId, "subAccounts._id": pos.subAccount._id }, 
+                                        { $inc: { "subAccounts.$.realizedPnl": pos.unrealizedPnl } }
+                                    );
+
+                                    offsetExecuted = true;
                                 }
                             } catch (e) {
                                 logForProfile(firstProfileId, `❌ CLOSE ERROR [${pos.symbol}]: ${e.message}`);
