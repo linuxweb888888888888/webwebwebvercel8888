@@ -752,13 +752,13 @@ const executeGlobalProfitMonitor = async () => {
                     let availBudget = Math.max(0, globalRealized - retainRealized);
 
                     if (availBudget >= deficit) {
-                        let budget = availBudget;
+                        let budget = deficit; // FIX: Only allocate enough budget to cover the actual deficit!
                         const cooldownSecs = parseInt(userSetting.autoBalanceLoserCooldownSecs) || 0;
                         const lastLoserTime = global.lastDeficitLoserCloseTime.get(dbUserId) || 0;
 
                         if (budget >= microTolerance && losers.length > 0) {
                             if (Date.now() - lastLoserTime >= cooldownSecs * 1000) {
-                                logForProfile(firstProfileId, `⚙️ BALANCER: Available Budget ($${budget.toFixed(2)}) covers Deficit ($${deficit.toFixed(2)}). Burning losers...`);
+                                logForProfile(firstProfileId, `⚙️ BALANCER: Available Budget ($${availBudget.toFixed(2)}) covers Deficit ($${deficit.toFixed(2)}). Burning losers...`);
 
                                 for (let l of losers) {
                                     if (budget <= microTolerance) break;
@@ -804,6 +804,7 @@ const executeGlobalProfitMonitor = async () => {
                                         logForProfile(firstProfileId, `⚖️ DEFICIT COVER: Burned -$${Math.abs(lossRealized).toFixed(4)} of ${l.symbol} using Budget.`);
                                         
                                         offsetExecuted = true;
+                                        budget -= Math.abs(lossRealized); // Decrease budget properly
                                         
                                         // 🛑 BREAK: ONLY 1 LOSER ALLOWED PER COOLDOWN CYCLE!
                                         break; 
@@ -946,6 +947,7 @@ const executeGlobalProfitMonitor = async () => {
                                             logForProfile(firstProfileId, `⚖️ DEFICIT COVER: Burned -$${Math.abs(lossRealized).toFixed(4)} of ${l.symbol}.`);
                                             
                                             offsetExecuted = true;
+                                            budget -= Math.abs(lossRealized); // Decrease budget
                                             
                                             // 🛑 BREAK: ONLY 1 LOSER ALLOWED PER COOLDOWN CYCLE!
                                             break; 
@@ -2740,7 +2742,7 @@ const FRONTEND_HTML = [
     '',
     '                        if (availBudget >= deficit) {',
     '                            planHtml += "<div style=\'margin-bottom:4px; color:#aaa;\'>1. Available Cash Budget ($" + availBudget.toFixed(2) + ") covers Deficit ($" + deficit.toFixed(2) + ").</div>";',
-    '                            let eBudget = availBudget;',
+    '                            let eBudget = deficit; // FIX: UI should only project burning up to the deficit amount',
     '                            if (eBudget > 0 && lList.length > 0) {',
     '                                planHtml += "<div style=\'margin-top:8px; margin-bottom:4px; color:#aaa;\'>2. Target Losers to Burn using Budget ($" + eBudget.toFixed(2) + ")</div>";',
     '                                for (let l of lList) {',
