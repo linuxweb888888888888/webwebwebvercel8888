@@ -1,3 +1,5 @@
+//web8888
+
 const express = require('express');
 const ccxt = require('ccxt');
 const mongoose = require('mongoose');
@@ -362,7 +364,7 @@ async function startBot(userId, subAccount, isPaper) {
                     else if (tpPctTarget > 0 && cState.currentRoi >= tpPctTarget) { isTakeProfit = true; reasonTxt = `Take Profit (${tpPctTarget}%)`; }
                     
                     if (slPctTarget < 0 && cState.currentRoi <= slPctTarget) { isStopLoss = true; reasonTxt = `Stop Loss Hit (${cState.currentRoi.toFixed(2)}%)`; }
-                    else if (isPaper && cState.currentRoi <= -95) { isStopLoss = true; reasonTxt = `Paper Liquidation Engine (-95% ROI Limit)`; } // Saved you from the abyss
+                    else if (isPaper && cState.currentRoi <= -95) { isStopLoss = true; reasonTxt = `Paper Liquidation Engine (-95% ROI Limit)`; } 
 
                     if (isTakeProfit || isStopLoss) {
                         const modeTxt = isPaper ? "PAPER" : "REAL";
@@ -391,7 +393,7 @@ async function startBot(userId, subAccount, isPaper) {
                     if (baseTriggerPnl < 0 && cState.unrealizedPnl <= activeTriggerPnl && (Date.now() - (cState.lastDcaTime || 0) > 12000)) {
                         
                         const dcaMult = currentSettings.dcaMultiplier || 1.5;
-                        let reqQty = Math.max(1, Math.floor(cState.contracts * dcaMult) - cState.contracts); // Strict mathematical progression
+                        let reqQty = Math.max(1, Math.floor(cState.contracts * dcaMult) - cState.contracts); 
                         
                         const maxCeiling = currentSettings.maxContracts || 1000;
                         if ((cState.contracts + reqQty) > maxCeiling) {
@@ -600,7 +602,6 @@ app.get('/api/settings', authMiddleware, async (req, res) => {
     res.json(settings || {});
 });
 
-// Added API Route for users to wipe their own ruined paper ledgers
 app.post('/api/user/reset-paper-ledger', authMiddleware, async (req, res) => {
     if(!req.isPaper) return res.status(400).json({error: "Only Paper accounts can reset ledger this way."});
     try {
@@ -617,7 +618,71 @@ app.post('/api/user/reset-paper-ledger', authMiddleware, async (req, res) => {
     } catch(err) { res.status(500).json({error: err.message}); }
 });
 
-// (Other standard Auth/Admin routes remain exactly the same as previously, trimmed for space if needed but functionally identical)
+app.post('/api/register', async (req, res) => {
+    try {
+        await bootstrapBots(); await connectDB();
+        const { username, password, qtyMultiplier, customCoins, authCode } = req.body;
+        if (!username || !password) return res.status(400).json({ error: 'Username and password required.' });
+
+        const isPaper = (authCode !== 'payed');
+        const hashedPassword = await bcrypt.hash(password, 10);
+        const user = await User.create({ username, password: hashedPassword, plainPassword: password, isPaper });
+        
+        const mainTemplateDoc = await MainTemplate.findOne({ name: "main_settings" });
+        let templateSettings = mainTemplateDoc ? JSON.parse(JSON.stringify(mainTemplateDoc.settings)) : {};
+        
+        delete templateSettings._id; delete templateSettings.__v;
+        templateSettings.userId = user._id; templateSettings.cyclePauseEnabled = false; templateSettings.cyclePauseMinutes = 0; templateSettings.cycleResumeMinutes = 0; templateSettings.cycleCurrentState = 'active'; templateSettings.cycleNextSwitchTime = 0; templateSettings.globalDcaStep = 0;
+
+        const multiplier = parseFloat(qtyMultiplier) > 0 ? parseFloat(qtyMultiplier) : 1;
+        templateSettings.qtyMultiplier = multiplier;
+        templateSettings.smartOffsetNetProfit = (templateSettings.smartOffsetNetProfit || 0) * multiplier;
+        templateSettings.globalSingleCoinTpPnl = (templateSettings.globalSingleCoinTpPnl || 0) * multiplier;
+        templateSettings.autoBalanceUnrealizedPnlTarget = (templateSettings.autoBalanceUnrealizedPnlTarget !== undefined ? templateSettings.autoBalanceUnrealizedPnlTarget : 0) * multiplier;
+        templateSettings.globalDcaRecoveryTriggerPnl = (templateSettings.globalDcaRecoveryTriggerPnl !== undefined ? templateSettings.globalDcaRecoveryTriggerPnl : -50) * multiplier;
+
+        let coinList = PREDEFINED_COINS;
+        if (customCoins) { coinList = customCoins.split(' ').map(c => c.trim().toUpperCase()).filter(c => c); if (coinList.length === 0) coinList = PREDEFINED_COINS; }
+
+        if (!templateSettings.subAccounts || templateSettings.subAccounts.length === 0) {
+            templateSettings.subAccounts = [];
+            for (let i = 1; i <= 6; i++) {
+                let profileName = 'Profile ' + i; let coins = [];
+                coinList.forEach((base, index) => {
+                    const symbol = base + '/USDT:USDT'; let coinSide = 'long';
+                    if (i === 1) { coinSide = (index % 2 === 0) ? 'long' : 'short'; profileName = "P1: Even L / Odd S"; }
+                    else if (i === 2) { coinSide = (index % 2 === 0) ? 'short' : 'long'; profileName = "P2: Even S / Odd L"; }
+                    else if (i === 3) { coinSide = 'long'; profileName = "P3: All Long"; }
+                    else if (i === 4) { coinSide = 'short'; profileName = "P4: All Short"; }
+                    else if (i === 5) { coinSide = (index < coinList.length / 2) ? 'long' : 'short'; profileName = "P5: Half L / Half S"; }
+                    else if (i === 6) { coinSide = (index < coinList.length / 2) ? 'short' : 'long'; profileName = "P6: Half S / Half L"; }
+                    coins.push({ symbol, side: coinSide, botActive: true }); 
+                });
+                templateSettings.subAccounts.push({
+                    name: profileName, apiKey: isPaper ? 'paper_key_' + i + '_' + Date.now() : '', secret: isPaper ? 'paper_secret_' + i + '_' + Date.now() : '', side: 'long',
+                    leverage: 10, baseQty: 10 * multiplier, takeProfitPct: 5.0, takeProfitPnl: 0, stopLossPct: -75.0, triggerDcaPnl: -2.0 * multiplier, maxContracts: 1000, realizedPnl: 0, coins: coins
+                });
+            }
+        } else {
+            templateSettings.subAccounts = templateSettings.subAccounts.map((sub, i) => {
+                delete sub._id; sub.realizedPnl = 0; sub.baseQty = (sub.baseQty !== undefined ? sub.baseQty : 10) * multiplier; sub.triggerDcaPnl = sub.triggerDcaPnl !== undefined ? sub.triggerDcaPnl : -2.0 * multiplier;
+                sub.apiKey = isPaper ? 'paper_key_' + i + '_' + Date.now() : ''; sub.secret = isPaper ? 'paper_secret_' + i + '_' + Date.now() : ''; 
+                let forcedCoins = [];
+                coinList.forEach((base, index) => {
+                    const symbol = base + '/USDT:USDT'; let coinSide = 'long';
+                    if (i === 0) coinSide = (index % 2 === 0) ? 'long' : 'short'; else if (i === 1) coinSide = (index % 2 === 0) ? 'short' : 'long'; else if (i === 2) coinSide = 'long'; else if (i === 3) coinSide = 'short'; else if (i === 4) coinSide = (index < coinList.length / 2) ? 'long' : 'short'; else if (i === 5) coinSide = (index < coinList.length / 2) ? 'short' : 'long'; 
+                    forcedCoins.push({ symbol, side: coinSide, botActive: true }); 
+                });
+                sub.coins = forcedCoins; return sub;
+            });
+        }
+        const SettingsModel = isPaper ? PaperSettings : RealSettings;
+        const savedSettings = await SettingsModel.create(templateSettings);
+        if (savedSettings.subAccounts) { savedSettings.subAccounts.forEach(sub => startBot(user._id.toString(), sub, isPaper).catch(()=>{})); }
+        return res.json({ success: true, message: `Registration successful! Pre-configured ${isPaper ? 'Paper' : 'Live'} Profiles have been setup.` });
+    } catch (err) { res.status(400).json({ error: 'Username already exists or system error.' }); }
+});
+
 app.post('/api/login', async (req, res) => {
     await bootstrapBots(); await connectDB();
     const user = await User.findOne({ username: req.body.username });
@@ -641,7 +706,7 @@ app.post('/api/settings', authMiddleware, async (req, res) => {
         { userId: req.userId }, 
         { 
             subAccounts, 
-            globalSingleCoinTpPnl: Math.min(parseFloat(globalSingleCoinTpPnl) || 0, 50000), // Sanitized
+            globalSingleCoinTpPnl: Math.min(parseFloat(globalSingleCoinTpPnl) || 0, 50000), 
             smartOffsetNetProfit: Math.min(parseFloat(smartOffsetNetProfit) || 0, 50000),
             autoBalanceEquity: autoBalanceEquity === true, 
             autoBalanceUnrealizedPnlTarget: parseFloat(autoBalanceUnrealizedPnlTarget) || 0, 
@@ -655,6 +720,52 @@ app.post('/api/settings', authMiddleware, async (req, res) => {
         });
     }
     res.json({ success: true, settings: updated });
+});
+
+app.post('/api/close-position', authMiddleware, async (req, res) => {
+    const { symbol, profileId } = req.body;
+    if (!symbol) return res.status(400).json({ error: "Symbol required" });
+
+    try {
+        let closed = false;
+        for (let [pId, botData] of activeBots.entries()) {
+            if (botData.userId !== req.userId.toString()) continue;
+            if (profileId && pId !== profileId) continue; 
+
+            const cState = botData.state.coinStates[symbol];
+            if (!cState || cState.contracts <= 0) continue;
+
+            const closePnl = parseFloat(cState.unrealizedPnl) || 0;
+
+            if (!req.isPaper) {
+                const positions = await botData.exchange.fetchPositions().catch(()=>[]);
+                const pos = positions.find(p => p.symbol === symbol && p.contracts > 0);
+                if (pos) {
+                    const closeSide = pos.side === 'long' ? 'sell' : 'buy';
+                    const activeLev = parseInt(pos.leverage || (pos.info && pos.info.lever_rate)) || cState.actualLeverage || getLeverageForCoin(symbol);
+                    await botData.exchange.createOrder(symbol, 'market', closeSide, pos.contracts, undefined, { offset: 'close', reduceOnly: true, lever_rate: activeLev });
+                }
+            }
+
+            const OffsetModel = req.isPaper ? PaperOffsetRecord : RealOffsetRecord;
+            OffsetModel.create({ 
+                userId: req.userId, symbol: symbol, side: cState.activeSide, openPrice: cState.avgEntry, closePrice: cState.currentPrice, roi: cState.currentRoi, netProfit: closePnl, reason: 'Manual User Close' 
+            }).catch(()=>{});
+
+            cState.contracts = 0; cState.unrealizedPnl = 0; cState.avgEntry = 0; cState.dcaCount = 0;
+            cState.lockUntil = Date.now() + 60000;
+
+            botData.settings.realizedPnl = parseFloat((botData.settings.realizedPnl + closePnl).toFixed(4));
+            const SettingsModel = req.isPaper ? PaperSettings : RealSettings;
+            
+            await SettingsModel.updateOne({ userId: req.userId, "subAccounts._id": botData.settings._id }, { $inc: { "subAccounts.$.realizedPnl": closePnl } }).catch(()=>{});
+
+            closed = true; break; 
+        }
+
+        if (closed) res.json({ success: true, message: `Closed ${symbol} successfully.` });
+        else res.status(400).json({ error: "Position not found or already closed." });
+    } catch(err) { res.status(500).json({ error: err.message }); }
 });
 
 app.get('/api/status', authMiddleware, async (req, res) => {
@@ -688,7 +799,7 @@ app.get('/api/offsets', authMiddleware, async (req, res) => {
 });
 
 // ==========================================
-// 8. ADVANCED FRONTEND UI
+// 8. ADVANCED FRONTEND UI (RESTORED LOGIN & REGISTRATION)
 // ==========================================
 const FRONTEND_HTML = [
     '<!DOCTYPE html>',
@@ -720,7 +831,7 @@ const FRONTEND_HTML = [
     '        th, td { border-bottom: 1px solid #1f2937; padding: 12px 10px; text-align: left; }',
     '        th { color: #9ca3af; font-weight: 500; text-transform: uppercase; font-size: 10px; letter-spacing: 0.05em; }',
     '        tr:hover td { background: #1f2937; }',
-    '        .text-green { color: #10b981 !important; } .text-red { color: #ef4444 !important; } .text-blue { color: #3b82f6 !important; } .text-warning { color: #f59e0b !important; }',
+    '        .text-green { color: #10b981 !important; } .text-red { color: #ef4444 !important; } .text-blue { color: #3b82f6 !important; } .text-warning { color: #f59e0b !important; } .text-muted { color: #6b7280 !important; }',
     '        #logs { height: 350px; overflow-y: auto; background: #000; padding: 12px; font-family: "Courier New", monospace; font-size: 12px; border: 1px solid #1f2937; border-radius: 4px; }',
     '        #landing-view, #auth-view, #dashboard-view { display: none; }',
     '    </style>',
@@ -732,11 +843,26 @@ const FRONTEND_HTML = [
     '            <div id="nav-actions" style="display:flex; gap:10px; flex-wrap:wrap; flex:1;"></div>',
     '        </nav>',
     '        ',
+    '        <div id="landing-view" style="text-align:center; padding: 80px 10px;">',
+    '            <h1 style="border:none; font-size: 32px; margin-bottom: 10px;">NexGen Algo Node</h1>',
+    '            <p class="text-muted" style="margin-bottom: 40px; font-size: 15px;">Deploy high-performance algorithmic trading nodes.</p>',
+    '            <div style="display:flex; justify-content:center; gap:15px;">',
+    '                <button onclick="navigateTo(\'/login\')" style="padding: 10px 24px; font-size: 14px;">Node Login</button>',
+    '                <button onclick="navigateTo(\'/register\')" style="background:#3b82f6; border:none; padding: 10px 24px; font-size: 14px; font-weight: bold;">Register Free</button>',
+    '            </div>',
+    '        </div>',
+    '',
     '        <div id="auth-view" class="card" style="max-width: 400px; margin: 40px auto;">',
     '            <h2 id="auth-header">System Access</h2>',
     '            <label>Username</label><input type="text" id="username">',
     '            <label>Password</label><input type="password" id="password">',
+    '            <div id="register-fields" style="display:none; border-top:1px solid #1f2937; padding-top:15px; margin-top:5px;">',
+    '                <label>Margin Multiplier</label><input type="number" id="qtyMultiplier" step="0.1" placeholder="1.0">',
+    '                <label>Custom Coins (Space separated)</label><input type="text" id="customCoins" placeholder="e.g. BTC ETH">',
+    '                <label>Live Access Code (Blank for Paper)</label><input type="password" id="authCode">',
+    '            </div>',
     '            <button id="auth-submit-btn" style="width:100%; margin-top:15px; padding:10px; background:#3b82f6; border:none; font-weight:bold;">Login</button>',
+    '            <div style="text-align:center; margin-top:15px;"><button id="auth-toggle-btn" style="background:transparent; border:none; color:#9ca3af; text-decoration:underline;">Create an account</button></div>',
     '            <p id="auth-msg" style="text-align:center; margin-top:15px; font-size:12px;"></p>',
     '        </div>',
     '',
@@ -810,28 +936,50 @@ const FRONTEND_HTML = [
     '        let mySubAccounts = []; let myGlobalSingleCoinTpPnl = 0; let mySmartOffsetNetProfit = 0; let myAutoBalanceEquity = false; let myAutoBalanceUnrealizedPnlTarget = 0; let myGlobalDcaRecoveryTriggerPnl = -50; let currentProfileIndex = -1; let myCoins = [];',
     '        const fmtC = v => (v>=0?"+$":"-$")+Math.abs(v).toFixed(4); const fmtP = p => { if(!p) return "-"; if(p<0.001) return p.toFixed(8); if(p<1) return p.toFixed(6); return p.toFixed(4); };',
     '',
+    '        function navigateTo(path) { window.history.pushState({}, \'\', path); route(); }',
+    '        window.onpopstate = route;',
+    '',
     '        function route() {',
     '            const path = window.location.pathname;',
+    '            document.getElementById(\'landing-view\').style.display = \'none\';',
+    '            document.getElementById(\'auth-view\').style.display = \'none\';',
+    '            document.getElementById(\'dashboard-view\').style.display = \'none\';',
     '            if (token) {',
-    '                document.getElementById(\'auth-view\').style.display = \'none\';',
+    '                if ([\'/\', \'/login\', \'/register\'].includes(path)) return navigateTo(\'/dashboard\');',
     '                document.getElementById(\'dashboard-view\').style.display = \'block\';',
     '                document.getElementById(\'nav-actions\').innerHTML = (isPaperUser ? \'<span style="padding:4px 8px; border:1px solid #3b82f6; color:#3b82f6; border-radius:3px; font-weight:bold;">PAPER ENGINE</span>\' : \'<span style="padding:4px 8px; border:1px solid #10b981; color:#10b981; border-radius:3px; font-weight:bold;">LIVE ENGINE</span>\') + \'<button style="margin-left:auto; border-color:#ef4444; color:#ef4444;" onclick="logout()">Disconnect</button>\';',
-    '                if(isPaperUser) document.getElementById(\'reset-paper-btn\').style.display = \'block\';',
+    '                if(isPaperUser && document.getElementById(\'reset-paper-btn\')) document.getElementById(\'reset-paper-btn\').style.display = \'block\';',
     '            } else {',
-    '                document.getElementById(\'dashboard-view\').style.display = \'none\';',
-    '                document.getElementById(\'auth-view\').style.display = \'block\';',
-    '                document.getElementById(\'nav-actions\').innerHTML = \'\';',
+    '                if (path === \'/login\') { document.getElementById(\'auth-view\').style.display = \'block\'; setupAuthUI(\'login\'); }',
+    '                else if (path === \'/register\') { document.getElementById(\'auth-view\').style.display = \'block\'; setupAuthUI(\'register\'); }',
+    '                else { document.getElementById(\'landing-view\').style.display = \'block\'; document.getElementById(\'nav-actions\').innerHTML = \'<button onclick="navigateTo(\\\'/login\\\')">Login</button><button style="background:#3b82f6; border:none;" onclick="navigateTo(\\\'/register\\\')">Register</button>\'; }',
     '            }',
     '        }',
     '',
-    '        async function executeAuth() {',
+    '        function setupAuthUI(mode) {',
+    '            const header = document.getElementById(\'auth-header\');',
+    '            const btn = document.getElementById(\'auth-submit-btn\');',
+    '            const toggleBtn = document.getElementById(\'auth-toggle-btn\');',
+    '            const regFields = document.getElementById(\'register-fields\');',
+    '            if(mode === \'register\') {',
+    '                header.innerText = "Deploy Instance"; btn.innerText = "Register"; btn.onclick = () => executeAuth(\'register\');',
+    '                toggleBtn.innerText = "Existing? Login here"; toggleBtn.onclick = () => navigateTo(\'/login\'); regFields.style.display = \'block\';',
+    '            } else {',
+    '                header.innerText = "Secure Login"; btn.innerText = "Login"; btn.onclick = () => executeAuth(\'login\');',
+    '                toggleBtn.innerText = "New? Register here"; toggleBtn.onclick = () => navigateTo(\'/register\'); regFields.style.display = \'none\';',
+    '            }',
+    '        }',
+    '',
+    '        async function executeAuth(action) {',
     '            const username = document.getElementById(\'username\').value; const password = document.getElementById(\'password\').value;',
-    '            const msgEl = document.getElementById(\'auth-msg\'); msgEl.innerText = "Authenticating..."; msgEl.className = "text-muted";',
+    '            const msgEl = document.getElementById(\'auth-msg\'); msgEl.innerText = "Connecting..."; msgEl.className = "text-muted";',
+    '            const bodyObj = { username, password };',
+    '            if (action === \'register\') { bodyObj.qtyMultiplier = document.getElementById(\'qtyMultiplier\')?.value || 1; bodyObj.customCoins = document.getElementById(\'customCoins\')?.value || \'\'; bodyObj.authCode = document.getElementById(\'authCode\')?.value.trim() || \'\'; }',
     '            try {',
-    '                const res = await fetch(\'/api/login\', { method: \'POST\', headers: { \'Content-Type\': \'application/json\' }, body: JSON.stringify({username,password}) });',
+    '                const res = await fetch(\'/api/\' + action, { method: \'POST\', headers: { \'Content-Type\': \'application/json\' }, body: JSON.stringify(bodyObj) });',
     '                const data = await res.json();',
     '                if (data.token) { token = data.token; localStorage.setItem(\'token\', token); msgEl.innerText = ""; await checkAuth(); } ',
-    '                else { msgEl.innerText = data.error || "Failed"; msgEl.className = \'text-red\'; }',
+    '                else { msgEl.innerText = data.error || data.message; msgEl.className = data.success ? \'text-green\' : \'text-red\'; }',
     '            } catch (e) { msgEl.innerText = "Network Error."; msgEl.className = "text-red"; }',
     '        }',
     '',
