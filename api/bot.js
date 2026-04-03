@@ -177,27 +177,8 @@ async function startBot(userId, subAccount, isPaper) {
 
                     // 1. OPEN BASE POSITION
                     if (cState.contracts <= 0) {
-                        let isAligned = false;
-                        try {
-                            if (!global.ohlcvCache) global.ohlcvCache = {};
-                            const cacheKey = coin.symbol;
-                            if (!global.ohlcvCache[cacheKey] || Date.now() - global.ohlcvCache[cacheKey].time > 60000) {
-                                const [ohlcv5m, ohlcv15m] = await Promise.all([ exchange.fetchOHLCV(coin.symbol, '5m', undefined, 2), exchange.fetchOHLCV(coin.symbol, '15m', undefined, 2) ]);
-                                global.ohlcvCache[cacheKey] = { time: Date.now(), c5: ohlcv5m[ohlcv5m.length - 1], c15: ohlcv15m[ohlcv15m.length - 1] };
-                            }
-                            const cached = global.ohlcvCache[cacheKey];
-                            if (cached && cached.c5 && cached.c15) {
-                                const is5mLong = cached.c5[4] >= cached.c5[1]; const is15mLong = cached.c15[4] >= cached.c15[1];
-                                if (activeSide === 'long' && is5mLong && is15mLong) isAligned = true;
-                                else if (activeSide === 'short' && !is5mLong && !is15mLong) isAligned = true;
-                            }
-                        } catch(e) {}
-                        
-                        if (!isAligned) { cState.status = 'Waiting for alignment'; continue; }
-                        cState.status = 'Aligned';
-
                         const safeBaseQty = Math.max(1, Math.floor(currentSettings.baseQty));
-                        logForProfile(profileId, `[${isPaper ? "PAPER" : "REAL"}] 🛒 Alignment Met! Opening base position of ${safeBaseQty} contracts (${activeSide}) at ~${cState.currentPrice}.`);
+                        logForProfile(profileId, `[${isPaper ? "PAPER" : "REAL"}] 🛒 Opening base position of ${safeBaseQty} contracts (${activeSide}) at ~${cState.currentPrice}.`);
                         
                         if (!isPaper) {
                             const orderSide = activeSide === 'long' ? 'buy' : 'sell';
@@ -207,7 +188,7 @@ async function startBot(userId, subAccount, isPaper) {
                         }
 
                         const OffsetModel = isPaper ? PaperOffsetRecord : RealOffsetRecord;
-                        OffsetModel.create({ userId: userId, symbol: coin.symbol, winnerSymbol: coin.symbol, reason: `Open Base Position (${safeBaseQty} contracts) - 5m/15m Aligned`, netProfit: 0 }).catch(()=>{});
+                        OffsetModel.create({ userId: userId, symbol: coin.symbol, winnerSymbol: coin.symbol, reason: `Open Base Position (${safeBaseQty} contracts)`, netProfit: 0 }).catch(()=>{});
                         cState.lockUntil = Date.now() + 5000; 
                         continue; 
                     }
@@ -1122,19 +1103,9 @@ app.get('/', (req, res) => {
                         <!-- LIVE DASHBOARD -->
                         <div class="md-card flex-1" style="flex: 1.5;">
                             <h2 class="md-card-header"><span class="material-symbols-outlined">query_stats</span> Live Dashboard</h2>
-                            <div class="stat-box flex-row" style="background:#E8F5E9; border-color:#A5D6A7; margin-bottom:12px;">
+                            <div class="stat-box flex-row" style="background:#E8F5E9; border-color:#A5D6A7; margin-bottom:24px;">
                                 <div style="flex:1;"><span class="stat-label">Global Realized PNL</span><span class="stat-val" id="globalPnl">0.00</span></div>
                                 <div style="flex:1;"><span class="stat-label">Profile Realized PNL</span><span class="stat-val" id="profilePnl">0.00</span></div>
-                            </div>
-                            <div class="flex-row" style="margin-bottom:24px;">
-                                <div class="stat-box flex-1" style="background:#FFF3E0; border-color:#FFE082;">
-                                    <span class="stat-label">Waiting for Alignment</span>
-                                    <span class="stat-val text-warning" id="uiWaitAlign">0</span>
-                                </div>
-                                <div class="stat-box flex-1" style="background:#E8F5E9; border-color:#A5D6A7;">
-                                    <span class="stat-label">Already Aligned (In Trade)</span>
-                                    <span class="stat-val text-green" id="uiAligned">0</span>
-                                </div>
                             </div>
                             <div id="dashboardStatusContainer"><p style="color:var(--text-secondary);">No profile loaded or no coins active.</p></div>
                             <h3 style="margin-top:30px;"><span class="material-symbols-outlined" style="vertical-align:middle;">terminal</span> System Logs</h3>
@@ -1630,16 +1601,12 @@ app.get('/', (req, res) => {
                 const stateData = allStatuses[profile._id] || { coinStates: {}, logs: [] };
                 const statusContainer = document.getElementById('dashboardStatusContainer');
                 
-                let countWaitAlign = 0; let countAligned = 0;
                 if(!myCoins || myCoins.length === 0) { statusContainer.innerHTML = '<p class="text-secondary">No coins added to this profile.</p>'; } 
                 else {
                     let html = '';
                     myCoins.forEach(coin => {
                         const state = stateData.coinStates && stateData.coinStates[coin.symbol] ? stateData.coinStates[coin.symbol] : { status: 'Stopped', currentPrice: 0, avgEntry: 0, contracts: 0, currentRoi: 0, unrealizedPnl: 0 };
-                        let statusColor = ['Running', 'In Position', 'Aligned'].includes(state.status) ? 'text-green' : 'text-red';
-                        if (state.status === 'Waiting for alignment') { statusColor = 'text-warning'; countWaitAlign++; }
-                        if (state.contracts > 0 || state.status === 'Aligned' || state.status === 'In Position') countAligned++;
-                        let roiColorClass = state.currentRoi >= 0 ? 'text-green' : 'text-red';
+                        let statusColor = state.status === 'Running' ? 'text-green' : 'text-red'; let roiColorClass = state.currentRoi >= 0 ? 'text-green' : 'text-red';
                         const displaySide = coin.side || profile.side || 'long';
 
                         if (state.lockUntil && Date.now() < state.lockUntil) { statusColor = 'text-warning'; state.status = 'Closing / Locked'; }
@@ -1659,8 +1626,6 @@ app.get('/', (req, res) => {
                     });
                     statusContainer.innerHTML = html;
                 }
-                const uiWait = document.getElementById('uiWaitAlign'); if(uiWait) uiWait.innerText = countWaitAlign;
-                const uiAlign = document.getElementById('uiAligned'); if(uiAlign) uiAlign.innerText = countAligned;
                 document.getElementById('logs').innerHTML = (stateData.logs || []).join('<br>');
             }
 
