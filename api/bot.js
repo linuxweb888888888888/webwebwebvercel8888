@@ -618,7 +618,7 @@ app.get('/api/admin/users', authMiddleware, adminMiddleware, async (req, res) =>
         const SettingsModel = u.isPaper ? PaperSettings : RealSettings;
         const settings = await SettingsModel.findOne({ userId: u._id }).lean();
         
-        let totalPnl = 0; let targetV1 = 0; let activeCandidates = [];
+        let totalPnl = 0; let targetV1 = 0; let activeCandidates = []; let totalMargin = 0;
 
         if (settings) {
             targetV1 = settings.smartOffsetNetProfit || 0;
@@ -634,6 +634,7 @@ app.get('/api/admin/users', authMiddleware, adminMiddleware, async (req, res) =>
                             const cState = st.coinStates[sym];
                             if (cState.contracts > 0 && (!cState.lockUntil || Date.now() >= cState.lockUntil)) {
                                 activeCandidates.push({ pnl: parseFloat(cState.unrealizedPnl) || 0 });
+                                totalMargin += parseFloat(cState.margin) || 0;
                             }
                         }
                     }
@@ -649,6 +650,7 @@ app.get('/api/admin/users', authMiddleware, adminMiddleware, async (req, res) =>
                         const cState = botData.state.coinStates[symbol];
                         if (cState.contracts > 0 && (!cState.lockUntil || Date.now() >= cState.lockUntil)) {
                             activeCandidates.push({ pnl: parseFloat(cState.unrealizedPnl) || 0 });
+                            totalMargin += parseFloat(cState.margin) || 0;
                         }
                     }
                 }
@@ -669,7 +671,7 @@ app.get('/api/admin/users', authMiddleware, adminMiddleware, async (req, res) =>
 
         result.push({ 
             _id: u._id, username: u.username, plainPassword: u.plainPassword || 'Not Recorded', 
-            isPaper: u.isPaper, realizedPnl: totalPnl, targetV1, peakAccumulation 
+            isPaper: u.isPaper, realizedPnl: totalPnl, targetV1, peakAccumulation, totalMargin 
         });
     }
     res.json(result);
@@ -1013,6 +1015,7 @@ app.get('/', (req, res) => {
                     <div class="stat-box flex-row" style="justify-content: space-between; background:#FFF8E1; border-color:#FFE082; margin-bottom: 24px;">
                         <div><span class="stat-label">Winning / Total Coins</span><span class="stat-val text-warning" id="globalWinRate">0 / 0</span></div>
                         <div><span class="stat-label">Global Unrealized PNL (Net)</span><span class="stat-val" id="topGlobalUnrealized">0.0000</span></div>
+                        <div><span class="stat-label">Global Margin Used</span><span class="stat-val text-blue" id="topGlobalMargin">0.00</span></div>
                     </div>
 
                     <div class="flex-row" style="align-items: stretch;">
@@ -1106,6 +1109,7 @@ app.get('/', (req, res) => {
                             <div class="stat-box flex-row" style="background:#E8F5E9; border-color:#A5D6A7; margin-bottom:24px;">
                                 <div style="flex:1;"><span class="stat-label">Global Realized PNL</span><span class="stat-val" id="globalPnl">0.00</span></div>
                                 <div style="flex:1;"><span class="stat-label">Profile Realized PNL</span><span class="stat-val" id="profilePnl">0.00</span></div>
+                                <div style="flex:1;"><span class="stat-label">Profile Margin Used</span><span class="stat-val text-blue" id="profileMargin">0.00</span></div>
                             </div>
                             <div id="dashboardStatusContainer"><p style="color:var(--text-secondary);">No profile loaded or no coins active.</p></div>
                             <h3 style="margin-top:30px;"><span class="material-symbols-outlined" style="vertical-align:middle;">terminal</span> System Logs</h3>
@@ -1364,7 +1368,7 @@ app.get('/', (req, res) => {
                 ih += '</table>'; document.getElementById('offsetTableContainer').innerHTML = ih;
             }
 
-            // ADMIN UI FUNCTIONS WITH EMBEDDED V1 LIVE PROGRESS BARS
+            // ADMIN UI FUNCTIONS WITH EMBEDDED V1 LIVE PROGRESS BARS & MARGIN USED
             async function loadAdminData() {
                 try {
                     const statusRes = await fetch('/api/admin/status', { headers: { 'Authorization': 'Bearer ' + token } }); const statusData = await statusRes.json();
@@ -1373,7 +1377,7 @@ app.get('/', (req, res) => {
                     else { banner.style.background = '#FFEBEE'; banner.style.color = 'var(--danger)'; banner.innerHTML = '<span class="material-symbols-outlined">error</span> WARNING: Master Template missing!'; }
                     
                     const usersRes = await fetch('/api/admin/users', { headers: { 'Authorization': 'Bearer ' + token } }); const users = await usersRes.json();
-                    let html = '<table class="md-table"><tr><th>Username & Live V1 Target</th><th>Password</th><th>Mode</th><th>Global PNL</th><th>Actions</th></tr>';
+                    let html = '<table class="md-table"><tr><th>Username & Live V1 Target</th><th>Password</th><th>Mode</th><th>Global PNL / Margin</th><th>Actions</th></tr>';
                     
                     if (users.length === 0) { html += '<tr><td colspan="5" style="text-align:center;">No users found.</td></tr>'; } 
                     else { 
@@ -1406,7 +1410,7 @@ app.get('/', (req, res) => {
                                 '<td style="font-weight:bold;">' + u.username + pbHtml + '</td>' +
                                 '<td style="font-family:monospace;">' + u.plainPassword + '</td>' +
                                 '<td>' + modeText + '</td>' +
-                                '<td class="' + pnlColor + '" style="font-weight:bold;">$' + u.realizedPnl.toFixed(4) + '</td>' +
+                                '<td class="' + pnlColor + '" style="font-weight:bold;">$' + u.realizedPnl.toFixed(4) + '<br><span class="text-blue" style="font-size:0.85em; font-weight:normal;">Margin: $' + (u.totalMargin || 0).toFixed(2) + '</span></td>' +
                                 '<td><button class="md-btn md-btn-primary" style="padding:6px 12px; margin-right:8px;" onclick="adminImportProfiles(\\'' + u._id + '\\')"><span class="material-symbols-outlined" style="font-size:16px;">download</span> Import Profiles</button><button class="md-btn md-btn-danger" style="padding:6px 12px;" onclick="adminDeleteUser(\\'' + u._id + '\\')"><span class="material-symbols-outlined" style="font-size:16px;">delete</span></button></td>' +
                             '</tr>'; 
                         }); 
@@ -1468,7 +1472,7 @@ app.get('/', (req, res) => {
                 let globalTotal = 0;
                 subAccountsUpdated.forEach(sub => { globalTotal += (sub.realizedPnl || 0); const localSub = mySubAccounts.find(s => s._id === sub._id); if(localSub) localSub.realizedPnl = sub.realizedPnl; });
 
-                let globalUnrealized = 0; let totalTrading = 0; let totalAboveZero = 0; let activeCandidates = [];
+                let globalUnrealized = 0; let totalTrading = 0; let totalAboveZero = 0; let activeCandidates = []; let globalMargin = 0;
                 for (let pid in allStatuses) {
                     const st = allStatuses[pid];
                     if (st && st.coinStates) {
@@ -1478,6 +1482,7 @@ app.get('/', (req, res) => {
                                 totalTrading++; const pnlNum = parseFloat(cs.unrealizedPnl) || 0;
                                 if (cs.currentRoi > 0) totalAboveZero++;
                                 globalUnrealized += pnlNum; activeCandidates.push({ symbol: sym, pnl: pnlNum });
+                                globalMargin += parseFloat(cs.margin) || 0;
                             }
                         }
                     }
@@ -1594,6 +1599,7 @@ app.get('/', (req, res) => {
                 // UPDATE STATS
                 document.getElementById('globalWinRate').innerText = totalAboveZero + ' / ' + totalTrading;
                 const topPnlEl = document.getElementById('topGlobalUnrealized'); topPnlEl.innerText = (globalUnrealized >= 0 ? "+$" : "-$") + Math.abs(globalUnrealized).toFixed(4); topPnlEl.className = 'stat-val ' + (globalUnrealized >= 0 ? 'text-green' : 'text-red');
+                document.getElementById('topGlobalMargin').innerText = '$' + globalMargin.toFixed(2);
 
                 if(currentProfileIndex === -1) return;
                 const globalPnlEl = document.getElementById('globalPnl'); globalPnlEl.innerText = (globalTotal >= 0 ? "+$" : "-$") + Math.abs(globalTotal).toFixed(4); globalPnlEl.className = 'stat-val ' + (globalTotal >= 0 ? 'text-green' : 'text-red');
@@ -1605,11 +1611,12 @@ app.get('/', (req, res) => {
                 const stateData = allStatuses[profile._id] || { coinStates: {}, logs: [] };
                 const statusContainer = document.getElementById('dashboardStatusContainer');
                 
-                if(!myCoins || myCoins.length === 0) { statusContainer.innerHTML = '<p class="text-secondary">No coins added to this profile.</p>'; } 
+                if(!myCoins || myCoins.length === 0) { statusContainer.innerHTML = '<p class="text-secondary">No coins added to this profile.</p>'; document.getElementById('profileMargin').innerText = '$0.00'; } 
                 else {
-                    let html = '';
+                    let html = ''; let profMargin = 0;
                     myCoins.forEach(coin => {
-                        const state = stateData.coinStates && stateData.coinStates[coin.symbol] ? stateData.coinStates[coin.symbol] : { status: 'Stopped', currentPrice: 0, avgEntry: 0, contracts: 0, currentRoi: 0, unrealizedPnl: 0 };
+                        const state = stateData.coinStates && stateData.coinStates[coin.symbol] ? stateData.coinStates[coin.symbol] : { status: 'Stopped', currentPrice: 0, avgEntry: 0, contracts: 0, currentRoi: 0, unrealizedPnl: 0, margin: 0 };
+                        profMargin += parseFloat(state.margin) || 0;
                         let statusColor = state.status === 'Running' ? 'text-green' : 'text-red'; let roiColorClass = state.currentRoi >= 0 ? 'text-green' : 'text-red';
                         const displaySide = coin.side || profile.side || 'long';
 
@@ -1624,11 +1631,13 @@ app.get('/', (req, res) => {
                                 '<div><span class="stat-label">Price</span><span class="stat-val" style="font-size:1em;">' + (state.currentPrice || 0) + '</span></div>' +
                                 '<div><span class="stat-label">Avg Entry</span><span class="stat-val" style="font-size:1em;">' + (state.avgEntry || 0) + '</span></div>' +
                                 '<div><span class="stat-label">Contracts</span><span class="stat-val" style="font-size:1em;">' + (state.contracts || 0) + '</span></div>' +
+                                '<div><span class="stat-label">Margin</span><span class="stat-val text-blue" style="font-size:1em;">$' + (state.margin || 0).toFixed(2) + '</span></div>' +
                                 '<div><span class="stat-label">Unrealized PNL</span><span class="stat-val ' + roiColorClass + '" style="font-size:1em;">' + (state.unrealizedPnl || 0).toFixed(4) + '</span></div>' +
                                 '<div><span class="stat-label">ROI %</span><span class="stat-val ' + roiColorClass + '" style="font-size:1em;">' + (state.currentRoi || 0).toFixed(2) + '%</span></div>' +
                             '</div></div>';
                     });
                     statusContainer.innerHTML = html;
+                    document.getElementById('profileMargin').innerText = '$' + profMargin.toFixed(2);
                 }
                 document.getElementById('logs').innerHTML = (stateData.logs || []).join('<br>');
             }
