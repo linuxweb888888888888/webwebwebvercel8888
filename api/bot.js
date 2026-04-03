@@ -1,3 +1,5 @@
+//web8888
+
 const express = require('express');
 const ccxt = require('ccxt');
 const mongoose = require('mongoose');
@@ -631,7 +633,7 @@ const executeGlobalProfitMonitor = async () => {
 
             for (let [profileId, botData] of activeBots.entries()) {
                 if (botData.userId !== dbUserId) continue;
-                if (botData.isPaper !== userSetting.isPaper) continue; // CRITICAL: Stop paper/live cross-contamination
+                if (botData.isPaper !== userSetting.isPaper) continue; // Prevent multi-environment double triggers
                 
                 if (!firstProfileId) firstProfileId = profileId;
                 
@@ -657,10 +659,9 @@ const executeGlobalProfitMonitor = async () => {
             let offsetExecuted = false;
 
             // ==============================================================
-            // 1. SMART OFFSET V1 (EVALUATED FIRST)
+            // SMART OFFSET V1 (MOVED ABOVE AUTO-BALANCER SO IT TRIGGERS)
             // ==============================================================
-            if (smartOffsetNetProfit > 0 && activeCandidates.length >= 2) {
-                // Sort Highest Winners to Lowest Losers
+            if (!offsetExecuted && smartOffsetNetProfit > 0 && activeCandidates.length >= 2) {
                 activeCandidates.sort((a, b) => b.unrealizedPnl - a.unrealizedPnl); 
                 
                 const totalCoins = activeCandidates.length;
@@ -672,7 +673,7 @@ const executeGlobalProfitMonitor = async () => {
 
                 for (let i = 0; i < totalPairs; i++) {
                     const w = activeCandidates[i];
-                    const l = activeCandidates[totalCoins - 1 - i]; // FIX: True opposite index mapping
+                    const l = activeCandidates[totalCoins - 1 - i]; // FIX 1: Correct mirror index
                     const netResult = w.unrealizedPnl + l.unrealizedPnl;
                     
                     runningAccumulation += netResult;
@@ -683,33 +684,43 @@ const executeGlobalProfitMonitor = async () => {
                     }
                 }
 
+                let triggerOffset = false;
+                let reason = '';
                 let finalPairsToClose = [];
 
-                if (peakAccumulation >= targetV1 && peakAccumulation >= peakThreshold && peakRowIndex >= 0) {
+                if (smartOffsetNetProfit > 0 && peakAccumulation >= targetV1 && peakAccumulation >= peakThreshold && peakRowIndex >= 0) {
+                    triggerOffset = true;
+                    reason = `Smart Offset V1`;
                     for(let i = 0; i <= peakRowIndex; i++) {
                         const w = activeCandidates[i];
-                        const l = activeCandidates[totalCoins - 1 - i]; 
-                        
-                        if (Math.abs(w.unrealizedPnl) > winnerThreshold) finalPairsToClose.push(w); 
-                        finalPairsToClose.push(l); // MUST PUSH LOSER TO OFFSET
+                        const l = activeCandidates[totalCoins - 1 - i]; // FIX 2: Get Loser
+                        if (Math.abs(w.unrealizedPnl) > winnerThreshold) {
+                            finalPairsToClose.push(w); 
+                        }
+                        finalPairsToClose.push(l); // FIX 3: Push Loser
                     }
+                    if (finalPairsToClose.length === 0) triggerOffset = false; 
                 } 
 
-                if (finalPairsToClose.length > 0) {
+                if (triggerOffset) {
                     let actualPairsToClose = [];
                     for (let k = 0; k < finalPairsToClose.length; k++) {
                         const pos = finalPairsToClose[k];
                         const bState = activeBots.get(pos.profileId).state.coinStates[pos.symbol];
+                        
+                        // FIX 4: Check existence but do NOT filter out negatives
                         if (bState && bState.contracts > 0) {
                             actualPairsToClose.push(pos);
                         }
                     }
+                    finalPairsToClose = actualPairsToClose;
+                    if (finalPairsToClose.length === 0) triggerOffset = false;
 
-                    if (actualPairsToClose.length > 0) {
-                        logForProfile(firstProfileId, `⚖️ SMART OFFSET V1: Executing on ${actualPairsToClose.length} coins. Net: $${peakAccumulation.toFixed(4)}`);
+                    if (triggerOffset) {
+                        logForProfile(firstProfileId, `⚖️ SMART OFFSET V1: Closing ${finalPairsToClose.length} PAIRED coin(s).`);
 
-                        for (let k = 0; k < actualPairsToClose.length; k++) {
-                            const pos = actualPairsToClose[k];
+                        for (let k = 0; k < finalPairsToClose.length; k++) {
+                            const pos = finalPairsToClose[k];
                             const bData = activeBots.get(pos.profileId);
                             
                             try {
@@ -752,7 +763,7 @@ const executeGlobalProfitMonitor = async () => {
             }
 
             // ==============================================================
-            // 2. EQUITY AUTO-BALANCER (EVALUATED SECOND)
+            // EQUITY AUTO-BALANCER (DEFICIT COVER & SURPLUS HARVEST)
             // ==============================================================
             if (userSetting.autoBalanceEquity && !offsetExecuted) {
                 const targetPnl = parseFloat(userSetting.autoBalanceUnrealizedPnlTarget) || 0;
@@ -761,9 +772,9 @@ const executeGlobalProfitMonitor = async () => {
                 for (let s of userSetting.subAccounts) globalRealized += (s.realizedPnl || 0);
 
                 const balanceTolerance = 5.0 * multiplier; 
-                const microTolerance = 0.05; 
+                const microTolerance = 0.05; // 5 cents: Triggers deficit cover immediately
 
-                // A. SURPLUS HARVEST
+                // 1. SURPLUS HARVEST
                 if (globalUnrealized > targetPnl + balanceTolerance) {
                     let excess = globalUnrealized - targetPnl;
                     let winners = activeCandidates.filter(c => c.unrealizedPnl > 0).sort((a, b) => b.unrealizedPnl - a.unrealizedPnl);
@@ -772,7 +783,6 @@ const executeGlobalProfitMonitor = async () => {
                         if (excess <= balanceTolerance) break;
                         let winAmount = w.unrealizedPnl;
                         let closeFraction = winAmount > excess ? (excess / winAmount) : 1;
-                        // FIX: Restore integer contract logic to prevent HTX API validation failures
                         let closeQty = Math.max(1, Math.floor(w.contracts * closeFraction));
                         if (closeQty > w.contracts) closeQty = w.contracts;
 
@@ -819,7 +829,7 @@ const executeGlobalProfitMonitor = async () => {
                         }
                     }
                 } 
-                // B. DEFICIT COVER
+                // 2. DEFICIT COVER (Instantly close winners & losers to wipe out the deficit)
                 else if (globalUnrealized < targetPnl - microTolerance) {
                     let deficit = targetPnl - globalUnrealized;
                     let availableRealized = Math.max(0, globalRealized - retainRealized);
@@ -827,9 +837,10 @@ const executeGlobalProfitMonitor = async () => {
                     let losers = activeCandidates.filter(c => c.unrealizedPnl < 0).sort((a, b) => a.unrealizedPnl - b.unrealizedPnl);
                     let winners = activeCandidates.filter(c => c.unrealizedPnl > 0).sort((a, b) => b.unrealizedPnl - a.unrealizedPnl);
 
+                    // A. Calculate and CLOSE WINNERS to generate the cash to cover the deficit
                     if (availableRealized < deficit && winners.length > 0) {
                         let shortfall = deficit - availableRealized;
-                        logForProfile(firstProfileId, `⚙️ BALANCER: Deficit > Cash. Closing winners to cover shortfall ($${shortfall.toFixed(2)})...`);
+                        logForProfile(firstProfileId, `⚙️ BALANCER: Deficit ($${deficit.toFixed(2)}) > Cash. Closing winners to cover shortfall ($${shortfall.toFixed(2)})...`);
 
                         for (let w of winners) {
                             if (shortfall <= microTolerance) break;
@@ -879,6 +890,7 @@ const executeGlobalProfitMonitor = async () => {
                         }
                     }
 
+                    // B. Close the LOSERS using the available realized cash to eliminate the deficit completely
                     let budget = Math.min(deficit, availableRealized);
 
                     if (budget >= microTolerance && losers.length > 0) {
@@ -934,7 +946,6 @@ const executeGlobalProfitMonitor = async () => {
             }
         }
     } catch (err) {
-        console.error("Global monitor error", err);
     } finally {
         global.isGlobalMonitoring = false; 
     }
