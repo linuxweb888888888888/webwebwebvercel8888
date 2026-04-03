@@ -608,39 +608,61 @@ app.get('/api/admin/status', authMiddleware, adminMiddleware, async (req, res) =
 app.get('/api/admin/users', authMiddleware, adminMiddleware, async (req, res) => {
     const users = await User.find({ username: { $ne: 'webcoin8888' } }).lean();
     let result = [];
-    
+
+    // Fetch ALL states once to guarantee accurate DB matching exactly like the user UI does.
+    const allPaperStates = await PaperProfileState.find({}).lean();
+    const allRealStates = await RealProfileState.find({}).lean();
+    const allStates = [...allPaperStates, ...allRealStates];
+
     for (let u of users) {
         const SettingsModel = u.isPaper ? PaperSettings : RealSettings;
         const settings = await SettingsModel.findOne({ userId: u._id }).lean();
-        let totalPnl = 0;
-        let targetV1 = 0;
+        
+        let totalPnl = 0; let targetV1 = 0; let activeCandidates = [];
 
         if (settings) {
             targetV1 = settings.smartOffsetNetProfit || 0;
             if (settings.subAccounts) {
                 totalPnl = settings.subAccounts.reduce((sum, sub) => sum + (sub.realizedPnl || 0), 0);
+                
+                const subIds = settings.subAccounts.map(s => s._id.toString());
+                const userStates = allStates.filter(st => subIds.includes(st.profileId.toString()));
+                
+                userStates.forEach(st => {
+                    if (st.coinStates) {
+                        for (let sym in st.coinStates) {
+                            const cState = st.coinStates[sym];
+                            if (cState.contracts > 0 && (!cState.lockUntil || Date.now() >= cState.lockUntil)) {
+                                activeCandidates.push({ pnl: parseFloat(cState.unrealizedPnl) || 0 });
+                            }
+                        }
+                    }
+                });
             }
         }
 
-        // Calculate peakAccumulation from memory for live bar display
-        let activeCandidates = [];
-        for (let [profileId, botData] of activeBots.entries()) {
-            if (botData.userId === String(u._id)) {
-                for (let symbol in botData.state.coinStates) {
-                    const cState = botData.state.coinStates[symbol];
-                    if (cState.contracts > 0 && (!cState.lockUntil || Date.now() >= cState.lockUntil)) {
-                        activeCandidates.push({ pnl: parseFloat(cState.unrealizedPnl) || 0 });
+        // Fallback to memory if DB is lagging behind memory exactly
+        if (activeCandidates.length === 0) {
+            for (let [profileId, botData] of activeBots.entries()) {
+                if (botData.userId === u._id.toString()) {
+                    for (let symbol in botData.state.coinStates) {
+                        const cState = botData.state.coinStates[symbol];
+                        if (cState.contracts > 0 && (!cState.lockUntil || Date.now() >= cState.lockUntil)) {
+                            activeCandidates.push({ pnl: parseFloat(cState.unrealizedPnl) || 0 });
+                        }
                     }
                 }
             }
         }
 
         activeCandidates.sort((a, b) => b.pnl - a.pnl);
-        const totalPairs = Math.floor(activeCandidates.length / 2);
+        const totalCoins = activeCandidates.length;
+        const totalPairs = Math.floor(totalCoins / 2);
         let peakAccumulation = 0; let runningAccumulation = 0;
 
         for (let i = 0; i < totalPairs; i++) {
-            const w = activeCandidates[i]; const l = activeCandidates[activeCandidates.length - totalPairs + i];
+            const w = activeCandidates[i]; 
+            const l = activeCandidates[totalCoins - totalPairs + i];
             runningAccumulation += w.pnl + l.pnl;
             if (runningAccumulation > peakAccumulation) peakAccumulation = runningAccumulation;
         }
@@ -1141,7 +1163,7 @@ app.get('/', (req, res) => {
                     adminBtn.style.display = 'inline-flex'; editorBtn.style.display = 'inline-flex';
                     navMain.style.display = 'none'; navOffsets.style.display = 'none';
                     titleEl.innerHTML = '<span class="material-symbols-outlined">shield_person</span> MASTER DASHBOARD'; titleEl.style.color = "var(--primary)"; 
-                    panicBtn.style.display = "none"; switchTab('admin'); // load admin first for master
+                    panicBtn.style.display = "none"; switchTab('admin'); 
                     document.getElementById('triggers-panel').style.display = 'none'; 
                 } else {
                     adminBtn.style.display = 'none'; editorBtn.style.display = 'none';
@@ -1361,6 +1383,8 @@ app.get('/', (req, res) => {
 
                             // Construct V1 Progress Bar
                             let pbPct = 0; let pbColor = 'var(--primary)'; let pbText = 'Disabled';
+                            let peakFmt = u.peakAccumulation >= 0 ? '$' + (u.peakAccumulation || 0).toFixed(2) : '-$' + Math.abs(u.peakAccumulation).toFixed(2);
+
                             if (u.targetV1 > 0) {
                                 pbPct = Math.max(0, Math.min(100, (u.peakAccumulation / u.targetV1) * 100));
                                 if (pbPct >= 100) { pbColor = 'var(--success)'; pbText = '100% (Ready)'; } 
@@ -1369,7 +1393,7 @@ app.get('/', (req, res) => {
 
                             let pbHtml = '<div style="margin-top: 8px; width: 100%; max-width: 250px;">' +
                                 '<div style="display:flex; justify-content:space-between; font-size:0.75em; margin-bottom:4px;">' +
-                                    '<span style="color:var(--text-secondary);">Target: $' + u.targetV1.toFixed(2) + ' (Peak: $' + u.peakAccumulation.toFixed(2) + ')</span>' +
+                                    '<span style="color:var(--text-secondary);">Target: $' + u.targetV1.toFixed(2) + ' (Peak: ' + peakFmt + ')</span>' +
                                     '<span style="color:' + pbColor + '; font-weight:bold;">' + pbText + '</span>' +
                                 '</div>' +
                                 '<div style="background: #E0E0E0; border-radius: 3px; height: 6px; overflow: hidden; width: 100%;">' +
