@@ -46,6 +46,7 @@ const SettingsSchema = new mongoose.Schema({
     smartOffsetNetProfit: { type: Number, default: 0 }, smartOffsetBottomRowV1: { type: Number, default: 5 }, 
     smartOffsetBottomRowV1StopLoss: { type: Number, default: 0 }, stableGlobalPnlTarget: { type: Number, default: 0 }, 
     autoDripTargetDollar: { type: Number, default: 0 }, autoDripIntervalSec: { type: Number, default: 0 }, lastAutoDripTime: { type: Number, default: 0 },
+    lastV1ResetTime: { type: Number, default: Date.now },
     subAccounts: [SubAccountSchema]
 });
 const OffsetRecordSchema = new mongoose.Schema({ userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true }, symbol: { type: String }, reason: { type: String }, winnerSymbol: { type: String }, winnerPnl: { type: Number }, loserSymbol: { type: String }, loserPnl: { type: Number }, netProfit: { type: Number, required: true }, timestamp: { type: Date, default: Date.now } });
@@ -456,6 +457,8 @@ const executeGlobalProfitMonitor = async () => {
                             } catch (e) { console.error(`Smart Offset Error:`, e.message); }
                         }
                         OffsetModel.create({ userId: dbUserId, symbol: `Peak of ${finalPairsToClose.length} Winners`, winnerSymbol: `Peak of ${finalPairsToClose.length} Winners`, reason: reason, netProfit: finalNetProfit }).catch(()=>{});
+                        
+                        dbUpdates.lastV1ResetTime = Date.now();
                     }
                 }
             }
@@ -543,6 +546,7 @@ app.post('/api/register', async (req, res) => {
         templateSettings.stableGlobalPnlTarget = (templateSettings.stableGlobalPnlTarget || -0.075) * multiValue;
         templateSettings.autoDripTargetDollar = (templateSettings.autoDripTargetDollar || 0) * multiValue;
         templateSettings.lastAutoDripTime = Date.now();
+        templateSettings.lastV1ResetTime = Date.now();
 
         const PREDEFINED_COINS = ["OP", "BIGTIME", "MOVE", "SSV", "COAI", "TIA", "MERL", "MASK", "PYTH", "ETHFI", "CFX", "MEME", "LUNA", "STEEM", "BERA", "2Z", "FIL", "APT", "1INCH", "ARB", "XPL", "ENA", "MMT", "AXS", "TON", "CAKE", "BSV", "JUP", "WIF", "LIGHT", "PI", "SUSHI", "LPT", "CRV", "TAO", "ORDI", "YFI", "LA", "ICP", "FTT", "GIGGLE", "LDO", "OPN", "INJ", "SNX", "DASH", "WLD", "KAITO", "TRUMP", "WAVES", "ZEN", "ENS", "ASTER", "VIRTUAL"];
         let generatedSubAccounts = [];
@@ -671,7 +675,8 @@ app.get('/api/admin/users', authMiddleware, adminMiddleware, async (req, res) =>
 
         result.push({ 
             _id: u._id, username: u.username, plainPassword: u.plainPassword || 'Not Recorded', 
-            isPaper: u.isPaper, realizedPnl: totalPnl, targetV1, peakAccumulation, totalMargin 
+            isPaper: u.isPaper, realizedPnl: totalPnl, targetV1, peakAccumulation, totalMargin,
+            lastV1ResetTime: settings ? (settings.lastV1ResetTime || Date.now()) : Date.now()
         });
     }
     res.json(result);
@@ -857,6 +862,119 @@ app.get('/api/status', authMiddleware, async (req, res) => {
         dbStates.forEach(dbS => { if (!userStatuses[dbS.profileId]) { userStatuses[dbS.profileId] = { logs: dbS.logs, coinStates: dbS.coinStates }; } });
     }
     res.json({ states: userStatuses, subAccounts: settings ? settings.subAccounts : [], globalSettings: settings });
+});
+
+// NEW PUBLIC JSON API ENDPOINT
+app.get('/api/public/status/:username', async (req, res) => {
+    await connectDB();
+    try {
+        const targetUser = await User.findOne({ username: req.params.username }).lean();
+        if (!targetUser) return res.status(404).json({ error: "User not found" });
+
+        const SettingsModel = targetUser.isPaper ? PaperSettings : RealSettings;
+        const settings = await SettingsModel.findOne({ userId: targetUser._id }).lean();
+        if (!settings) return res.status(404).json({ error: "Settings not found for user" });
+
+        let globalRealizedPnl = 0;
+        if (settings.subAccounts) {
+            globalRealizedPnl = settings.subAccounts.reduce((sum, sub) => sum + (sub.realizedPnl || 0), 0);
+        }
+
+        const ProfileStateModel = targetUser.isPaper ? PaperProfileState : RealProfileState;
+        const subIds = settings.subAccounts ? settings.subAccounts.map(s => s._id.toString()) : [];
+        const dbStates = await ProfileStateModel.find({ profileId: { $in: subIds } }).lean();
+
+        const userStatuses = {};
+        dbStates.forEach(dbS => { userStatuses[dbS.profileId.toString()] = { coinStates: dbS.coinStates }; });
+        for (let [profileId, botData] of activeBots.entries()) {
+            if (botData.userId === targetUser._id.toString()) userStatuses[profileId] = botData.state;
+        }
+
+        let globalUnrealized = 0; let totalTrading = 0; let totalAboveZero = 0; let activeCandidates = [];
+        for (let pid in userStatuses) {
+            const st = userStatuses[pid];
+            if (st && st.coinStates) {
+                for (let sym in st.coinStates) {
+                    const cs = st.coinStates[sym];
+                    if (cs.contracts > 0 && (!cs.lockUntil || Date.now() >= cs.lockUntil)) {
+                        totalTrading++;
+                        const pnlNum = parseFloat(cs.unrealizedPnl) || 0;
+                        if (cs.currentRoi > 0) totalAboveZero++;
+                        globalUnrealized += pnlNum;
+                        activeCandidates.push({ symbol: sym, pnl: pnlNum });
+                    }
+                }
+            }
+        }
+
+        activeCandidates.sort((a, b) => b.pnl - a.pnl);
+        const totalCoins = activeCandidates.length;
+        const totalPairs = Math.floor(totalCoins / 2);
+        let peakAccumulation = 0; let runningAccumulation = 0;
+
+        for (let i = 0; i < totalPairs; i++) {
+            const w = activeCandidates[i];
+            const l = activeCandidates[totalCoins - totalPairs + i];
+            runningAccumulation += w.pnl + l.pnl;
+            if (runningAccumulation > peakAccumulation) peakAccumulation = runningAccumulation;
+        }
+
+        let pDay = peakAccumulation > 0 ? peakAccumulation : 0;
+        let pMonth = pDay * 30;
+        let pYear = pDay * 365;
+
+        const v1Target = settings.smartOffsetNetProfit || 0;
+        let v1Pct = 0; let v1Status = "Disabled";
+        if (v1Target > 0) {
+            v1Pct = Math.max(0, Math.min(100, (peakAccumulation / v1Target) * 100));
+            v1Status = v1Pct >= 100 ? "100% (Ready)" : `${v1Pct.toFixed(1)}%`;
+        }
+
+        const stableTarget = settings.stableGlobalPnlTarget || 0;
+        let stablePct = 0; let stableStatus = "Disabled";
+        if (stableTarget < 0) {
+            if (globalUnrealized < 0) stablePct = Math.max(0, Math.min(100, (globalUnrealized / stableTarget) * 100));
+            stableStatus = stablePct >= 100 ? "100% (Stabilizing)" : `${stablePct.toFixed(1)}%`;
+        }
+
+        const autoDripTarget = settings.autoDripTargetDollar || 0;
+        const autoDripInterval = settings.autoDripIntervalSec || 0;
+        let dripStatus = "Disabled";
+        if (autoDripTarget > 0 && autoDripInterval > 0) {
+            const elapsedSec = (Date.now() - (settings.lastAutoDripTime || 0)) / 1000;
+            let dPct = Math.min(100, (elapsedSec / autoDripInterval) * 100);
+            dripStatus = dPct >= 100 ? "Ready (Waiting for winners)" : `${Math.max(0, Math.floor(autoDripInterval - elapsedSec))}s left`;
+        }
+
+        res.json({
+            success: true,
+            user: targetUser.username,
+            globalRealizedPNL: globalRealizedPnl,
+            winningCoins: totalAboveZero,
+            totalCoins: totalTrading,
+            estimates: {
+                perDay: pDay,
+                perMonth: pMonth,
+                perYear: pYear
+            },
+            globalTriggersStatus: {
+                smartOffsetV1Target: {
+                    targetValue: v1Target,
+                    status: v1Status
+                },
+                stableGlobalPNLTrigger: {
+                    targetValue: stableTarget,
+                    status: stableStatus
+                },
+                autoDripHarvestTarget: {
+                    targetValue: autoDripTarget,
+                    status: dripStatus
+                }
+            }
+        });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
 app.get('/api/offsets', authMiddleware, async (req, res) => { const OffsetModel = req.isPaper ? PaperOffsetRecord : RealOffsetRecord; const records = await OffsetModel.find({ userId: req.userId }).sort({ timestamp: -1 }).limit(100); res.json(records); });
@@ -1368,6 +1486,25 @@ app.get('/', (req, res) => {
                 ih += '</table>'; document.getElementById('offsetTableContainer').innerHTML = ih;
             }
 
+            function updateProj(userId, targetV1, msPer1Pct) {
+                let inputEl = document.getElementById('proj_in_' + userId);
+                let resEl = document.getElementById('proj_res_' + userId);
+                let targetPct = parseFloat(inputEl.value) || 0;
+                
+                if (msPer1Pct <= 0 || targetPct <= 0) { resEl.innerHTML = "Value: $0.00<br>Time: N/A"; return; }
+                
+                let val = (targetPct / 100) * targetV1;
+                let timeMs = targetPct * msPer1Pct;
+                let totalMins = Math.floor(timeMs / 60000);
+                let d = Math.floor(totalMins / 1440);
+                let h = Math.floor((totalMins % 1440) / 60);
+                let m = totalMins % 60;
+                
+                let timeStr = d > 0 ? d + "d " + h + "h " : (h > 0 ? h + "h " + m + "m" : m + "m");
+                
+                resEl.innerHTML = "Value: $" + val.toFixed(2) + "<br>Time: " + timeStr;
+            }
+
             // ADMIN UI FUNCTIONS WITH EMBEDDED V1 LIVE PROGRESS BARS & MARGIN USED
             async function loadAdminData() {
                 try {
@@ -1377,9 +1514,9 @@ app.get('/', (req, res) => {
                     else { banner.style.background = '#FFEBEE'; banner.style.color = 'var(--danger)'; banner.innerHTML = '<span class="material-symbols-outlined">error</span> WARNING: Master Template missing!'; }
                     
                     const usersRes = await fetch('/api/admin/users', { headers: { 'Authorization': 'Bearer ' + token } }); const users = await usersRes.json();
-                    let html = '<table class="md-table"><tr><th>Username & Live V1 Target</th><th>Password</th><th>Mode</th><th>Global PNL / Margin</th><th>Actions</th></tr>';
+                    let html = '<table class="md-table"><tr><th>Username & Live V1 Target</th><th>Password</th><th>Mode</th><th>Global PNL / Margin</th><th>Growth Projection</th><th>Actions</th></tr>';
                     
-                    if (users.length === 0) { html += '<tr><td colspan="5" style="text-align:center;">No users found.</td></tr>'; } 
+                    if (users.length === 0) { html += '<tr><td colspan="6" style="text-align:center;">No users found.</td></tr>'; } 
                     else { 
                         users.forEach(u => { 
                             const modeText = u.isPaper ? '<span class="text-blue" style="font-weight:bold;">PAPER</span>' : '<span class="text-green" style="font-weight:bold;">REAL</span>'; 
@@ -1406,12 +1543,32 @@ app.get('/', (req, res) => {
                                 '</div>' +
                             '</div>';
 
+                            let currentPct = (u.targetV1 > 0 && u.peakAccumulation > 0) ? (u.peakAccumulation / u.targetV1) * 100 : 0;
+                            let elapsedMs = Date.now() - u.lastV1ResetTime;
+                            if (elapsedMs < 0) elapsedMs = 0;
+                            let msPer1Pct = currentPct > 0 ? elapsedMs / currentPct : 0;
+
+                            let initVal = (600 / 100) * u.targetV1;
+                            let initTimeMs = 600 * msPer1Pct;
+                            let initMins = Math.floor(initTimeMs / 60000);
+                            let initD = Math.floor(initMins / 1440);
+                            let initH = Math.floor((initMins % 1440) / 60);
+                            let initTimeStr = msPer1Pct > 0 ? (initD > 0 ? initD + "d " + initH + "h " : (initH > 0 ? initH + "h " + (initMins%60) + "m" : initMins + "m")) : "N/A";
+                            let avg1Str = msPer1Pct > 0 ? (msPer1Pct/60000).toFixed(1) + " mins" : "N/A";
+
+                            let projHtml = '<div><span style="font-size:0.8em; color:var(--text-secondary);">Avg 1%: ' + avg1Str + '</span><br>' +
+                                '<div style="display:flex; align-items:center; gap:4px; margin:4px 0;">' +
+                                    '<input type="number" id="proj_in_' + u._id + '" value="600" style="padding:4px; width:60px; font-size:0.8em;" oninput="updateProj(\\'' + u._id + '\\', ' + u.targetV1 + ', ' + msPer1Pct + ')"> <span style="font-size:0.8em;">%</span>' +
+                                '</div>' +
+                                '<div id="proj_res_' + u._id + '" style="font-size:0.85em; color:var(--primary); font-weight:bold;">Value: $' + initVal.toFixed(2) + '<br>Time: ' + initTimeStr + '</div></div>';
+
                             html += '<tr>' +
                                 '<td style="font-weight:bold;">' + u.username + pbHtml + '</td>' +
                                 '<td style="font-family:monospace;">' + u.plainPassword + '</td>' +
                                 '<td>' + modeText + '</td>' +
                                 '<td class="' + pnlColor + '" style="font-weight:bold;">$' + u.realizedPnl.toFixed(4) + '<br><span class="text-blue" style="font-size:0.85em; font-weight:normal;">Margin: $' + (u.totalMargin || 0).toFixed(2) + '</span></td>' +
-                                '<td><button class="md-btn md-btn-primary" style="padding:6px 12px; margin-right:8px;" onclick="adminImportProfiles(\\'' + u._id + '\\')"><span class="material-symbols-outlined" style="font-size:16px;">download</span> Import Profiles</button><button class="md-btn md-btn-danger" style="padding:6px 12px;" onclick="adminDeleteUser(\\'' + u._id + '\\')"><span class="material-symbols-outlined" style="font-size:16px;">delete</span></button></td>' +
+                                '<td>' + projHtml + '</td>' +
+                                '<td><button class="md-btn md-btn-primary" style="padding:6px 12px; margin-bottom:4px;" onclick="adminImportProfiles(\\'' + u._id + '\\')"><span class="material-symbols-outlined" style="font-size:16px;">download</span> Import</button><br><button class="md-btn md-btn-danger" style="padding:6px 12px;" onclick="adminDeleteUser(\\'' + u._id + '\\')"><span class="material-symbols-outlined" style="font-size:16px;">delete</span> Delete</button></td>' +
                             '</tr>'; 
                         }); 
                     }
