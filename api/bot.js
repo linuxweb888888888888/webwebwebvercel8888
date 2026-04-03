@@ -631,6 +631,8 @@ const executeGlobalProfitMonitor = async () => {
 
             for (let [profileId, botData] of activeBots.entries()) {
                 if (botData.userId !== dbUserId) continue;
+                if (botData.isPaper !== userSetting.isPaper) continue; // CRITICAL: Stop paper/live cross-contamination
+                
                 if (!firstProfileId) firstProfileId = profileId;
                 
                 for (let symbol in botData.state.coinStates) {
@@ -655,7 +657,7 @@ const executeGlobalProfitMonitor = async () => {
             let offsetExecuted = false;
 
             // ==============================================================
-            // 1. SMART OFFSET V1 (EVALUATED FIRST - HIGHEST PRIORITY)
+            // 1. SMART OFFSET V1 (EVALUATED FIRST)
             // ==============================================================
             if (smartOffsetNetProfit > 0 && activeCandidates.length >= 2) {
                 // Sort Highest Winners to Lowest Losers
@@ -670,7 +672,7 @@ const executeGlobalProfitMonitor = async () => {
 
                 for (let i = 0; i < totalPairs; i++) {
                     const w = activeCandidates[i];
-                    const l = activeCandidates[totalCoins - totalPairs + i];
+                    const l = activeCandidates[totalCoins - 1 - i]; // FIX: True opposite index mapping
                     const netResult = w.unrealizedPnl + l.unrealizedPnl;
                     
                     runningAccumulation += netResult;
@@ -686,7 +688,7 @@ const executeGlobalProfitMonitor = async () => {
                 if (peakAccumulation >= targetV1 && peakAccumulation >= peakThreshold && peakRowIndex >= 0) {
                     for(let i = 0; i <= peakRowIndex; i++) {
                         const w = activeCandidates[i];
-                        const l = activeCandidates[totalCoins - totalPairs + i]; // GET THE LOSER TOO
+                        const l = activeCandidates[totalCoins - 1 - i]; 
                         
                         if (Math.abs(w.unrealizedPnl) > winnerThreshold) finalPairsToClose.push(w); 
                         finalPairsToClose.push(l); // MUST PUSH LOSER TO OFFSET
@@ -698,7 +700,6 @@ const executeGlobalProfitMonitor = async () => {
                     for (let k = 0; k < finalPairsToClose.length; k++) {
                         const pos = finalPairsToClose[k];
                         const bState = activeBots.get(pos.profileId).state.coinStates[pos.symbol];
-                        // Verify position still exists
                         if (bState && bState.contracts > 0) {
                             actualPairsToClose.push(pos);
                         }
@@ -771,7 +772,8 @@ const executeGlobalProfitMonitor = async () => {
                         if (excess <= balanceTolerance) break;
                         let winAmount = w.unrealizedPnl;
                         let closeFraction = winAmount > excess ? (excess / winAmount) : 1;
-                        let closeQty = w.contracts * closeFraction; 
+                        // FIX: Restore integer contract logic to prevent HTX API validation failures
+                        let closeQty = Math.max(1, Math.floor(w.contracts * closeFraction));
                         if (closeQty > w.contracts) closeQty = w.contracts;
 
                         let realizedFromThis = winAmount * (closeQty / w.contracts);
@@ -825,7 +827,6 @@ const executeGlobalProfitMonitor = async () => {
                     let losers = activeCandidates.filter(c => c.unrealizedPnl < 0).sort((a, b) => a.unrealizedPnl - b.unrealizedPnl);
                     let winners = activeCandidates.filter(c => c.unrealizedPnl > 0).sort((a, b) => b.unrealizedPnl - a.unrealizedPnl);
 
-                    // Step 1: Harvest Winners to build budget
                     if (availableRealized < deficit && winners.length > 0) {
                         let shortfall = deficit - availableRealized;
                         logForProfile(firstProfileId, `⚙️ BALANCER: Deficit > Cash. Closing winners to cover shortfall ($${shortfall.toFixed(2)})...`);
@@ -834,7 +835,7 @@ const executeGlobalProfitMonitor = async () => {
                             if (shortfall <= microTolerance) break;
                             let winAmount = w.unrealizedPnl;
                             let closeFraction = winAmount > shortfall ? (shortfall / winAmount) : 1;
-                            let closeQty = w.contracts * closeFraction; 
+                            let closeQty = Math.max(1, Math.floor(w.contracts * closeFraction));
                             if (closeQty > w.contracts) closeQty = w.contracts;
 
                             let realizedFromThis = winAmount * (closeQty / w.contracts);
@@ -878,7 +879,6 @@ const executeGlobalProfitMonitor = async () => {
                         }
                     }
 
-                    // Step 2: Burn Losers using available budget
                     let budget = Math.min(deficit, availableRealized);
 
                     if (budget >= microTolerance && losers.length > 0) {
@@ -888,7 +888,7 @@ const executeGlobalProfitMonitor = async () => {
                             if (budget <= microTolerance) break;
                             let lossAmount = Math.abs(l.unrealizedPnl);
                             let closeFraction = lossAmount > budget ? (budget / lossAmount) : 1;
-                            let closeQty = l.contracts * closeFraction; 
+                            let closeQty = Math.max(1, Math.floor(l.contracts * closeFraction));
                             if (closeQty > l.contracts) closeQty = l.contracts;
 
                             let lossRealized = -(lossAmount * (closeQty / l.contracts));
@@ -2577,7 +2577,7 @@ const FRONTEND_HTML = [
     '                const totalCoins = activeCandidates.length, totalPairs = Math.floor(totalCoins / 2);',
     '                let peakAccumulation = 0;',
     '                const multiplier = globalSet.qtyMultiplier || 1, peakThreshold = 0.0001 * multiplier;',
-    '                if (totalPairs > 0) { let rAcc = 0; for (let i = 0; i < totalPairs; i++) { rAcc += activeCandidates[i].pnl + activeCandidates[totalCoins - totalPairs + i].pnl; if (rAcc > peakAccumulation) peakAccumulation = rAcc; } }',
+    '                if (totalPairs > 0) { let rAcc = 0; for (let i = 0; i < totalPairs; i++) { rAcc += activeCandidates[i].pnl + activeCandidates[totalCoins - 1 - i].pnl; if (rAcc > peakAccumulation) peakAccumulation = rAcc; } }',
     '',
     '                if(document.getElementById("display_highestPnlNode")) {',
     '                    if (activeCandidates.length > 0) {',
@@ -2597,11 +2597,11 @@ const FRONTEND_HTML = [
     '                    else {',
     '                        let liveHtml = \'<table><tr><th>Pair</th><th>Win Node</th><th>Delta</th><th>Lose Node</th><th>Delta</th><th>Pair Net</th><th>Accum</th></tr>\';',
     '                        let rAcc = 0, pIdx = -1, tPeak = 0;',
-    '                        for (let i = 0; i < totalPairs; i++) { rAcc += activeCandidates[i].pnl + activeCandidates[totalCoins - totalPairs + i].pnl; if (rAcc > tPeak) { tPeak = rAcc; pIdx = i; } }',
+    '                        for (let i = 0; i < totalPairs; i++) { rAcc += activeCandidates[i].pnl + activeCandidates[totalCoins - 1 - i].pnl; if (rAcc > tPeak) { tPeak = rAcc; pIdx = i; } }',
     '                        let exec = (targetV1 > 0 && tPeak >= targetV1 && tPeak >= peakThreshold && pIdx >= 0);',
     '                        let dAcc = 0;',
     '                        for (let i = 0; i < totalPairs; i++) {',
-    '                            const w = activeCandidates[i], l = activeCandidates[totalCoins - totalPairs + i], net = w.pnl + l.pnl; dAcc += net;',
+    '                            const w = activeCandidates[i], l = activeCandidates[totalCoins - 1 - i], net = w.pnl + l.pnl; dAcc += net;',
     '                            let stat = exec ? (i <= pIdx ? "Harvest" : "Skip") : ((i <= pIdx && tPeak >= peakThreshold) ? "Peak" : "Base");',
     '                            liveHtml += \'<tr><td class="text-muted">[\' + (i+1) + \'] \' + stat + \'</td><td>\' + w.symbol + \'</td><td class="\' + (w.pnl>=0?"text-green":"text-red") + \'">\' + fmtC(w.pnl) + \'</td><td>\' + l.symbol + \'</td><td class="\' + (l.pnl>=0?"text-green":"text-red") + \'">\' + fmtC(l.pnl) + \'</td><td class="\' + (net>=0?"text-green":"text-red") + \'">\' + fmtC(net) + \'</td><td class="\' + (dAcc>=0?"text-green":"text-red") + \'">\' + fmtC(dAcc) + \'</td></tr>\';',
     '                        }',
