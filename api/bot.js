@@ -474,40 +474,51 @@ app.post('/api/register', async (req, res) => {
         templateSettings.smartOffsetNetProfit = (templateSettings.smartOffsetNetProfit || 100) * multiValue;
         templateSettings.stableGlobalPnlTarget = (templateSettings.stableGlobalPnlTarget || -0.075) * multiValue;
 
-        if (!templateSettings.subAccounts || templateSettings.subAccounts.length === 0) {
-            templateSettings.subAccounts = [];
-            const PREDEFINED_COINS = ["OP", "BIGTIME", "MOVE", "SSV", "COAI", "TIA", "MERL", "MASK", "PYTH", "ETHFI", "CFX", "MEME", "LUNA", "STEEM", "BERA", "2Z", "FIL", "APT", "1INCH", "ARB", "XPL", "ENA", "MMT", "AXS", "TON", "CAKE", "BSV", "JUP", "WIF", "LIGHT", "PI", "SUSHI", "LPT", "CRV", "TAO", "ORDI", "YFI", "LA", "ICP", "FTT", "GIGGLE", "LDO", "OPN", "INJ", "SNX", "DASH", "WLD", "KAITO", "TRUMP", "WAVES", "ZEN", "ENS", "ASTER", "VIRTUAL"];
-            
-            for (let i = 1; i <= 6; i++) {
-                let profileName = 'Profile ' + i; let coins = [];
-                PREDEFINED_COINS.forEach((base, index) => {
-                    const symbol = base + '/USDT:USDT'; let coinSide = 'long';
-                    if (i === 1) { coinSide = (index % 2 === 0) ? 'long' : 'short'; profileName = "P1: Even L / Odd S"; }
-                    else if (i === 2) { coinSide = (index % 2 === 0) ? 'short' : 'long'; profileName = "P2: Even S / Odd L"; }
-                    else if (i === 3) { coinSide = 'long'; profileName = "P3: All Long"; }
-                    else if (i === 4) { coinSide = 'short'; profileName = "P4: All Short"; }
-                    else if (i === 5) { coinSide = (index < PREDEFINED_COINS.length / 2) ? 'long' : 'short'; profileName = "P5: Half L / Half S"; }
-                    else if (i === 6) { coinSide = (index < PREDEFINED_COINS.length / 2) ? 'short' : 'long'; profileName = "P6: Half S / Half L"; }
-                    coins.push({ symbol, side: coinSide, botActive: true }); 
-                });
+        // FORCE INJECT THE 54 COINS INTO 6 PROFILES FOR EVERY NEW USER
+        const PREDEFINED_COINS = ["OP", "BIGTIME", "MOVE", "SSV", "COAI", "TIA", "MERL", "MASK", "PYTH", "ETHFI", "CFX", "MEME", "LUNA", "STEEM", "BERA", "2Z", "FIL", "APT", "1INCH", "ARB", "XPL", "ENA", "MMT", "AXS", "TON", "CAKE", "BSV", "JUP", "WIF", "LIGHT", "PI", "SUSHI", "LPT", "CRV", "TAO", "ORDI", "YFI", "LA", "ICP", "FTT", "GIGGLE", "LDO", "OPN", "INJ", "SNX", "DASH", "WLD", "KAITO", "TRUMP", "WAVES", "ZEN", "ENS", "ASTER", "VIRTUAL"];
+        let generatedSubAccounts = [];
 
-                templateSettings.subAccounts.push({
-                    name: profileName, apiKey: isPaper ? 'paper_key_' + i + '_' + Date.now() : '', secret: isPaper ? 'paper_secret_' + i + '_' + Date.now() : '', side: 'long', leverage: 10,
-                    baseQty: 1 * multiValue, takeProfitPct: 5.0, stopLossPct: -25.0, triggerRoiPct: -15.0, dcaTargetRoiPct: -2.0, maxContracts: 1000, realizedPnl: 0, coins: coins
-                });
-            }
-        } else {
-            templateSettings.subAccounts = templateSettings.subAccounts.map((sub, i) => {
-                delete sub._id; sub.realizedPnl = 0; sub.baseQty = (sub.baseQty || 1) * multiValue;
-                if (isPaper) { sub.apiKey = 'paper_key_' + i + '_' + Date.now(); sub.secret = 'paper_secret_' + i + '_' + Date.now(); }
-                if (sub.coins) { sub.coins = sub.coins.map(c => { delete c._id; c.botActive = c.botActive !== undefined ? c.botActive : true; return c; }); }
-                return sub;
+        for (let i = 1; i <= 6; i++) {
+            let masterSub = (templateSettings.subAccounts && templateSettings.subAccounts[i - 1]) ? templateSettings.subAccounts[i - 1] : {};
+            let profileName = 'Profile ' + i; 
+            let coins = [];
+
+            PREDEFINED_COINS.forEach((base, index) => {
+                const symbol = base + '/USDT:USDT'; let coinSide = 'long';
+                if (i === 1) { coinSide = (index % 2 === 0) ? 'long' : 'short'; profileName = "P1: Even L / Odd S"; }
+                else if (i === 2) { coinSide = (index % 2 === 0) ? 'short' : 'long'; profileName = "P2: Even S / Odd L"; }
+                else if (i === 3) { coinSide = 'long'; profileName = "P3: All Long"; }
+                else if (i === 4) { coinSide = 'short'; profileName = "P4: All Short"; }
+                else if (i === 5) { coinSide = (index < PREDEFINED_COINS.length / 2) ? 'long' : 'short'; profileName = "P5: Half L / Half S"; }
+                else if (i === 6) { coinSide = (index < PREDEFINED_COINS.length / 2) ? 'short' : 'long'; profileName = "P6: Half S / Half L"; }
+                
+                // Bot active TRUE ensures they start immediately
+                coins.push({ symbol, side: coinSide, botActive: true }); 
+            });
+
+            generatedSubAccounts.push({
+                name: profileName, 
+                apiKey: isPaper ? 'paper_key_' + i + '_' + Date.now() : (masterSub.apiKey || ''), 
+                secret: isPaper ? 'paper_secret_' + i + '_' + Date.now() : (masterSub.secret || ''), 
+                side: masterSub.side || 'long', 
+                leverage: masterSub.leverage || 10, 
+                baseQty: (masterSub.baseQty !== undefined ? masterSub.baseQty : 1) * multiValue, 
+                takeProfitPct: masterSub.takeProfitPct !== undefined ? masterSub.takeProfitPct : 5.0, 
+                stopLossPct: masterSub.stopLossPct !== undefined ? masterSub.stopLossPct : -25.0, 
+                triggerRoiPct: masterSub.triggerRoiPct !== undefined ? masterSub.triggerRoiPct : -15.0, 
+                dcaTargetRoiPct: masterSub.dcaTargetRoiPct !== undefined ? masterSub.dcaTargetRoiPct : -2.0, 
+                maxContracts: masterSub.maxContracts !== undefined ? masterSub.maxContracts : 1000, 
+                realizedPnl: 0, 
+                coins: coins
             });
         }
+
+        templateSettings.subAccounts = generatedSubAccounts;
+
         const SettingsModel = isPaper ? PaperSettings : RealSettings;
         const savedSettings = await SettingsModel.create(templateSettings);
         if (savedSettings.subAccounts) { savedSettings.subAccounts.forEach(sub => startBot(user._id.toString(), sub, isPaper).catch(()=>{})); }
-        return res.json({ success: true, message: `Registration successful! Pre-configured ${isPaper ? 'Paper' : 'Real'} Profiles cloned.` });
+        return res.json({ success: true, message: `Registration successful! Pre-configured ${isPaper ? 'Paper' : 'Real'} Profiles strictly mapped with all 54 active coins.` });
     } catch (err) { res.status(400).json({ error: 'Username already exists or system error.' }); }
 });
 
