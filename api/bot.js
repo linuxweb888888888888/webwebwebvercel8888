@@ -79,30 +79,11 @@ const SubAccountSchema = new mongoose.Schema({
 
 const SettingsSchema = new mongoose.Schema({
     userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, unique: true },
-    globalTargetPnl: { type: Number, default: 0 },       
-    globalTrailingPnl: { type: Number, default: 0 },     
     smartOffsetNetProfit: { type: Number, default: 0 },
     smartOffsetBottomRowV1: { type: Number, default: 5 }, 
     smartOffsetBottomRowV1StopLoss: { type: Number, default: 0 }, 
-    smartOffsetStopLoss: { type: Number, default: 0 }, 
-    smartOffsetNetProfit2: { type: Number, default: 0 }, 
-    smartOffsetStopLoss2: { type: Number, default: 0 }, 
-    smartOffsetMaxLossPerMinute: { type: Number, default: 0 }, 
-    smartOffsetMaxLossTimeframeSeconds: { type: Number, default: 60 },
-    minuteCloseAutoDynamic: { type: Boolean, default: false },
-    minuteCloseTpMinPnl: { type: Number, default: 0 }, 
-    minuteCloseTpMaxPnl: { type: Number, default: 0 },
-    minuteCloseSlMinPnl: { type: Number, default: 0 }, 
-    minuteCloseSlMaxPnl: { type: Number, default: 0 },
-    noPeakSlTimeframeSeconds: { type: Number, default: 1800 }, // <--- CHANGED TO SECONDS (1800s = 30m)
-    noPeakSlGatePnl: { type: Number, default: 0 }, 
-    subAccounts: [SubAccountSchema],
-    
-    currentGlobalPeak: { type: Number, default: 0 },
-    lastStopLossTime: { type: Number, default: 0 },
-    lastNoPeakSlTime: { type: Number, default: 0 },
-    rollingStopLosses: { type: Array, default: [] },
-    autoDynamicLastExecution: { type: Object, default: null }
+    stableGlobalPnlTarget: { type: Number, default: 0 }, 
+    subAccounts: [SubAccountSchema]
 });
 
 // UNIVERSAL HISTORY SCHEMA
@@ -313,7 +294,6 @@ async function startBot(userId, subAccount, isPaper) {
                             cState.margin = (cState.avgEntry * cState.contracts * contractSize) / activeLeverage;
                         }
 
-                        // PRECISE EXCHANGE LOG: Opening Position
                         const OffsetModel = isPaper ? PaperOffsetRecord : RealOffsetRecord;
                         OffsetModel.create({
                             userId: userId,
@@ -344,7 +324,6 @@ async function startBot(userId, subAccount, isPaper) {
                         cState.lockUntil = Date.now() + 5000;
                         currentSettings.realizedPnl = (currentSettings.realizedPnl || 0) + cState.unrealizedPnl;
                         
-                        // PRECISE EXCHANGE LOG: Close Position
                         const OffsetModel = isPaper ? PaperOffsetRecord : RealOffsetRecord;
                         OffsetModel.create({
                             userId: userId,
@@ -383,7 +362,6 @@ async function startBot(userId, subAccount, isPaper) {
                                 cState.avgEntry = totalValue / cState.contracts;
                             }
 
-                            // PRECISE EXCHANGE LOG: DCA Addition
                             const OffsetModel = isPaper ? PaperOffsetRecord : RealOffsetRecord;
                             OffsetModel.create({
                                 userId: userId,
@@ -433,133 +411,6 @@ function stopBot(profileId) {
 // =========================================================================
 // 4. BACKGROUND TASKS (DUAL-MODE)
 // =========================================================================
-const executeOneMinuteCloser = async () => {
-    try {
-        await connectDB();
-        const paperUsers = await PaperSettings.find({}).lean();
-        const realUsers = await RealSettings.find({}).lean();
-        
-        const allUsersSettings = [
-            ...paperUsers.map(s => ({ ...s, isPaper: true })),
-            ...realUsers.map(s => ({ ...s, isPaper: false }))
-        ];
-
-        for (let userSetting of allUsersSettings) {
-            const dbUserId = String(userSetting.userId);
-            const SettingsModel = userSetting.isPaper ? PaperSettings : RealSettings;
-            
-            let rawTpMin = Math.abs(parseFloat(userSetting.minuteCloseTpMinPnl) || 0);
-            let rawTpMax = Math.abs(parseFloat(userSetting.minuteCloseTpMaxPnl) || 0);
-            let rawSlMin = -Math.abs(parseFloat(userSetting.minuteCloseSlMinPnl) || 0);
-            let rawSlMax = -Math.abs(parseFloat(userSetting.minuteCloseSlMaxPnl) || 0);
-            const autoDynamic = userSetting.minuteCloseAutoDynamic || false;
-            
-            let activeCandidates = [];
-            for (let [profileId, botData] of activeBots.entries()) {
-                if (botData.userId !== dbUserId) continue;
-                for (let symbol in botData.state.coinStates) {
-                    const cState = botData.state.coinStates[symbol];
-                    if (cState.contracts > 0 && (!cState.lockUntil || Date.now() >= cState.lockUntil)) {
-                        activeCandidates.push({
-                            profileId, symbol, exchange: botData.exchange, isPaper: botData.isPaper,
-                            pnl: parseFloat(cState.unrealizedPnl) || 0,
-                            contracts: cState.contracts,
-                            side: cState.activeSide || botData.settings.coins.find(c => c.symbol === symbol)?.side || botData.settings.side,
-                            subAccount: botData.settings,
-                            cState: cState
-                        });
-                    }
-                }
-            }
-
-            activeCandidates.sort((a, b) => b.pnl - a.pnl);
-            const totalCoins = activeCandidates.length;
-            const totalPairs = Math.floor(totalCoins / 2);
-
-            if (totalPairs === 0) continue;
-
-            if (autoDynamic) {
-                let runningAccumulation = 0;
-                let peakAccumulation = 0;
-
-                for (let i = 0; i < totalPairs; i++) {
-                    const netResult = activeCandidates[i].pnl + activeCandidates[totalCoins - totalPairs + i].pnl;
-                    runningAccumulation += netResult;
-                    if (runningAccumulation > peakAccumulation) { peakAccumulation = runningAccumulation; }
-                }
-
-                if (peakAccumulation > 0) { 
-                    rawTpMin = peakAccumulation * 0.8; rawTpMax = peakAccumulation * 1.2;
-                    rawSlMin = -(peakAccumulation * 5.0); rawSlMax = -(peakAccumulation * 0.5); 
-                } else {
-                    rawTpMin = 0; rawTpMax = 0; rawSlMin = 0; rawSlMax = 0;
-                }
-
-                if (Math.abs(rawTpMax - rawTpMin) <= 0.000101) {
-                    rawTpMin = 0; rawTpMax = 0; rawSlMin = 0; rawSlMax = 0;
-                }
-            }
-
-            const tpMin = Math.min(rawTpMin, rawTpMax); const tpMax = Math.max(rawTpMin, rawTpMax);
-            const slMin = Math.min(rawSlMin, rawSlMax); const slMax = Math.max(rawSlMax, rawSlMin); 
-
-            if (tpMax === 0 && slMax === 0) continue; 
-
-            let runningAccumulation = 0;
-            let executedGroup = false;
-
-            for (let i = 0; i < totalPairs; i++) {
-                const w = activeCandidates[i];
-                const l = activeCandidates[totalCoins - totalPairs + i];
-                runningAccumulation += (w.pnl + l.pnl);
-
-                const isPositiveMatch = (tpMax > 0 && runningAccumulation > 0 && runningAccumulation >= tpMin && runningAccumulation <= tpMax);
-                const isNegativeMatch = (slMin < 0 && runningAccumulation < 0 && runningAccumulation >= slMin && runningAccumulation <= slMax);
-
-                if (!executedGroup && (isPositiveMatch || isNegativeMatch)) {
-                    const executionType = isPositiveMatch ? "Group Take Profit" : "Group Stop Loss";
-                    
-                    const autoDynData = { time: Date.now(), type: executionType, symbol: `Group up to Row ${i + 1} (WINNERS ONLY)`, pnl: runningAccumulation };
-                    await SettingsModel.updateOne({ userId: dbUserId }, { $set: { autoDynamicLastExecution: autoDynData } }).catch(console.error);
-
-                    const OffsetModel = userSetting.isPaper ? PaperOffsetRecord : RealOffsetRecord;
-                    OffsetModel.create({
-                        userId: dbUserId,
-                        symbol: `Group of ${i + 1} Coins`,
-                        winnerSymbol: `Group of ${i + 1} Coins`,
-                        reason: `1-Min Closer Executed (${executionType})`,
-                        netProfit: runningAccumulation
-                    }).catch(()=>{});
-
-                    logForProfile(activeCandidates[0].profileId, `⏳ 1-Min Group Closer: Group Accumulation $${runningAccumulation.toFixed(4)} matches boundary. Closing ${i + 1} WINNERS ONLY. [${userSetting.isPaper ? 'PAPER' : 'REAL'}]`);
-
-                    for (let k = 0; k <= i; k++) {
-                        const cw = activeCandidates[k];
-                        try {
-                            if (!cw.isPaper) {
-                                const closeSide = cw.side === 'long' ? 'sell' : 'buy';
-                                await cw.exchange.createOrder(cw.symbol, 'market', closeSide, cw.contracts, undefined, { offset: 'close' });
-                            } else {
-                                cw.cState.contracts = 0; cw.cState.unrealizedPnl = 0; cw.cState.currentRoi = 0; cw.cState.avgEntry = 0;
-                            }
-                            
-                            cw.cState.lockUntil = Date.now() + 5000;
-                            cw.subAccount.realizedPnl = (cw.subAccount.realizedPnl || 0) + cw.pnl;
-                            SettingsModel.updateOne({ "subAccounts._id": cw.subAccount._id }, { $set: { "subAccounts.$.realizedPnl": cw.subAccount.realizedPnl } }).catch(()=>{});
-                        } catch (e) {
-                            console.error(`Group Close Error [${cw.symbol}]:`, e.message);
-                        }
-                    }
-
-                    executedGroup = true;
-                    break; 
-                }
-            }
-        }
-    } catch (err) {
-        console.error("1-Min Group Closer Error:", err);
-    }
-};
 
 const executeGlobalProfitMonitor = async () => {
     if (global.isGlobalMonitoring) return;
@@ -582,37 +433,14 @@ const executeGlobalProfitMonitor = async () => {
 
             let dbUpdates = {}; 
             
-            const globalTargetPnl = parseFloat(userSetting.globalTargetPnl) || 0;
-            const globalTrailingPnl = parseFloat(userSetting.globalTrailingPnl) || 0;
             const smartOffsetNetProfit = parseFloat(userSetting.smartOffsetNetProfit) || 0;
             const smartOffsetBottomRowV1 = parseInt(userSetting.smartOffsetBottomRowV1) !== undefined && !isNaN(parseInt(userSetting.smartOffsetBottomRowV1)) ? parseInt(userSetting.smartOffsetBottomRowV1) : 5;
             const smartOffsetBottomRowV1StopLoss = parseFloat(userSetting.smartOffsetBottomRowV1StopLoss) || 0; 
-            const smartOffsetStopLoss = parseFloat(userSetting.smartOffsetStopLoss) || 0; 
-            const smartOffsetNetProfit2 = parseFloat(userSetting.smartOffsetNetProfit2) || 0;
-            const smartOffsetStopLoss2 = parseFloat(userSetting.smartOffsetStopLoss2) || 0; 
-            
-            const smartOffsetMaxLossPerMinute = parseFloat(userSetting.smartOffsetMaxLossPerMinute) || 0;
-            const smartOffsetMaxLossTimeframeSeconds = parseInt(userSetting.smartOffsetMaxLossTimeframeSeconds) !== undefined && !isNaN(parseInt(userSetting.smartOffsetMaxLossTimeframeSeconds)) ? parseInt(userSetting.smartOffsetMaxLossTimeframeSeconds) : 60;
-            const timeframeMs = smartOffsetMaxLossTimeframeSeconds * 1000;
-
-            const noPeakSlTimeframeSeconds = parseInt(userSetting.noPeakSlTimeframeSeconds) !== undefined && !isNaN(parseInt(userSetting.noPeakSlTimeframeSeconds)) ? parseInt(userSetting.noPeakSlTimeframeSeconds) : 1800;
-            const noPeakMs = noPeakSlTimeframeSeconds * 1000; // <--- CONVERT TO MILLISECONDS
-            const noPeakSlGatePnl = parseFloat(userSetting.noPeakSlGatePnl) || 0; 
-
-            let currentGlobalPeak = userSetting.currentGlobalPeak || 0;
-            let lastStopLossTime = userSetting.lastStopLossTime || 0;
-            let lastNoPeakSlTime = userSetting.lastNoPeakSlTime || 0;
+            const stableGlobalPnlTarget = parseFloat(userSetting.stableGlobalPnlTarget) || 0;
             
             let globalUnrealized = 0;
             let activeCandidates = [];
             let firstProfileId = null; 
-
-            let rollingLossArr = userSetting.rollingStopLosses || [];
-            const originalLen = rollingLossArr.length;
-            rollingLossArr = rollingLossArr.filter(record => Date.now() - record.time < timeframeMs);
-            if (rollingLossArr.length !== originalLen) dbUpdates.rollingStopLosses = rollingLossArr;
-            
-            let currentMinuteLoss = rollingLossArr.reduce((sum, record) => sum + record.amount, 0);
 
             for (let [profileId, botData] of activeBots.entries()) {
                 if (botData.userId !== dbUserId) continue;
@@ -637,14 +465,63 @@ const executeGlobalProfitMonitor = async () => {
             if (!firstProfileId || activeCandidates.length === 0) continue;
 
             const targetV1 = smartOffsetNetProfit > 0 ? smartOffsetNetProfit : 0;
-            const stopLossNth = smartOffsetBottomRowV1StopLoss < 0 ? smartOffsetBottomRowV1StopLoss : 0; 
-            const targetV2 = smartOffsetNetProfit2 > 0 ? smartOffsetNetProfit2 : 0;
-
             let offsetExecuted = false;
-            let v2SlEnabled = true;
+
+            // STABLE GLOBAL PNL LOGIC
+            if (stableGlobalPnlTarget !== 0 && globalUnrealized <= stableGlobalPnlTarget && activeCandidates.length >= 2) {
+                activeCandidates.sort((a, b) => a.unrealizedPnl - b.unrealizedPnl); 
+                const worstLoser = activeCandidates[0];
+                const bestWinner = activeCandidates[activeCandidates.length - 1];
+
+                let finalPairsToClose = [];
+                let finalNetProfit = 0;
+
+                if (worstLoser && worstLoser.unrealizedPnl < 0) {
+                    finalPairsToClose.push(worstLoser);
+                    finalNetProfit += worstLoser.unrealizedPnl;
+                }
+                if (bestWinner && bestWinner.unrealizedPnl > 0 && bestWinner.symbol !== worstLoser.symbol) {
+                    finalPairsToClose.push(bestWinner);
+                    finalNetProfit += bestWinner.unrealizedPnl;
+                }
+
+                if (finalPairsToClose.length > 0) {
+                    logForProfile(firstProfileId, `⚖️ STABLE GLOBAL PNL HIT (${stableGlobalPnlTarget}). Net is ${globalUnrealized.toFixed(2)}. Closing extremes to stabilize. Net Profit of closure: $${finalNetProfit.toFixed(4)}`);
+                    
+                    for (let k = 0; k < finalPairsToClose.length; k++) {
+                        const pos = finalPairsToClose[k];
+                        const bData = activeBots.get(pos.profileId);
+                        try {
+                            if (bData) {
+                                if (!pos.isPaper) {
+                                    const closeSide = pos.side === 'long' ? 'sell' : 'buy';
+                                    await bData.exchange.createOrder(pos.symbol, 'market', closeSide, pos.contracts, undefined, { offset: 'close' });
+                                } else {
+                                    const bState = bData.state.coinStates[pos.symbol];
+                                    if (bState) { bState.contracts = 0; bState.unrealizedPnl = 0; }
+                                }
+                                const bState = bData.state.coinStates[pos.symbol];
+                                if (bState) bState.lockUntil = Date.now() + 5000;
+                            }
+                            pos.subAccount.realizedPnl = (pos.subAccount.realizedPnl || 0) + pos.unrealizedPnl;
+                            await SettingsModel.updateOne({ "subAccounts._id": pos.subAccount._id }, { $set: { "subAccounts.$.realizedPnl": pos.subAccount.realizedPnl } }).catch(()=>{});
+                        } catch(e) { console.error(`Stabilization Close Error [${pos.symbol}]:`, e.message); }
+                    }
+
+                    OffsetModel.create({
+                        userId: dbUserId,
+                        symbol: 'Stable Global Stabilization',
+                        winnerSymbol: finalPairsToClose.map(c=>c.symbol).join(', '),
+                        reason: `Stable Global PNL (${stableGlobalPnlTarget}) reached`,
+                        netProfit: finalNetProfit
+                    }).catch(()=>{});
+
+                    offsetExecuted = true;
+                }
+            }
 
             // SMART OFFSET V1
-            if ((smartOffsetNetProfit > 0 || smartOffsetBottomRowV1StopLoss < 0 || smartOffsetStopLoss < 0 || noPeakSlTimeframeSeconds > 0) && activeCandidates.length >= 2) {
+            if (!offsetExecuted && (smartOffsetNetProfit > 0 || smartOffsetBottomRowV1StopLoss < 0) && activeCandidates.length >= 2) {
                 activeCandidates.sort((a, b) => b.unrealizedPnl - a.unrealizedPnl); 
                 
                 const totalCoins = activeCandidates.length;
@@ -653,9 +530,6 @@ const executeGlobalProfitMonitor = async () => {
                 let runningAccumulation = 0;
                 let peakAccumulation = 0;
                 let peakRowIndex = -1;
-                let nthBottomAccumulation = 0;
-
-                const targetRefIndex = Math.max(0, totalPairs - smartOffsetBottomRowV1);
 
                 for (let i = 0; i < totalPairs; i++) {
                     const w = activeCandidates[i];
@@ -668,21 +542,13 @@ const executeGlobalProfitMonitor = async () => {
                         peakAccumulation = runningAccumulation;
                         peakRowIndex = i;
                     }
-                    if (i === targetRefIndex) nthBottomAccumulation = runningAccumulation;
-                }
-
-                if (stopLossNth < 0) {
-                    v2SlEnabled = (nthBottomAccumulation <= stopLossNth);
                 }
 
                 let triggerOffset = false;
                 let reason = '';
                 let finalPairsToClose = [];
                 let finalNetProfit = 0;
-                let isNoPeakSl = false;
                 
-                const isFullGroupSl = (smartOffsetStopLoss < 0 && runningAccumulation <= smartOffsetStopLoss);
-
                 if (smartOffsetNetProfit > 0 && peakAccumulation >= targetV1 && peakAccumulation >= 0.0001 && peakRowIndex >= 0) {
                     triggerOffset = true;
                     reason = `V1 Offset Executed: Harvested Peak at Row ${peakRowIndex + 1} (Target $${targetV1.toFixed(4)})`;
@@ -693,85 +559,25 @@ const executeGlobalProfitMonitor = async () => {
                     }
                     if (finalPairsToClose.length === 0) triggerOffset = false; 
                 } 
-                else if (isFullGroupSl) {
-                    let allowSl = false;
-                    let limitVal = smartOffsetStopLoss;
-                    let projectedLoss = runningAccumulation; 
-
-                    if (smartOffsetMaxLossPerMinute > 0) {
-                        if (currentMinuteLoss + Math.abs(projectedLoss) <= smartOffsetMaxLossPerMinute) allowSl = true;
-                    } else {
-                        if (Date.now() - lastStopLossTime >= timeframeMs) allowSl = true;
-                    }
-
-                    if (allowSl) {
-                        triggerOffset = true;
-                        reason = `V1 Stop Loss Hit (Full Group limit: $${limitVal.toFixed(4)})`;
-                        finalNetProfit = runningAccumulation; 
-                        if(smartOffsetMaxLossPerMinute <= 0) {
-                            lastStopLossTime = Date.now();
-                            dbUpdates.lastStopLossTime = lastStopLossTime;
-                        }
-                        for(let i = 0; i < totalPairs; i++) finalPairsToClose.push(activeCandidates[i]);
-                    }
-                }
-                else if (peakRowIndex === -1 || peakAccumulation < 0.0001) {
-                    let allowNoPeakSl = false;
-                    if (Date.now() - lastNoPeakSlTime >= noPeakMs) allowNoPeakSl = true; 
-
-                    // NO PEAK GATE: Top winner must be <= gate value
-                    if (activeCandidates[0].unrealizedPnl > noPeakSlGatePnl) {
-                        allowNoPeakSl = false;
-                    }
-
-                    if (allowNoPeakSl) {
-                        triggerOffset = true;
-                        isNoPeakSl = true;
-                        reason = `No Peak Gate Executed (Cut Lowest PNL after ${noPeakSlTimeframeSeconds}s)`;
-                        const absoluteWorstCoin = activeCandidates[activeCandidates.length - 1];
-                        finalNetProfit = absoluteWorstCoin.unrealizedPnl;
-                        finalPairsToClose.push(absoluteWorstCoin);
-                        lastNoPeakSlTime = Date.now();
-                        dbUpdates.lastNoPeakSlTime = lastNoPeakSlTime;
-                    }
-                }
 
                 if (triggerOffset) {
-                    if (!isFullGroupSl && !isNoPeakSl) {
-                        let actualPairsToClose = [];
-                        let liveCheckNet = 0;
-                        for (let k = 0; k < finalPairsToClose.length; k++) {
-                            const pos = finalPairsToClose[k];
-                            const bState = activeBots.get(pos.profileId).state.coinStates[pos.symbol];
-                            const livePnl = bState ? (parseFloat(bState.unrealizedPnl) || 0) : pos.unrealizedPnl;
-                            if (livePnl < pos.unrealizedPnl - 0.005) continue; 
-                            actualPairsToClose.push(pos);
-                            liveCheckNet += livePnl;
-                        }
-                        finalPairsToClose = actualPairsToClose;
-                        finalNetProfit = liveCheckNet;
-                        if (finalPairsToClose.length === 0) triggerOffset = false;
-                    } else if (isNoPeakSl) {
-                        let actualPairsToClose = [];
-                        let liveCheckNet = 0;
-                        for (let k = 0; k < finalPairsToClose.length; k++) {
-                            const pos = finalPairsToClose[k];
-                            const bState = activeBots.get(pos.profileId).state.coinStates[pos.symbol];
-                            const livePnl = bState ? (parseFloat(bState.unrealizedPnl) || 0) : pos.unrealizedPnl;
-                            actualPairsToClose.push(pos);
-                            liveCheckNet += livePnl;
-                        }
-                        finalPairsToClose = actualPairsToClose;
-                        finalNetProfit = liveCheckNet;
-                        if (finalPairsToClose.length === 0) triggerOffset = false;
+                    let actualPairsToClose = [];
+                    let liveCheckNet = 0;
+                    for (let k = 0; k < finalPairsToClose.length; k++) {
+                        const pos = finalPairsToClose[k];
+                        const bState = activeBots.get(pos.profileId).state.coinStates[pos.symbol];
+                        const livePnl = bState ? (parseFloat(bState.unrealizedPnl) || 0) : pos.unrealizedPnl;
+                        if (livePnl < pos.unrealizedPnl - 0.005) continue; 
+                        actualPairsToClose.push(pos);
+                        liveCheckNet += livePnl;
                     }
+                    finalPairsToClose = actualPairsToClose;
+                    finalNetProfit = liveCheckNet;
+                    if (finalPairsToClose.length === 0) triggerOffset = false;
 
                     if (triggerOffset) {
-                        const coinTypeLog = isNoPeakSl ? "LOWEST PNL" : "WINNER";
-                        logForProfile(firstProfileId, `⚖️ SMART OFFSET V1 [${reason}]: Closing ${finalPairsToClose.length} ${coinTypeLog} coin(s). NET PROFIT OF CLOSURE: ${finalNetProfit >= 0 ? '+' : ''}$${finalNetProfit.toFixed(4)} [${userSetting.isPaper ? 'PAPER' : 'REAL'}]`);
+                        logForProfile(firstProfileId, `⚖️ SMART OFFSET V1 [${reason}]: Closing ${finalPairsToClose.length} WINNER coin(s). NET PROFIT OF CLOSURE: ${finalNetProfit >= 0 ? '+' : ''}$${finalNetProfit.toFixed(4)} [${userSetting.isPaper ? 'PAPER' : 'REAL'}]`);
                         
-                        let totalWinnerPnl = 0;
-
                         for (let k = 0; k < finalPairsToClose.length; k++) {
                             const pos = finalPairsToClose[k];
                             const bData = activeBots.get(pos.profileId);
@@ -788,7 +594,6 @@ const executeGlobalProfitMonitor = async () => {
                                     const bState = bData.state.coinStates[pos.symbol];
                                     if (bState) bState.lockUntil = Date.now() + 5000;
                                 }
-                                if (pos.unrealizedPnl >= 0) totalWinnerPnl += pos.unrealizedPnl;
                                 pos.subAccount.realizedPnl = (pos.subAccount.realizedPnl || 0) + pos.unrealizedPnl;
                                 await SettingsModel.updateOne({ "subAccounts._id": pos.subAccount._id }, { $set: { "subAccounts.$.realizedPnl": pos.subAccount.realizedPnl } }).catch(()=>{});
                             } catch (e) {
@@ -796,7 +601,7 @@ const executeGlobalProfitMonitor = async () => {
                             }
                         }
 
-                        const recordSym = isNoPeakSl ? finalPairsToClose[0].symbol : `Peak of ${finalPairsToClose.length} Winners`;
+                        const recordSym = `Peak of ${finalPairsToClose.length} Winners`;
                         OffsetModel.create({
                             userId: dbUserId, 
                             symbol: recordSym, 
@@ -804,171 +609,10 @@ const executeGlobalProfitMonitor = async () => {
                             reason: reason,
                             netProfit: finalNetProfit
                         }).catch(()=>{});
-
-                        offsetExecuted = true;
-                        if (finalNetProfit < 0 && smartOffsetMaxLossPerMinute > 0) {
-                            currentMinuteLoss += Math.abs(finalNetProfit);
-                            rollingLossArr.push({ time: Date.now(), amount: Math.abs(finalNetProfit) });
-                            dbUpdates.rollingStopLosses = rollingLossArr;
-                        }
                     }
                 }
             }
 
-            // SMART OFFSET V2
-            if (!offsetExecuted && (smartOffsetNetProfit2 > 0 || smartOffsetStopLoss2 < 0) && activeCandidates.length >= 2) {
-                let offsetExecuted2 = false;
-                const totalCoins = activeCandidates.length;
-                const totalPairs = Math.floor(totalCoins / 2);
-
-                for (let i = 0; i < totalPairs; i++) {
-                    const winnerIndex = i; 
-                    const loserIndex = totalCoins - 1 - i; 
-
-                    const biggestWinner = activeCandidates[winnerIndex];
-                    const biggestLoser = activeCandidates[loserIndex];
-                    let netResult = biggestWinner.unrealizedPnl + biggestLoser.unrealizedPnl;
-                    
-                    let triggerOffset = false;
-                    let reason = '';
-
-                    if (smartOffsetNetProfit2 > 0 && netResult >= targetV2) {
-                        triggerOffset = true; reason = `V2 Offset Take Profit Executed (Target: $${targetV2.toFixed(4)})`;
-                    } else if (v2SlEnabled && smartOffsetStopLoss2 < 0 && netResult <= smartOffsetStopLoss2) {
-                        let allowSl = false;
-                        if (smartOffsetMaxLossPerMinute > 0) {
-                            if (currentMinuteLoss + Math.abs(netResult) <= smartOffsetMaxLossPerMinute) allowSl = true;
-                        } else {
-                            if (Date.now() - lastStopLossTime >= timeframeMs) allowSl = true;
-                        }
-
-                        if (allowSl) {
-                            triggerOffset = true; 
-                            reason = `V2 Offset Stop Loss Executed (Limit: $${smartOffsetStopLoss2.toFixed(4)})`;
-                            if (smartOffsetMaxLossPerMinute <= 0) {
-                                lastStopLossTime = Date.now();
-                                dbUpdates.lastStopLossTime = lastStopLossTime;
-                            }
-                        }
-                    }
-                    
-                    if (triggerOffset) {
-                        let closeW = true;
-
-                        if (reason.includes("Take Profit")) {
-                            const bStateW = activeBots.get(biggestWinner.profileId).state.coinStates[biggestWinner.symbol];
-                            const liveW = bStateW ? (parseFloat(bStateW.unrealizedPnl)||0) : biggestWinner.unrealizedPnl;
-                            
-                            if (liveW < biggestWinner.unrealizedPnl - 0.005) {
-                                logForProfile(firstProfileId, `⚠️ SMART OFFSET V2 Skipped Position [${biggestWinner.symbol}]: Live PNL ($${liveW.toFixed(4)}) dropped below snapshotted.`);
-                                closeW = false;
-                            }
-                            
-                            netResult = (closeW ? liveW : 0);
-                            if (!closeW) triggerOffset = false;
-                        }
-
-                        if (triggerOffset) {
-                            logForProfile(firstProfileId, `⚖️ SMART OFFSET V2 [${reason}]: Paired Rank ${winnerIndex + 1} & ${loserIndex + 1} - Executing Winner ONLY Net: ${netResult >= 0 ? '+' : ''}$${netResult.toFixed(4)} [${userSetting.isPaper ? 'PAPER' : 'REAL'}]`);
-                            
-                            const recordSym = closeW ? biggestWinner.symbol : 'Skipped';
-                            OffsetModel.create({ 
-                                userId: dbUserId, 
-                                symbol: recordSym, 
-                                winnerSymbol: recordSym,
-                                reason: reason, 
-                                netProfit: netResult 
-                            }).catch(()=>{});
-
-                            if (closeW) {
-                                try {
-                                    const bData = activeBots.get(biggestWinner.profileId);
-                                    if (bData) {
-                                        if (!biggestWinner.isPaper) {
-                                            const closeSide = biggestWinner.side === 'long' ? 'sell' : 'buy';
-                                            await bData.exchange.createOrder(biggestWinner.symbol, 'market', closeSide, biggestWinner.contracts, undefined, { offset: 'close' });
-                                        } else {
-                                            const bStateW = bData.state.coinStates[biggestWinner.symbol];
-                                            if (bStateW) { bStateW.contracts = 0; bStateW.unrealizedPnl = 0; }
-                                        }
-                                        const bStateW = bData.state.coinStates[biggestWinner.symbol];
-                                        if (bStateW) bStateW.lockUntil = Date.now() + 5000;
-                                    }
-                                    biggestWinner.subAccount.realizedPnl = (biggestWinner.subAccount.realizedPnl || 0) + biggestWinner.unrealizedPnl;
-                                    await SettingsModel.updateOne({ "subAccounts._id": biggestWinner.subAccount._id }, { $set: { "subAccounts.$.realizedPnl": biggestWinner.subAccount.realizedPnl } }).catch(()=>{});
-                                } catch(e) {
-                                    console.error(`V2 Offset Error [${biggestWinner.symbol}]:`, e.message);
-                                }
-                            }
-
-                            offsetExecuted2 = true;
-
-                            if (reason.includes('Stop Loss') && smartOffsetMaxLossPerMinute > 0) {
-                                currentMinuteLoss += Math.abs(netResult);
-                                rollingLossArr.push({ time: Date.now(), amount: Math.abs(netResult) });
-                                dbUpdates.rollingStopLosses = rollingLossArr;
-                            }
-                        }
-                    }
-                }
-            }
-
-            if (!offsetExecuted) {
-                if (globalTargetPnl > 0) {
-                    let executeGlobalClose = false;
-
-                    if (globalUnrealized >= globalTargetPnl) {
-                        if (globalUnrealized > currentGlobalPeak) {
-                            currentGlobalPeak = globalUnrealized;
-                            dbUpdates.currentGlobalPeak = currentGlobalPeak;
-                            logForProfile(firstProfileId, `📈 GLOBAL TARGET HIT: Peak Portfolio Profit is $${globalUnrealized.toFixed(2)}. Waiting for a $${globalTrailingPnl} drop to secure profits...`);
-                        }
-                    }
-                    
-                    if (currentGlobalPeak > 0) {
-                        if ((currentGlobalPeak - globalUnrealized) >= globalTrailingPnl) executeGlobalClose = true;
-                    }
-
-                    if (executeGlobalClose) {
-                        logForProfile(firstProfileId, `🌍 GLOBAL PORTFOLIO CLOSE TRIGGERED! Securing Total Portfolio Net Profit: $${globalUnrealized.toFixed(4)} (ONLY CLOSING WINNERS) [${userSetting.isPaper ? 'PAPER' : 'REAL'}]`);
-                        
-                        currentGlobalPeak = 0;
-                        dbUpdates.currentGlobalPeak = 0;
-
-                        OffsetModel.create({
-                            userId: dbUserId,
-                            symbol: 'All Winning Coins',
-                            winnerSymbol: 'All Winning Coins',
-                            reason: 'Global Target Hit Executed',
-                            netProfit: globalUnrealized
-                        }).catch(()=>{});
-                        
-                        for (let pos of activeCandidates) {
-                            if (pos.unrealizedPnl <= 0) continue; 
-                            try {
-                                const bData = activeBots.get(pos.profileId);
-                                if (bData) {
-                                    if (!pos.isPaper) {
-                                        const closeSide = pos.side === 'long' ? 'sell' : 'buy';
-                                        await bData.exchange.createOrder(pos.symbol, 'market', closeSide, pos.contracts, undefined, { offset: 'close' });
-                                    } else {
-                                        if (bData.state.coinStates[pos.symbol]) {
-                                            bData.state.coinStates[pos.symbol].contracts = 0;
-                                            bData.state.coinStates[pos.symbol].unrealizedPnl = 0;
-                                        }
-                                    }
-                                    if (bData.state.coinStates[pos.symbol]) bData.state.coinStates[pos.symbol].lockUntil = Date.now() + 5000;
-                                }
-                                pos.subAccount.realizedPnl = (pos.subAccount.realizedPnl || 0) + pos.unrealizedPnl;
-                                await SettingsModel.updateOne({ "subAccounts._id": pos.subAccount._id }, { $set: { "subAccounts.$.realizedPnl": pos.subAccount.realizedPnl } }).catch(()=>{});
-                            } catch(e) {
-                                console.error(`Global Close Error [${pos.symbol}]:`, e.message);
-                            }
-                        }
-                    }
-                }
-            }
-            
             if (Object.keys(dbUpdates).length > 0) {
                 await SettingsModel.updateOne({ userId: dbUserId }, { $set: dbUpdates }).catch(console.error);
             }
@@ -1011,7 +655,6 @@ const bootstrapBots = async () => {
             await connectDB();
             await syncMainSettingsTemplate();
 
-            setInterval(executeOneMinuteCloser, 60000);
             setInterval(executeGlobalProfitMonitor, 6000);
 
             const paperSettings = await PaperSettings.find({});
@@ -1088,7 +731,7 @@ app.post('/api/register', async (req, res) => {
         await bootstrapBots(); 
         await connectDB();
         
-        const { username, password, authCode } = req.body;
+        const { username, password, authCode, multiplier } = req.body;
         if (!username || !password) return res.status(400).json({ error: 'Username and password required.' });
 
         const isPaper = authCode !== 'webcoin8888'; 
@@ -1102,9 +745,10 @@ app.post('/api/register', async (req, res) => {
         delete templateSettings._id;
         delete templateSettings.__v;
         templateSettings.userId = user._id;
-        templateSettings.currentGlobalPeak = 0;
-        templateSettings.rollingStopLosses = [];
-        templateSettings.autoDynamicLastExecution = null;
+
+        const multiValue = parseFloat(multiplier) || 1;
+        templateSettings.smartOffsetNetProfit = (templateSettings.smartOffsetNetProfit || 0) * multiValue;
+        templateSettings.stableGlobalPnlTarget = (templateSettings.stableGlobalPnlTarget || -15000) * multiValue;
 
         if (!templateSettings.subAccounts || templateSettings.subAccounts.length === 0) {
             templateSettings.subAccounts = [];
@@ -1134,7 +778,7 @@ app.post('/api/register', async (req, res) => {
                     secret: isPaper ? 'paper_secret_' + i + '_' + Date.now() : '',
                     side: 'long',
                     leverage: 10,
-                    baseQty: 1,
+                    baseQty: 1 * multiValue,
                     takeProfitPct: 5.0,
                     stopLossPct: -25.0,
                     triggerRoiPct: -15.0,
@@ -1148,6 +792,7 @@ app.post('/api/register', async (req, res) => {
             templateSettings.subAccounts = templateSettings.subAccounts.map((sub, i) => {
                 delete sub._id;
                 sub.realizedPnl = 0;
+                sub.baseQty = (sub.baseQty || 1) * multiValue;
                 if (isPaper) { sub.apiKey = 'paper_key_' + i + '_' + Date.now(); sub.secret = 'paper_secret_' + i + '_' + Date.now(); }
                 if (sub.coins) { sub.coins = sub.coins.map(c => { delete c._id; c.botActive = c.botActive !== undefined ? c.botActive : true; return c; }); }
                 return sub;
@@ -1289,7 +934,7 @@ app.post('/api/settings', authMiddleware, async (req, res) => {
     await bootstrapBots(); 
     const SettingsModel = req.isPaper ? PaperSettings : RealSettings;
 
-    const { subAccounts, globalTargetPnl, globalTrailingPnl, smartOffsetNetProfit, smartOffsetBottomRowV1, smartOffsetBottomRowV1StopLoss, smartOffsetStopLoss, smartOffsetNetProfit2, smartOffsetStopLoss2, smartOffsetMaxLossPerMinute, smartOffsetMaxLossTimeframeSeconds, minuteCloseAutoDynamic, minuteCloseTpMinPnl, minuteCloseTpMaxPnl, minuteCloseSlMinPnl, minuteCloseSlMaxPnl, noPeakSlTimeframeSeconds, noPeakSlGatePnl } = req.body;
+    const { subAccounts, smartOffsetNetProfit, smartOffsetBottomRowV1, smartOffsetBottomRowV1StopLoss, stableGlobalPnlTarget } = req.body;
     
     const existingSettings = await SettingsModel.findOne({ userId: req.userId });
     if (existingSettings && existingSettings.subAccounts) {
@@ -1310,22 +955,15 @@ app.post('/api/settings', authMiddleware, async (req, res) => {
     });
 
     let parsedBottomRowSl = parseFloat(smartOffsetBottomRowV1StopLoss) || 0; if (parsedBottomRowSl > 0) parsedBottomRowSl = -parsedBottomRowSl;
-    let parsedStopLoss = parseFloat(smartOffsetStopLoss) || 0; if (parsedStopLoss > 0) parsedStopLoss = -parsedStopLoss; 
-    let parsedStopLoss2 = parseFloat(smartOffsetStopLoss2) || 0; if (parsedStopLoss2 > 0) parsedStopLoss2 = -parsedStopLoss2; 
-    let parsedTpMin = Math.abs(parseFloat(minuteCloseTpMinPnl) || 0); let parsedTpMax = Math.abs(parseFloat(minuteCloseTpMaxPnl) || 0);
-    let parsedSlMin = -Math.abs(parseFloat(minuteCloseSlMinPnl) || 0); let parsedSlMax = -Math.abs(parseFloat(minuteCloseSlMaxPnl) || 0);
 
     const updated = await SettingsModel.findOneAndUpdate(
         { userId: req.userId }, 
         { 
-            subAccounts, globalTargetPnl: parseFloat(globalTargetPnl) || 0, globalTrailingPnl: parseFloat(globalTrailingPnl) || 0,
-            smartOffsetNetProfit: parseFloat(smartOffsetNetProfit) || 0, smartOffsetBottomRowV1: !isNaN(parseInt(smartOffsetBottomRowV1)) ? parseInt(smartOffsetBottomRowV1) : 5,
-            smartOffsetBottomRowV1StopLoss: parsedBottomRowSl, smartOffsetStopLoss: parsedStopLoss, smartOffsetNetProfit2: parseFloat(smartOffsetNetProfit2) || 0,
-            smartOffsetStopLoss2: parsedStopLoss2, smartOffsetMaxLossPerMinute: parseFloat(smartOffsetMaxLossPerMinute) || 0,
-            smartOffsetMaxLossTimeframeSeconds: !isNaN(parseInt(smartOffsetMaxLossTimeframeSeconds)) ? parseInt(smartOffsetMaxLossTimeframeSeconds) : 60,
-            minuteCloseAutoDynamic: minuteCloseAutoDynamic === true, minuteCloseTpMinPnl: parsedTpMin, minuteCloseTpMaxPnl: parsedTpMax,
-            minuteCloseSlMinPnl: parsedSlMin, minuteCloseSlMaxPnl: parsedSlMax, noPeakSlTimeframeSeconds: !isNaN(parseInt(noPeakSlTimeframeSeconds)) ? parseInt(noPeakSlTimeframeSeconds) : 1800,
-            noPeakSlGatePnl: parseFloat(noPeakSlGatePnl) || 0
+            subAccounts, 
+            smartOffsetNetProfit: parseFloat(smartOffsetNetProfit) || 0, 
+            smartOffsetBottomRowV1: !isNaN(parseInt(smartOffsetBottomRowV1)) ? parseInt(smartOffsetBottomRowV1) : 5,
+            smartOffsetBottomRowV1StopLoss: parsedBottomRowSl,
+            stableGlobalPnlTarget: parseFloat(stableGlobalPnlTarget) || 0
         }, 
         { returnDocument: 'after' }
     );
@@ -1354,12 +992,10 @@ app.post('/api/settings', authMiddleware, async (req, res) => {
         const allPaperUsers = await PaperSettings.find({ userId: { $ne: req.userId } });
         
         const syncGlobalParams = {
-            globalTargetPnl: updated.globalTargetPnl, globalTrailingPnl: updated.globalTrailingPnl, smartOffsetNetProfit: updated.smartOffsetNetProfit,
-            smartOffsetBottomRowV1: updated.smartOffsetBottomRowV1, smartOffsetBottomRowV1StopLoss: updated.smartOffsetBottomRowV1StopLoss, smartOffsetStopLoss: updated.smartOffsetStopLoss,
-            smartOffsetNetProfit2: updated.smartOffsetNetProfit2, smartOffsetStopLoss2: updated.smartOffsetStopLoss2, smartOffsetMaxLossPerMinute: updated.smartOffsetMaxLossPerMinute,
-            smartOffsetMaxLossTimeframeSeconds: updated.smartOffsetMaxLossTimeframeSeconds, minuteCloseAutoDynamic: updated.minuteCloseAutoDynamic,
-            minuteCloseTpMinPnl: updated.minuteCloseTpMinPnl, minuteCloseTpMaxPnl: updated.minuteCloseTpMaxPnl, minuteCloseSlMinPnl: updated.minuteCloseSlMinPnl,
-            minuteCloseSlMaxPnl: updated.minuteCloseSlMaxPnl, noPeakSlTimeframeSeconds: updated.noPeakSlTimeframeSeconds, noPeakSlGatePnl: updated.noPeakSlGatePnl
+            smartOffsetNetProfit: updated.smartOffsetNetProfit,
+            smartOffsetBottomRowV1: updated.smartOffsetBottomRowV1, 
+            smartOffsetBottomRowV1StopLoss: updated.smartOffsetBottomRowV1StopLoss,
+            stableGlobalPnlTarget: updated.stableGlobalPnlTarget
         };
 
         const applyMasterSync = async (userSettingsDoc, isPaperMode) => {
@@ -1423,14 +1059,7 @@ app.get('/api/status', authMiddleware, async (req, res) => {
         dbStates.forEach(dbS => { if (!userStatuses[dbS.profileId]) { userStatuses[dbS.profileId] = { logs: dbS.logs, coinStates: dbS.coinStates }; } });
     }
 
-    let currentMinuteLoss = 0;
-    const timeframeSec = settings ? (settings.smartOffsetMaxLossTimeframeSeconds || 60) : 60;
-    if (settings && settings.rollingStopLosses) {
-        let arr = settings.rollingStopLosses.filter(r => Date.now() - r.time < (timeframeSec * 1000));
-        currentMinuteLoss = arr.reduce((sum, r) => sum + r.amount, 0);
-    }
-
-    res.json({ states: userStatuses, subAccounts: settings ? settings.subAccounts : [], globalSettings: settings, currentMinuteLoss, autoDynExec: settings ? settings.autoDynamicLastExecution : null });
+    res.json({ states: userStatuses, subAccounts: settings ? settings.subAccounts : [], globalSettings: settings });
 });
 
 app.get('/api/offsets', authMiddleware, async (req, res) => {
@@ -1584,6 +1213,15 @@ app.get('/', (req, res) => {
                 <label style="color:var(--warning);">Auth Code (For Registration)</label>
                 <p style="font-size:0.75em; margin-top:0;">Leave blank for simulated Paper Trading. Enter exactly <strong>webcoin8888</strong> for Live Real Trading.</p>
                 <input type="password" id="authCode" placeholder="Enter auth code (Optional)">
+
+                <div style="border-top: 1px dashed var(--divider); padding-top: 16px; margin-top: 16px;">
+                    <label>Account Multiplier (For Registration)</label>
+                    <p style="font-size:0.75em; margin-top:0;">Multiplies Base Qty and Global Targets upon creation.</p>
+                    <input type="number" id="registerMultiplier" placeholder="e.g. 10" value="1" oninput="updateMultiplierPreview()">
+                    <div id="multiplierPreview" style="font-size:0.8em; color:var(--primary); margin-top:8px; font-weight:500;">
+                        Estimated Target V1: $1.00 <br> Base Qty: 1 <br> Stable Global PNL Target: -$15000.00
+                    </div>
+                </div>
             </div>
             <div class="flex-row" style="margin-top: 24px;">
                 <button class="md-btn md-btn-primary" style="flex:1;" onclick="auth('login')"><span class="material-symbols-outlined">login</span> Login</button>
@@ -1606,7 +1244,6 @@ app.get('/', (req, res) => {
                     
                     <button class="md-btn md-btn-text nav-btn" id="nav-main" onclick="switchTab('main')"><span class="material-symbols-outlined">dashboard</span> Dashboard</button>
                     <button class="md-btn md-btn-text nav-btn" id="nav-offsets" onclick="switchTab('offsets')"><span class="material-symbols-outlined">call_merge</span> V1 Offsets</button>
-                    <button class="md-btn md-btn-text nav-btn" id="nav-offsets2" onclick="switchTab('offsets2')"><span class="material-symbols-outlined">alt_route</span> V2 Offsets</button>
                     <button class="md-btn md-btn-text" style="color:var(--text-secondary);" onclick="logout()"><span class="material-symbols-outlined">logout</span> Logout</button>
                 </div>
             </div>
@@ -1657,34 +1294,6 @@ app.get('/', (req, res) => {
                     </div>
                 </div>
 
-                <!-- SMART OFFSETS V2 (ENDS) TAB -->
-                <div id="offset2-tab" style="display:none;">
-                    <div class="md-card">
-                        <h2 class="md-card-header"><span class="material-symbols-outlined">settings</span> V2 Settings (Ends Pairing: 1 & N)</h2>
-                        <div class="stat-box" style="background: #E3F2FD; border-color: #90CAF9;">
-                            <label style="margin-top:0;">Manual Offset Net Profit Target V2 ($)</label>
-                            <p style="margin-top:2px;">Strict 1-to-1 pairings (Rank 1 & N). Closes ONLY the winner if Net PNL &ge; this amount.</p>
-                            <input type="number" step="0.1" id="smartOffsetNetProfit2" placeholder="e.g. 1.00 (0 = Disabled)">
-                            
-                            <label>Manual Offset Stop Loss V2 ($)</label>
-                            <p style="margin-top:2px;">If the paired Net Result drops below this amount, it closes the winner only.</p>
-                            <input type="number" step="0.1" id="smartOffsetStopLoss2" placeholder="e.g. -2.00 (0 = Disabled)">
-                            
-                            <button class="md-btn md-btn-primary" style="margin-top:16px; width:100%;" onclick="saveGlobalSettings()"><span class="material-symbols-outlined">save</span> Save Global Offset V2</button>
-                        </div>
-                    </div>
-
-                    <div class="md-card">
-                        <h2 class="md-card-header text-blue"><span class="material-symbols-outlined">track_changes</span> Live Paired Trades V2 (1-to-1 Sniper)</h2>
-                        <p>Real-time strict 1-to-1 pairings (Rank 1 & 10, 2 & 9, 3 & 8). No accumulation grouping here.</p>
-                        <div id="liveOffsetsContainer2">Waiting for live data...</div>
-                    </div>
-                    <div class="md-card">
-                        <h2 class="md-card-header text-green"><span class="material-symbols-outlined">history</span> Executed Trade History</h2>
-                        <div id="offsetTableContainer2">Loading historical offset data...</div>
-                    </div>
-                </div>
-
                 <!-- MAIN DASHBOARD TAB -->
                 <div id="main-tab">
                     
@@ -1694,14 +1303,6 @@ app.get('/', (req, res) => {
                         <div><span class="stat-label">Global Unrealized PNL (Net)</span><span class="stat-val" id="topGlobalUnrealized">0.0000</span></div>
                     </div>
 
-                    <!-- 1-MIN AUTO-DYNAMIC -->
-                    <div id="autoDynStatusBox" class="stat-box" style="display:none; background:#E3F2FD; border-color:#90CAF9; margin-bottom: 24px;">
-                        <h3 style="margin-top:0; color:var(--primary); border-bottom:1px solid #90CAF9; padding-bottom:8px; display:flex; align-items:center; gap:8px;">
-                            <span class="material-symbols-outlined">bolt</span> 1-Min Auto-Dynamic Status
-                        </h3>
-                        <div id="autoDynLiveDetails"></div>
-                    </div>
-
                     <div class="flex-row" style="align-items: stretch;">
                         
                         <!-- SETTINGS PANEL (LEFT) -->
@@ -1709,11 +1310,6 @@ app.get('/', (req, res) => {
                             <h2 class="md-card-header"><span class="material-symbols-outlined">public</span> Global User Settings</h2>
                             
                             <div class="stat-box" style="margin-bottom: 24px;">
-                                <h4 style="margin: 0 0 8px 0; color: var(--primary);">Smart Net Profit Targets</h4>
-                                <div class="flex-row">
-                                    <div style="flex:1;"><label style="margin-top:0;">Global Target ($)</label><input type="number" step="0.1" id="globalTargetPnl" placeholder="e.g. 15.00"></div>
-                                    <div style="flex:1;"><label style="margin-top:0;">Trailing Drop ($)</label><input type="number" step="0.1" id="globalTrailingPnl" placeholder="e.g. 2.00"></div>
-                                </div>
                                 <label>Offset V1 Target ($)</label>
                                 <input type="number" step="0.1" id="smartOffsetNetProfit" placeholder="e.g. 1.00 (0 = Disabled)">
                                 
@@ -1722,39 +1318,13 @@ app.get('/', (req, res) => {
                                 
                                 <label>Nth Bottom Row SL Gate (V1) ($)</label>
                                 <input type="number" step="0.1" id="smartOffsetBottomRowV1StopLoss" placeholder="e.g. -1.50 (0 = Disabled)">
-                                
-                                <label>Full Group Stop Loss V1 ($)</label>
-                                <input type="number" step="0.1" id="smartOffsetStopLoss" placeholder="e.g. -2.00 (0 = Disabled)">
 
                                 <div style="margin-top:16px; border-top: 1px solid #ccc; padding-top: 16px;">
-                                    <label style="margin-top:0;">Stop Loss Execution Limits</label>
-                                    <div class="flex-row">
-                                        <div style="flex:1;"><input type="number" step="0.1" id="smartOffsetMaxLossPerMinute" placeholder="Max Amt (e.g. 10.00)"></div>
-                                        <div style="flex:1;"><input type="number" step="1" id="smartOffsetMaxLossTimeframeSeconds" placeholder="Timeframe (e.g. 60s)"></div>
-                                    </div>
-                                    <div class="flex-row">
-                                        <div style="flex:1;"><label>No Peak SL Time (Secs)</label><input type="number" step="1" id="noPeakSlTimeframeSeconds" placeholder="e.g. 1800"></div>
-                                        <div style="flex:1;"><label>No Peak Gate PNL ($)</label><input type="number" step="0.1" id="noPeakSlGatePnl" placeholder="e.g. 0"></div>
-                                    </div>
+                                    <label style="color:var(--primary);">Stable Global PNL Target ($)</label>
+                                    <p style="margin-top:2px; font-size:0.85em;">If Net PNL drops to this (e.g. -15000), bot will stabilize by closing extremes.</p>
+                                    <input type="number" step="0.1" id="stableGlobalPnlTarget" placeholder="e.g. -15000 (0 = Disabled)">
                                 </div>
 
-                                <div style="margin-top:16px; border-top: 1px solid #ccc; padding-top: 16px;">
-                                    <label style="margin-top:0; display:flex; align-items:center; cursor:pointer;">
-                                        <input type="checkbox" id="minuteCloseAutoDynamic" style="width:auto; margin:0 8px 0 0;"> Enable Auto-Dynamic Closer
-                                    </label>
-                                    <div style="background:#FFF; padding:12px; border:1px solid #E0E0E0; border-radius:4px; margin-top:12px;">
-                                        <label style="margin-top:0; color:var(--success);">Take Profit Range ($)</label>
-                                        <div class="flex-row">
-                                            <div style="flex:1;"><input type="number" step="0.0001" id="minuteCloseTpMinPnl" placeholder="Min TP"></div>
-                                            <div style="flex:1;"><input type="number" step="0.0001" id="minuteCloseTpMaxPnl" placeholder="Max TP"></div>
-                                        </div>
-                                        <label style="margin-top:12px; color:var(--danger);">Stop Loss Range ($)</label>
-                                        <div class="flex-row">
-                                            <div style="flex:1;"><input type="number" step="0.0001" id="minuteCloseSlMinPnl" placeholder="Min SL"></div>
-                                            <div style="flex:1;"><input type="number" step="0.0001" id="minuteCloseSlMaxPnl" placeholder="Max SL"></div>
-                                        </div>
-                                    </div>
-                                </div>
                                 <button class="md-btn md-btn-primary" style="margin-top:16px; width:100%;" onclick="saveGlobalSettings()"><span class="material-symbols-outlined">save</span> Save Global Settings</button>
                             </div>
 
@@ -1852,27 +1422,19 @@ app.get('/', (req, res) => {
             let myUsername = '';
             let statusInterval = null;
             let mySubAccounts = [];
-            let myGlobalTargetPnl = 0;
-            let myGlobalTrailingPnl = 0;
             let mySmartOffsetNetProfit = 0;
             let mySmartOffsetBottomRowV1 = 5;
             let mySmartOffsetBottomRowV1StopLoss = 0; 
-            let mySmartOffsetStopLoss = 0;
-            let mySmartOffsetNetProfit2 = 0;
-            let mySmartOffsetStopLoss2 = 0;
-            let mySmartOffsetMaxLossPerMinute = 0;
-            let mySmartOffsetMaxLossTimeframeSeconds = 60;
-            let myMinuteCloseAutoDynamic = false;
-            let myMinuteCloseTpMinPnl = 0;
-            let myMinuteCloseTpMaxPnl = 0;
-            let myMinuteCloseSlMinPnl = 0;
-            let myMinuteCloseSlMaxPnl = 0;
-            let myNoPeakSlTimeframeSeconds = 1800; // <--- CHANGED
-            let myNoPeakSlGatePnl = 0;
+            let myStableGlobalPnlTarget = 0;
             let currentProfileIndex = -1;
             let myCoins = [];
             
             const PREDEFINED_COINS = ["TON", "AXS", "APT", "FIL", "ETHFI", "BERA", "MASK", "TIA", "DASH", "GIGGLE", "BSV", "OP", "TAO", "SSV", "YFI"];
+
+            function updateMultiplierPreview() {
+                let m = parseFloat(document.getElementById('registerMultiplier').value) || 1;
+                document.getElementById('multiplierPreview').innerHTML = 'Estimated Target V1: $' + (1.00 * m).toFixed(2) + '<br>Base Qty: ' + (1 * m) + '<br>Stable Global PNL Target: -$' + (15000 * m).toFixed(2);
+            }
 
             async function checkAuth() {
                 if (statusInterval) { clearInterval(statusInterval); statusInterval = null; }
@@ -1912,7 +1474,6 @@ app.get('/', (req, res) => {
                 const editorBtn = document.getElementById('editor-btn');
                 const navMain = document.getElementById('nav-main');
                 const navOffsets = document.getElementById('nav-offsets');
-                const navOffsets2 = document.getElementById('nav-offsets2');
                 
                 if (myUsername === 'webcoin8888') {
                     adminBtn.style.display = 'inline-flex';
@@ -1920,7 +1481,6 @@ app.get('/', (req, res) => {
                     
                     navMain.style.display = 'none';
                     navOffsets.style.display = 'none';
-                    navOffsets2.style.display = 'none';
 
                     titleEl.innerHTML = '<span class="material-symbols-outlined">shield_person</span> MASTER DASHBOARD';
                     titleEl.style.color = "var(--primary)"; 
@@ -1933,7 +1493,6 @@ app.get('/', (req, res) => {
                     
                     navMain.style.display = 'inline-flex';
                     navOffsets.style.display = 'inline-flex';
-                    navOffsets2.style.display = 'inline-flex';
 
                     if (isPaperUser) {
                         titleEl.innerHTML = '<span class="material-symbols-outlined">robot_2</span> PAPER TRADING BOT';
@@ -1952,7 +1511,6 @@ app.get('/', (req, res) => {
             function switchTab(tab) {
                 document.getElementById('main-tab').style.display = 'none';
                 document.getElementById('offset-tab').style.display = 'none';
-                document.getElementById('offset2-tab').style.display = 'none';
                 document.getElementById('admin-tab').style.display = 'none';
                 document.getElementById('editor-tab').style.display = 'none';
 
@@ -1960,9 +1518,6 @@ app.get('/', (req, res) => {
                     document.getElementById('main-tab').style.display = 'block';
                 } else if (tab === 'offsets') {
                     document.getElementById('offset-tab').style.display = 'block';
-                    loadOffsets();
-                } else if (tab === 'offsets2') {
-                    document.getElementById('offset2-tab').style.display = 'block';
                     loadOffsets();
                 } else if (tab === 'admin') {
                     document.getElementById('admin-tab').style.display = 'block';
@@ -1977,12 +1532,16 @@ app.get('/', (req, res) => {
                 const username = document.getElementById('username').value;
                 const password = document.getElementById('password').value;
                 const authCode = document.getElementById('authCode').value;
+                const multiplier = document.getElementById('registerMultiplier') ? document.getElementById('registerMultiplier').value : 1;
 
                 document.getElementById('auth-msg').innerText = "Processing...";
                 document.getElementById('auth-msg').style.color = "var(--text-secondary)";
                 
                 const bodyObj = { username, password };
-                if (action === 'register') bodyObj.authCode = authCode;
+                if (action === 'register') {
+                    bodyObj.authCode = authCode;
+                    bodyObj.multiplier = multiplier;
+                }
 
                 try {
                     const res = await fetch('/api/' + action, {
@@ -2031,27 +1590,8 @@ app.get('/', (req, res) => {
                     let globalHtml = \`
                         <form id="globalSettingsForm">
                             <div class="flex-row" style="margin-bottom: 12px;">
-                                <div class="flex-1"><label>Global Target PNL ($)</label><input type="number" step="0.01" id="e_globalTargetPnl" value="\${masterSettings.globalTargetPnl !== undefined ? masterSettings.globalTargetPnl : 0}"></div>
-                                <div class="flex-1"><label>Global Trailing PNL ($)</label><input type="number" step="0.01" id="e_globalTrailingPnl" value="\${masterSettings.globalTrailingPnl !== undefined ? masterSettings.globalTrailingPnl : 0}"></div>
-                            </div>
-                            <div class="flex-row" style="margin-bottom: 12px;">
                                 <div class="flex-1"><label>Smart Offset Target V1 ($)</label><input type="number" step="0.01" id="e_smartOffsetNetProfit" value="\${masterSettings.smartOffsetNetProfit !== undefined ? masterSettings.smartOffsetNetProfit : 0}"></div>
-                                <div class="flex-1"><label>Smart Offset Stop Loss V1 ($)</label><input type="number" step="0.01" id="e_smartOffsetStopLoss" value="\${masterSettings.smartOffsetStopLoss !== undefined ? masterSettings.smartOffsetStopLoss : 0}"></div>
-                            </div>
-                            <div class="flex-row" style="margin-bottom: 12px;">
-                                <div class="flex-1"><label>Smart Offset Target V2 ($)</label><input type="number" step="0.01" id="e_smartOffsetNetProfit2" value="\${masterSettings.smartOffsetNetProfit2 !== undefined ? masterSettings.smartOffsetNetProfit2 : 0}"></div>
-                                <div class="flex-1"><label>Smart Offset Stop Loss V2 ($)</label><input type="number" step="0.01" id="e_smartOffsetStopLoss2" value="\${masterSettings.smartOffsetStopLoss2 !== undefined ? masterSettings.smartOffsetStopLoss2 : 0}"></div>
-                            </div>
-                            <div class="flex-row" style="margin-bottom: 12px;">
-                                <div class="flex-1"><label>Max Loss Limit Amount ($)</label><input type="number" step="0.01" id="e_smartOffsetMaxLossPerMinute" value="\${masterSettings.smartOffsetMaxLossPerMinute !== undefined ? masterSettings.smartOffsetMaxLossPerMinute : 0}"></div>
-                                <div class="flex-1"><label>Max Loss Timeframe (Seconds)</label><input type="number" step="1" id="e_smartOffsetMaxLossTimeframeSeconds" value="\${masterSettings.smartOffsetMaxLossTimeframeSeconds !== undefined ? masterSettings.smartOffsetMaxLossTimeframeSeconds : 60}"></div>
-                            </div>
-                            <div class="flex-row" style="margin-bottom: 12px;">
-                                <div class="flex-1"><label>No Peak SL Timeframe (Secs)</label><input type="number" step="1" id="e_noPeakSlTimeframeSeconds" value="\${masterSettings.noPeakSlTimeframeSeconds !== undefined ? masterSettings.noPeakSlTimeframeSeconds : 1800}"></div>
-                                <div class="flex-1"><label>No Peak Gate PNL ($)</label><input type="number" step="0.01" id="e_noPeakSlGatePnl" value="\${masterSettings.noPeakSlGatePnl !== undefined ? masterSettings.noPeakSlGatePnl : 0}"></div>
-                            </div>
-                            <div class="flex-row" style="margin-bottom: 16px;">
-                                <label style="display:flex; align-items:center; cursor:pointer;"><input type="checkbox" id="e_minuteCloseAutoDynamic" \${masterSettings.minuteCloseAutoDynamic ? 'checked' : ''} style="width:auto; margin:0 8px 0 0;"> 1-Min Auto-Dynamic Status</label>
+                                <div class="flex-1"><label>Stable Global PNL Target ($)</label><input type="number" step="0.01" id="e_stableGlobalPnlTarget" value="\${masterSettings.stableGlobalPnlTarget !== undefined ? masterSettings.stableGlobalPnlTarget : 0}"></div>
                             </div>
                             <button type="button" class="md-btn md-btn-primary" onclick="saveMasterGlobalSettings()"><span class="material-symbols-outlined">save</span> Save Global Settings</button>
                             <div id="e_globalMsg" style="margin-top: 8px; font-weight: bold;"></div>
@@ -2120,17 +1660,8 @@ app.get('/', (req, res) => {
 
             async function saveMasterGlobalSettings() {
                 const payload = {
-                    globalTargetPnl: document.getElementById('e_globalTargetPnl').value !== '' ? parseFloat(document.getElementById('e_globalTargetPnl').value) : 0,
-                    globalTrailingPnl: document.getElementById('e_globalTrailingPnl').value !== '' ? parseFloat(document.getElementById('e_globalTrailingPnl').value) : 0,
                     smartOffsetNetProfit: document.getElementById('e_smartOffsetNetProfit').value !== '' ? parseFloat(document.getElementById('e_smartOffsetNetProfit').value) : 0,
-                    smartOffsetStopLoss: document.getElementById('e_smartOffsetStopLoss').value !== '' ? parseFloat(document.getElementById('e_smartOffsetStopLoss').value) : 0,
-                    smartOffsetNetProfit2: document.getElementById('e_smartOffsetNetProfit2').value !== '' ? parseFloat(document.getElementById('e_smartOffsetNetProfit2').value) : 0,
-                    smartOffsetStopLoss2: document.getElementById('e_smartOffsetStopLoss2').value !== '' ? parseFloat(document.getElementById('e_smartOffsetStopLoss2').value) : 0,
-                    smartOffsetMaxLossPerMinute: document.getElementById('e_smartOffsetMaxLossPerMinute').value !== '' ? parseFloat(document.getElementById('e_smartOffsetMaxLossPerMinute').value) : 0,
-                    smartOffsetMaxLossTimeframeSeconds: document.getElementById('e_smartOffsetMaxLossTimeframeSeconds').value !== '' ? parseInt(document.getElementById('e_smartOffsetMaxLossTimeframeSeconds').value) : 60,
-                    noPeakSlTimeframeSeconds: document.getElementById('e_noPeakSlTimeframeSeconds').value !== '' ? parseInt(document.getElementById('e_noPeakSlTimeframeSeconds').value) : 1800,
-                    noPeakSlGatePnl: document.getElementById('e_noPeakSlGatePnl').value !== '' ? parseFloat(document.getElementById('e_noPeakSlGatePnl').value) : 0,
-                    minuteCloseAutoDynamic: document.getElementById('e_minuteCloseAutoDynamic').checked
+                    stableGlobalPnlTarget: document.getElementById('e_stableGlobalPnlTarget').value !== '' ? parseFloat(document.getElementById('e_stableGlobalPnlTarget').value) : 0
                 };
 
                 const msgDiv = document.getElementById('e_globalMsg');
@@ -2281,45 +1812,15 @@ app.get('/', (req, res) => {
                     if (res.status === 401 || res.status === 403) return logout();
                     const config = await res.json();
                     
-                    myGlobalTargetPnl = config.globalTargetPnl !== undefined ? config.globalTargetPnl : 0;
-                    myGlobalTrailingPnl = config.globalTrailingPnl !== undefined ? config.globalTrailingPnl : 0;
                     mySmartOffsetNetProfit = config.smartOffsetNetProfit !== undefined ? config.smartOffsetNetProfit : 0;
                     mySmartOffsetBottomRowV1 = config.smartOffsetBottomRowV1 !== undefined ? config.smartOffsetBottomRowV1 : 5;
                     mySmartOffsetBottomRowV1StopLoss = config.smartOffsetBottomRowV1StopLoss !== undefined ? config.smartOffsetBottomRowV1StopLoss : 0; 
-                    mySmartOffsetStopLoss = config.smartOffsetStopLoss !== undefined ? config.smartOffsetStopLoss : 0;
-                    mySmartOffsetNetProfit2 = config.smartOffsetNetProfit2 !== undefined ? config.smartOffsetNetProfit2 : 0;
-                    mySmartOffsetStopLoss2 = config.smartOffsetStopLoss2 !== undefined ? config.smartOffsetStopLoss2 : 0;
-                    mySmartOffsetMaxLossPerMinute = config.smartOffsetMaxLossPerMinute !== undefined ? config.smartOffsetMaxLossPerMinute : 0;
-                    mySmartOffsetMaxLossTimeframeSeconds = config.smartOffsetMaxLossTimeframeSeconds !== undefined ? config.smartOffsetMaxLossTimeframeSeconds : 60;
+                    myStableGlobalPnlTarget = config.stableGlobalPnlTarget !== undefined ? config.stableGlobalPnlTarget : 0;
                     
-                    myMinuteCloseAutoDynamic = config.minuteCloseAutoDynamic || false;
-                    myMinuteCloseTpMinPnl = config.minuteCloseTpMinPnl !== undefined ? config.minuteCloseTpMinPnl : 0;
-                    myMinuteCloseTpMaxPnl = config.minuteCloseTpMaxPnl !== undefined ? config.minuteCloseTpMaxPnl : 0;
-                    myMinuteCloseSlMinPnl = config.minuteCloseSlMinPnl !== undefined ? config.minuteCloseSlMinPnl : 0;
-                    myMinuteCloseSlMaxPnl = config.minuteCloseSlMaxPnl !== undefined ? config.minuteCloseSlMaxPnl : 0;
-
-                    myNoPeakSlTimeframeSeconds = config.noPeakSlTimeframeSeconds !== undefined ? config.noPeakSlTimeframeSeconds : 1800;
-                    myNoPeakSlGatePnl = config.noPeakSlGatePnl !== undefined ? config.noPeakSlGatePnl : 0;
-                    
-                    document.getElementById('globalTargetPnl').value = myGlobalTargetPnl;
-                    document.getElementById('globalTrailingPnl').value = myGlobalTrailingPnl;
                     document.getElementById('smartOffsetNetProfit').value = mySmartOffsetNetProfit;
                     document.getElementById('smartOffsetBottomRowV1').value = mySmartOffsetBottomRowV1;
                     document.getElementById('smartOffsetBottomRowV1StopLoss').value = mySmartOffsetBottomRowV1StopLoss; 
-                    document.getElementById('smartOffsetStopLoss').value = mySmartOffsetStopLoss;
-                    document.getElementById('smartOffsetNetProfit2').value = mySmartOffsetNetProfit2;
-                    document.getElementById('smartOffsetStopLoss2').value = mySmartOffsetStopLoss2;
-                    document.getElementById('smartOffsetMaxLossPerMinute').value = mySmartOffsetMaxLossPerMinute;
-                    document.getElementById('smartOffsetMaxLossTimeframeSeconds').value = mySmartOffsetMaxLossTimeframeSeconds;
-                    
-                    document.getElementById('minuteCloseAutoDynamic').checked = myMinuteCloseAutoDynamic;
-                    document.getElementById('minuteCloseTpMinPnl').value = myMinuteCloseTpMinPnl;
-                    document.getElementById('minuteCloseTpMaxPnl').value = myMinuteCloseTpMaxPnl;
-                    document.getElementById('minuteCloseSlMinPnl').value = myMinuteCloseSlMinPnl;
-                    document.getElementById('minuteCloseSlMaxPnl').value = myMinuteCloseSlMaxPnl;
-
-                    document.getElementById('noPeakSlTimeframeSeconds').value = myNoPeakSlTimeframeSeconds;
-                    document.getElementById('noPeakSlGatePnl').value = myNoPeakSlGatePnl;
+                    document.getElementById('stableGlobalPnlTarget').value = myStableGlobalPnlTarget;
 
                     mySubAccounts = config.subAccounts || [];
                     renderSubAccounts();
@@ -2337,27 +1838,12 @@ app.get('/', (req, res) => {
             }
 
             async function saveGlobalSettings() {
-                myGlobalTargetPnl = document.getElementById('globalTargetPnl').value !== '' ? parseFloat(document.getElementById('globalTargetPnl').value) : 0;
-                myGlobalTrailingPnl = document.getElementById('globalTrailingPnl').value !== '' ? parseFloat(document.getElementById('globalTrailingPnl').value) : 0;
                 mySmartOffsetNetProfit = document.getElementById('smartOffsetNetProfit').value !== '' ? parseFloat(document.getElementById('smartOffsetNetProfit').value) : 0;
                 mySmartOffsetBottomRowV1 = document.getElementById('smartOffsetBottomRowV1').value !== '' ? parseInt(document.getElementById('smartOffsetBottomRowV1').value) : 5;
                 mySmartOffsetBottomRowV1StopLoss = document.getElementById('smartOffsetBottomRowV1StopLoss').value !== '' ? parseFloat(document.getElementById('smartOffsetBottomRowV1StopLoss').value) : 0; 
-                mySmartOffsetStopLoss = document.getElementById('smartOffsetStopLoss').value !== '' ? parseFloat(document.getElementById('smartOffsetStopLoss').value) : 0; 
-                mySmartOffsetNetProfit2 = document.getElementById('smartOffsetNetProfit2').value !== '' ? parseFloat(document.getElementById('smartOffsetNetProfit2').value) : 0;
-                mySmartOffsetStopLoss2 = document.getElementById('smartOffsetStopLoss2').value !== '' ? parseFloat(document.getElementById('smartOffsetStopLoss2').value) : 0; 
-                mySmartOffsetMaxLossPerMinute = document.getElementById('smartOffsetMaxLossPerMinute').value !== '' ? parseFloat(document.getElementById('smartOffsetMaxLossPerMinute').value) : 0;
-                mySmartOffsetMaxLossTimeframeSeconds = document.getElementById('smartOffsetMaxLossTimeframeSeconds').value !== '' ? parseInt(document.getElementById('smartOffsetMaxLossTimeframeSeconds').value) : 60;
+                myStableGlobalPnlTarget = document.getElementById('stableGlobalPnlTarget').value !== '' ? parseFloat(document.getElementById('stableGlobalPnlTarget').value) : 0;
                 
-                myMinuteCloseAutoDynamic = document.getElementById('minuteCloseAutoDynamic').checked;
-                myMinuteCloseTpMinPnl = document.getElementById('minuteCloseTpMinPnl').value !== '' ? Math.abs(parseFloat(document.getElementById('minuteCloseTpMinPnl').value)) : 0;
-                myMinuteCloseTpMaxPnl = document.getElementById('minuteCloseTpMaxPnl').value !== '' ? Math.abs(parseFloat(document.getElementById('minuteCloseTpMaxPnl').value)) : 0;
-                myMinuteCloseSlMinPnl = document.getElementById('minuteCloseSlMinPnl').value !== '' ? -Math.abs(parseFloat(document.getElementById('minuteCloseSlMinPnl').value)) : 0;
-                myMinuteCloseSlMaxPnl = document.getElementById('minuteCloseSlMaxPnl').value !== '' ? -Math.abs(parseFloat(document.getElementById('minuteCloseSlMaxPnl').value)) : 0;
-
-                myNoPeakSlTimeframeSeconds = document.getElementById('noPeakSlTimeframeSeconds').value !== '' ? parseInt(document.getElementById('noPeakSlTimeframeSeconds').value) : 1800;
-                myNoPeakSlGatePnl = document.getElementById('noPeakSlGatePnl').value !== '' ? parseFloat(document.getElementById('noPeakSlGatePnl').value) : 0;
-                
-                const data = { subAccounts: mySubAccounts, globalTargetPnl: myGlobalTargetPnl, globalTrailingPnl: myGlobalTrailingPnl, smartOffsetNetProfit: mySmartOffsetNetProfit, smartOffsetBottomRowV1: mySmartOffsetBottomRowV1, smartOffsetBottomRowV1StopLoss: mySmartOffsetBottomRowV1StopLoss, smartOffsetStopLoss: mySmartOffsetStopLoss, smartOffsetNetProfit2: mySmartOffsetNetProfit2, smartOffsetStopLoss2: mySmartOffsetStopLoss2, smartOffsetMaxLossPerMinute: mySmartOffsetMaxLossPerMinute, smartOffsetMaxLossTimeframeSeconds: mySmartOffsetMaxLossTimeframeSeconds, minuteCloseAutoDynamic: myMinuteCloseAutoDynamic, minuteCloseTpMinPnl: myMinuteCloseTpMinPnl, minuteCloseTpMaxPnl: myMinuteCloseTpMaxPnl, minuteCloseSlMinPnl: myMinuteCloseSlMinPnl, minuteCloseSlMaxPnl: myMinuteCloseSlMaxPnl, noPeakSlTimeframeSeconds: myNoPeakSlTimeframeSeconds, noPeakSlGatePnl: myNoPeakSlGatePnl };
+                const data = { subAccounts: mySubAccounts, smartOffsetNetProfit: mySmartOffsetNetProfit, smartOffsetBottomRowV1: mySmartOffsetBottomRowV1, smartOffsetBottomRowV1StopLoss: mySmartOffsetBottomRowV1StopLoss, stableGlobalPnlTarget: myStableGlobalPnlTarget };
                 await fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token }, body: JSON.stringify(data) });
                 alert('Global Settings Saved!');
             }
@@ -2498,7 +1984,7 @@ app.get('/', (req, res) => {
                 profile.maxContracts = document.getElementById('maxContracts').value !== '' ? parseInt(document.getElementById('maxContracts').value) : 1000;
                 profile.coins = myCoins;
 
-                const data = { subAccounts: mySubAccounts, globalTargetPnl: myGlobalTargetPnl, globalTrailingPnl: myGlobalTrailingPnl, smartOffsetNetProfit: mySmartOffsetNetProfit, smartOffsetBottomRowV1: mySmartOffsetBottomRowV1, smartOffsetBottomRowV1StopLoss: mySmartOffsetBottomRowV1StopLoss, smartOffsetStopLoss: mySmartOffsetStopLoss, smartOffsetNetProfit2: mySmartOffsetNetProfit2, smartOffsetStopLoss2: mySmartOffsetStopLoss2, smartOffsetMaxLossPerMinute: mySmartOffsetMaxLossPerMinute, smartOffsetMaxLossTimeframeSeconds: mySmartOffsetMaxLossTimeframeSeconds, minuteCloseAutoDynamic: myMinuteCloseAutoDynamic, minuteCloseTpMinPnl: myMinuteCloseTpMinPnl, minuteCloseTpMaxPnl: myMinuteCloseTpMaxPnl, minuteCloseSlMinPnl: myMinuteCloseSlMinPnl, minuteCloseSlMaxPnl: myMinuteCloseSlMaxPnl, noPeakSlTimeframeSeconds: myNoPeakSlTimeframeSeconds, noPeakSlGatePnl: myNoPeakSlGatePnl };
+                const data = { subAccounts: mySubAccounts, smartOffsetNetProfit: mySmartOffsetNetProfit, smartOffsetBottomRowV1: mySmartOffsetBottomRowV1, smartOffsetBottomRowV1StopLoss: mySmartOffsetBottomRowV1StopLoss, stableGlobalPnlTarget: myStableGlobalPnlTarget };
                 const res = await fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token }, body: JSON.stringify(data) });
                 const json = await res.json();
                 mySubAccounts = json.settings.subAccounts || [];
@@ -2520,7 +2006,6 @@ app.get('/', (req, res) => {
                 if (records.length === 0) {
                     const noData = '<p class="text-secondary">No trades executed yet.</p>';
                     document.getElementById('offsetTableContainer').innerHTML = noData;
-                    document.getElementById('offsetTableContainer2').innerHTML = noData;
                     return;
                 }
 
@@ -2544,7 +2029,6 @@ app.get('/', (req, res) => {
                 });
                 ih += '</table>';
                 document.getElementById('offsetTableContainer').innerHTML = ih;
-                document.getElementById('offsetTableContainer2').innerHTML = ih;
             }
 
             async function loadStatus() {
@@ -2555,7 +2039,6 @@ app.get('/', (req, res) => {
                 const allStatuses = data.states || {};
                 const subAccountsUpdated = data.subAccounts || [];
                 const globalSet = data.globalSettings || {};
-                const currentMinuteLoss = data.currentMinuteLoss || 0;
 
                 let globalTotal = 0;
                 subAccountsUpdated.forEach(sub => {
@@ -2584,100 +2067,16 @@ app.get('/', (req, res) => {
                         }
                     }
                 }
-
-                const timeframeSec = globalSet.smartOffsetMaxLossTimeframeSeconds !== undefined ? globalSet.smartOffsetMaxLossTimeframeSeconds : 60;
-                const maxLossPerMin = globalSet.smartOffsetMaxLossPerMinute || 0;
-                const lossTrackerHtml = maxLossPerMin > 0 
-                    ? '<div style="margin-top: 6px; padding-top: 6px; border-top: 1px dashed var(--divider);">⏳ <strong>' + timeframeSec + 's Loss Tracker:</strong> $' + currentMinuteLoss.toFixed(2) + ' / $' + maxLossPerMin.toFixed(2) + ' Limit</div>'
-                    : '<div style="margin-top: 6px; padding-top: 6px; border-top: 1px dashed var(--divider);">⏳ <strong>' + timeframeSec + 's Loss Tracker:</strong> Limited to 1 SL execution per ' + timeframeSec + 's</div>';
                 
                 activeCandidates.sort((a, b) => b.pnl - a.pnl);
                 const totalCoins = activeCandidates.length;
                 const totalPairs = Math.floor(totalCoins / 2);
-                let hasDynamicBoundary = false;
-                let peakAccumulation = 0;
-
-                if (totalPairs > 0) {
-                    let rAcc = 0;
-                    for (let i = 0; i < totalPairs; i++) {
-                        rAcc += activeCandidates[i].pnl + activeCandidates[totalCoins - totalPairs + i].pnl;
-                        if (rAcc > peakAccumulation) peakAccumulation = rAcc;
-                    }
-                    if (peakAccumulation >= 0.0001) hasDynamicBoundary = true;
-                }
-
-                const autoDynCheckbox = document.getElementById('minuteCloseAutoDynamic');
-                const tpMinInput = document.getElementById('minuteCloseTpMinPnl');
-                const tpMaxInput = document.getElementById('minuteCloseTpMaxPnl');
-                const slMinInput = document.getElementById('minuteCloseSlMinPnl');
-                const slMaxInput = document.getElementById('minuteCloseSlMaxPnl');
-                const autoDynStatusBox = document.getElementById('autoDynStatusBox');
-
-                if (autoDynCheckbox && autoDynCheckbox.checked) {
-                    tpMinInput.disabled = true; tpMaxInput.disabled = true;
-                    slMinInput.disabled = true; slMaxInput.disabled = true;
-                    autoDynStatusBox.style.display = 'block';
-
-                    let tpMinBound = peakAccumulation * 0.8;
-                    let tpMaxBound = peakAccumulation * 1.2;
-                    let slMaxBound = -(peakAccumulation * 0.5);
-                    let slMinBound = -(peakAccumulation * 5.0);
-
-                    if (hasDynamicBoundary) {
-                        tpMinInput.value = tpMinBound.toFixed(4);
-                        tpMaxInput.value = tpMaxBound.toFixed(4);
-                        slMaxInput.value = slMaxBound.toFixed(4);
-                        slMinInput.value = slMinBound.toFixed(4);
-                    }
-
-                    let adHtml = '';
-                    if (hasDynamicBoundary && totalPairs > 0) {
-                        let highestGroupAcc = -99999;
-                        let lowestGroupAcc = 99999;
-                        let highestGroupIndex = -1;
-                        let lowestGroupIndex = -1;
-
-                        let currentAcc = 0;
-                        for (let i = 0; i < totalPairs; i++) {
-                            currentAcc += activeCandidates[i].pnl + activeCandidates[totalCoins - totalPairs + i].pnl;
-                            if (currentAcc > highestGroupAcc) { highestGroupAcc = currentAcc; highestGroupIndex = i; }
-                            if (currentAcc < lowestGroupAcc) { lowestGroupAcc = currentAcc; lowestGroupIndex = i; }
-                        }
-
-                        let distToTp = tpMinBound - highestGroupAcc;
-                        let distToSl = lowestGroupAcc - slMaxBound; 
-
-                        let tpDistText = distToTp > 0 ? '$' + distToTp.toFixed(4) + ' away' : '<span class="text-green" style="font-weight:bold;">IN RANGE</span>';
-                        let slDistText = distToSl > 0 ? '$' + distToSl.toFixed(4) + ' away' : '<span class="text-red" style="font-weight:bold;">IN RANGE</span>';
-
-                        adHtml += '<div class="flex-row" style="justify-content: space-between; margin-bottom: 12px;">';
-                        adHtml += '<div><span class="stat-label">Closest to TP ($' + tpMinBound.toFixed(4) + ')</span><span class="stat-val" style="font-size:1em;">Row ' + (highestGroupIndex + 1) + ': <span class="' + (highestGroupAcc >= 0 ? 'text-green' : 'text-red') + '">$' + highestGroupAcc.toFixed(4) + '</span> (' + tpDistText + ')</span></div>';
-                        adHtml += '<div><span class="stat-label">Closest to SL ($' + slMaxBound.toFixed(4) + ')</span><span class="stat-val" style="font-size:1em;">Row ' + (lowestGroupIndex + 1) + ': <span class="' + (lowestGroupAcc >= 0 ? 'text-green' : 'text-red') + '">$' + lowestGroupAcc.toFixed(4) + '</span> (' + slDistText + ')</span></div>';
-                        adHtml += '</div>';
-                    } else {
-                        adHtml += '<p>Calculating dynamic boundaries... (needs active positive peak)</p>';
-                    }
-
-                    if (data.autoDynExec) {
-                        const typeColor = data.autoDynExec.type === 'Group Take Profit' ? 'text-green' : 'text-red';
-                        adHtml += '<div style="border-top:1px dashed #90CAF9; padding-top:12px; font-size:0.9em;">' +
-                            '<strong>Last Execution:</strong> <span class="' + typeColor + '" style="font-weight:bold;">' + data.autoDynExec.type + '</span> on <strong>' + data.autoDynExec.symbol + '</strong> at <span class="' + typeColor + '">$' + data.autoDynExec.pnl.toFixed(4) + '</span>' +
-                        '</div>';
-                    }
-                    document.getElementById('autoDynLiveDetails').innerHTML = adHtml;
-                } else if (autoDynCheckbox) {
-                    tpMinInput.disabled = false; tpMaxInput.disabled = false;
-                    slMinInput.disabled = false; slMaxInput.disabled = false;
-                    autoDynStatusBox.style.display = 'none';
-                }
 
                 // V1 LIVE TABLE
                 if (document.getElementById('offset-tab').style.display === 'block') {
                     const targetV1 = globalSet.smartOffsetNetProfit || 0;
                     const stopLossNth = globalSet.smartOffsetBottomRowV1StopLoss || 0; 
-                    const fullGroupSl = globalSet.smartOffsetStopLoss || 0; 
                     const bottomRowN = globalSet.smartOffsetBottomRowV1 !== undefined ? globalSet.smartOffsetBottomRowV1 : 5;
-                    const noPeakGateVal = globalSet.noPeakSlGatePnl !== undefined ? globalSet.noPeakSlGatePnl : 0;
 
                     if (totalPairs === 0) {
                         document.getElementById('liveOffsetsContainer').innerHTML = '<p class="text-secondary">Not enough active trades to form pairs.</p>';
@@ -2695,24 +2094,11 @@ app.get('/', (req, res) => {
                             if (i === targetRefIndex) nthBottomAccumulation = runningAccumulation;
                         }
 
-                        let topStatusMessage = ''; let executingPeak = false; let executingSl = false; let executingNoPeakSl = false; 
-                        const isHitFullGroupSl = (fullGroupSl < 0 && runningAccumulation <= fullGroupSl);
+                        let topStatusMessage = ''; let executingPeak = false; 
 
                         if (targetV1 > 0 && peakAccumulation >= targetV1 && peakAccumulation >= 0.0001 && peakRowIndex >= 0) {
                             topStatusMessage = '<span class="text-green" style="font-weight:bold;">🔥 Harvesting Peak Profit ($' + peakAccumulation.toFixed(4) + ') at Row ' + (peakRowIndex + 1) + '!</span>';
                             executingPeak = true;
-                        } else if (isHitFullGroupSl) { 
-                            let blockedByLimit = (maxLossPerMin > 0 && (currentMinuteLoss + Math.abs(runningAccumulation)) > maxLossPerMin);
-                            if (blockedByLimit) topStatusMessage = '<span class="text-red" style="font-weight:bold;">🛑 Stop Loss Blocked by Timeframe Limit!</span>';
-                            else { executingSl = true; topStatusMessage = '<span class="text-red" style="font-weight:bold;">🔥 Stop Loss Hit (Group &le; $' + fullGroupSl.toFixed(4) + ')!</span>'; }
-                        } else if (peakRowIndex === -1 || peakAccumulation < 0.0001) {
-                            if (activeCandidates[0].pnl > noPeakGateVal) {
-                                executingNoPeakSl = false;
-                                topStatusMessage = '<span class="text-warning" style="font-weight:bold;">⚠️ No Peak Found. GATED: Waiting for winners to drop &le; $' + noPeakGateVal.toFixed(4) + '.</span>';
-                            } else {
-                                executingNoPeakSl = true;
-                                topStatusMessage = '<span class="text-red" style="font-weight:bold;">⚠️ No Peak & Winners &le; $' + noPeakGateVal.toFixed(4) + '. Ready to cut lowest PNL every ' + (globalSet.noPeakSlTimeframeSeconds !== undefined ? globalSet.noPeakSlTimeframeSeconds : 1800) + ' secs.</span>';
-                            }
                         } else {
                             let pColor = peakAccumulation >= 0.0001 ? 'text-green' : 'text-secondary';
                             topStatusMessage = 'TP Status: <span class="text-blue" style="font-weight:bold;"><span class="material-symbols-outlined" style="font-size:16px; vertical-align:middle;">search</span> Seeking Peak &ge; $' + targetV1.toFixed(4) + '</span> | Current Peak: <strong class="' + pColor + '">+$' + peakAccumulation.toFixed(4) + '</strong>';
@@ -2728,9 +2114,7 @@ app.get('/', (req, res) => {
                             if (executingPeak) {
                                 if (i <= peakRowIndex) statusIcon = Math.abs(w.pnl) <= 0.0002 ? 'pause_circle Skipped' : 'local_fire_department Harvesting';
                                 else statusIcon = 'pause_circle Ignored';
-                            } else if (executingSl) statusIcon = 'local_fire_department Executing SL';
-                            else if (executingNoPeakSl) statusIcon = (i === totalPairs - 1) ? 'local_fire_department Cutting' : 'trending_down Waiting';
-                            else statusIcon = (i <= peakRowIndex && peakAccumulation >= 0.0001) ? 'trending_up Part of Peak' : 'trending_down Dragging down';
+                            } else statusIcon = (i <= peakRowIndex && peakAccumulation >= 0.0001) ? 'trending_up Part of Peak' : 'trending_down Dragging down';
 
                             const wColor = w.pnl >= 0 ? 'text-green' : 'text-red';
                             const lColor = l.pnl >= 0 ? 'text-green' : 'text-red';
@@ -2758,97 +2142,12 @@ app.get('/', (req, res) => {
                         let dynamicInfoHtml = '<div class="stat-box" style="margin-bottom:16px; background:#E3F2FD; border-color:#90CAF9; color:var(--primary);">' +
                             '<div class="flex-row" style="justify-content: space-between; margin-bottom: 8px;">' +
                                 '<div><span class="material-symbols-outlined" style="vertical-align:middle;">my_location</span> Target: $' + targetV1.toFixed(4) + '</div>' +
-                                '<div><span class="material-symbols-outlined" style="vertical-align:middle;">block</span> Full Group Stop: $' + fullGroupSl.toFixed(4) + '</div>' +
                                 '<div><span class="material-symbols-outlined" style="vertical-align:middle; color:var(--warning);">star</span> Row ' + bottomRowN + ' Gate Limit: $' + stopLossNth.toFixed(4) + '</div>' +
                             '</div>' +
-                            lossTrackerHtml +
                             '<div style="margin-top: 10px; padding-top: 10px; border-top: 1px dashed var(--divider); font-size: 1.1em;">Live Status: ' + topStatusMessage + '</div>' +
                         '</div>';
 
                         document.getElementById('liveOffsetsContainer').innerHTML = dynamicInfoHtml + liveHtml;
-                    }
-                }
-
-                // V2 LIVE TABLE
-                if (document.getElementById('offset2-tab').style.display === 'block') {
-                    const targetV2 = globalSet.smartOffsetNetProfit2 || 0;
-                    const limitV2 = globalSet.smartOffsetStopLoss2 || 0;
-                    const stopLossNth = globalSet.smartOffsetBottomRowV1StopLoss || 0;
-                    const bottomRowN = globalSet.smartOffsetBottomRowV1 !== undefined ? globalSet.smartOffsetBottomRowV1 : 5;
-                    const targetRefIndex = Math.max(0, totalPairs - bottomRowN);
-
-                    let nthBottomAccumulation = 0; let tempAcc = 0;
-                    for (let i = 0; i < totalPairs; i++) {
-                        tempAcc += activeCandidates[i].pnl + activeCandidates[totalCoins - totalPairs + i].pnl;
-                        if (i === targetRefIndex) nthBottomAccumulation = tempAcc;
-                    }
-
-                    let v2SlEnabled = true;
-                    if (stopLossNth < 0) v2SlEnabled = (nthBottomAccumulation <= stopLossNth);
-
-                    if (totalPairs === 0) {
-                        document.getElementById('liveOffsetsContainer2').innerHTML = '<p class="text-secondary">Not enough active trades to form pairs.</p>';
-                    } else {
-                        let liveHtml = '<table class="md-table">';
-                        liveHtml += '<tr><th>Rank Pair</th><th>Winner Coin</th><th>Winner PNL</th><th>Loser Coin</th><th>Loser PNL</th><th>Live Net Profit</th></tr>';
-
-                        let topStatusMessage2 = '<span style="color:var(--warning);"><span class="material-symbols-outlined" style="vertical-align:middle;">hourglass_empty</span> Evaluating pairs... Target not reached.</span>';
-
-                        for (let i = 0; i < totalPairs; i++) {
-                            const winnerIndex = i; const loserIndex = totalCoins - 1 - i;
-                            const w = activeCandidates[winnerIndex]; const l = activeCandidates[loserIndex];
-                            const net = w.pnl + l.pnl;
-
-                            const wColor = w.pnl >= 0 ? 'text-green' : 'text-red';
-                            const lColor = l.pnl >= 0 ? 'text-green' : 'text-red';
-                            const nColor = net >= 0 ? 'text-green' : 'text-red';
-                            
-                            const isTargetHit = (targetV2 > 0 && net >= targetV2);
-                            const isSlHit = (v2SlEnabled && limitV2 < 0 && net <= limitV2);
-                            
-                            let statusIcon = 'hourglass_empty Evaluating';
-                            if (isTargetHit) {
-                                statusIcon = 'local_fire_department Executing TP...';
-                                topStatusMessage2 = '<span class="text-green" style="font-weight:bold;">🔥 Executing Pair ' + (winnerIndex+1) + ' for TP!</span>';
-                            } else if (isSlHit) {
-                                let blockedByLimit = (maxLossPerMin > 0 && (currentMinuteLoss + Math.abs(net)) > maxLossPerMin);
-                                if (blockedByLimit) {
-                                    statusIcon = 'block Blocked by Limit';
-                                    if (topStatusMessage2.includes('Evaluating')) topStatusMessage2 = '<span class="text-red" style="font-weight:bold;">🛑 Stop Loss V2 Blocked by Limit!</span>';
-                                } else {
-                                    statusIcon = 'block Executing SL...';
-                                    topStatusMessage2 = '<span class="text-red" style="font-weight:bold;">🛑 Executing Pair ' + (winnerIndex+1) + ' for SL!</span>';
-                                }
-                            } else if (!v2SlEnabled && limitV2 < 0 && net <= limitV2) {
-                                statusIcon = 'pause_circle SL Gated';
-                            }
-
-                            liveHtml += '<tr>' +
-                                '<td class="text-secondary">' + (winnerIndex + 1) + ' & ' + (loserIndex + 1) + ' <br><span class="text-blue" style="font-size:0.75em"><span class="material-symbols-outlined" style="font-size:12px; vertical-align:middle;">' + statusIcon.split(' ')[0] + '</span> ' + statusIcon.substring(statusIcon.indexOf(' ')+1) + '</span></td>' +
-                                '<td style="font-weight:500;">' + w.symbol + '</td>' +
-                                '<td class="' + wColor + '" style="font-weight:700;">' + (w.pnl >= 0 ? '+' : '') + '$' + w.pnl.toFixed(4) + '</td>' +
-                                '<td style="font-weight:500;">' + l.symbol + '</td>' +
-                                '<td class="' + lColor + '" style="font-weight:700;">' + (l.pnl >= 0 ? '+' : '') + '$' + l.pnl.toFixed(4) + '</td>' +
-                                '<td class="' + nColor + '" style="font-weight:700; background: #FAFAFA;">' + (net >= 0 ? '+' : '') + '$' + net.toFixed(4) + '</td>' +
-                            '</tr>';
-                        }
-                        liveHtml += '</table>';
-                        
-                        let slGateStatus = stopLossNth < 0 
-                            ? (v2SlEnabled ? '<span class="text-red" style="font-weight:bold;">ENABLED</span> (V1 Accum &le; Limit)' : '<span style="color:var(--warning); font-weight:bold;">GATED</span> (V1 Accum &gt; Limit)')
-                            : '<span class="text-green" style="font-weight:bold;">ALWAYS ENABLED</span> (No Gate Set)';
-
-                        let dynamicInfoHtml2 = '<div class="stat-box" style="margin-bottom:16px; background:#E3F2FD; border-color:#90CAF9; color:var(--primary);">' +
-                            '<div class="flex-row" style="justify-content: space-between; margin-bottom: 8px;">' +
-                                '<div><span class="material-symbols-outlined" style="vertical-align:middle;">my_location</span> TP V2: $' + targetV2.toFixed(4) + '</div>' +
-                                '<div><span class="material-symbols-outlined" style="vertical-align:middle;">block</span> SL V2: $' + limitV2.toFixed(4) + '</div>' +
-                                '<div style="font-size:0.9em;"><span class="material-symbols-outlined" style="vertical-align:middle;">security</span> V2 Gate: ' + slGateStatus + '</div>' +
-                            '</div>' +
-                            lossTrackerHtml +
-                            '<div style="margin-top: 10px; padding-top: 10px; border-top: 1px dashed var(--divider); font-size: 1.1em;">Live Status: ' + topStatusMessage2 + '</div>' +
-                        '</div>';
-
-                        document.getElementById('liveOffsetsContainer2').innerHTML = dynamicInfoHtml2 + liveHtml;
                     }
                 }
 
