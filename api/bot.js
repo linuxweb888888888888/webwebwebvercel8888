@@ -45,22 +45,12 @@ const SettingsSchema = new mongoose.Schema({
     userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, unique: true },
     smartOffsetNetProfit: { type: Number, default: 0 }, smartOffsetBottomRowV1: { type: Number, default: 5 }, 
     smartOffsetBottomRowV1StopLoss: { type: Number, default: 0 }, stableGlobalPnlTarget: { type: Number, default: 0 }, 
-    autoDripTargetDollar: { type: Number, default: 0 }, autoDripIntervalSec: { type: Number, default: 0 }, 
-    lastAutoDripTime: { type: Number, default: 0 }, lastSnapshotTime: { type: Number, default: 0 },
+    autoDripTargetDollar: { type: Number, default: 0 }, autoDripIntervalSec: { type: Number, default: 0 }, lastAutoDripTime: { type: Number, default: 0 },
     subAccounts: [SubAccountSchema]
 });
 const OffsetRecordSchema = new mongoose.Schema({ userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true }, symbol: { type: String }, reason: { type: String }, winnerSymbol: { type: String }, winnerPnl: { type: Number }, loserSymbol: { type: String }, loserPnl: { type: Number }, netProfit: { type: Number, required: true }, timestamp: { type: Date, default: Date.now } });
 const ProfileStateSchema = new mongoose.Schema({ profileId: { type: mongoose.Schema.Types.ObjectId, required: true, unique: true }, userId: { type: mongoose.Schema.Types.ObjectId, required: true }, logs: { type: [String], default: [] }, coinStates: { type: mongoose.Schema.Types.Mixed, default: {} }, lastUpdated: { type: Date, default: Date.now } });
 const MainTemplateSchema = new mongoose.Schema({ name: { type: String, required: true, unique: true }, settings: { type: Object, required: true } });
-
-// DVR RECORDING SCHEMA
-const ReplaySnapshotSchema = new mongoose.Schema({
-    userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
-    timestamp: { type: Number, required: true },
-    globalUnrealized: { type: Number },
-    globalRealized: { type: Number },
-    coins: { type: Array, default: [] }
-});
 
 const RealSettings = mongoose.models.Settings || mongoose.model('Settings', SettingsSchema, 'settings');
 const PaperSettings = mongoose.models.PaperSettings || mongoose.model('PaperSettings', SettingsSchema, 'paper_settings');
@@ -69,8 +59,6 @@ const PaperOffsetRecord = mongoose.models.PaperOffsetRecord || mongoose.model('P
 const RealProfileState = mongoose.models.ProfileState || mongoose.model('ProfileState', ProfileStateSchema, 'profile_states');
 const PaperProfileState = mongoose.models.PaperProfileState || mongoose.model('PaperProfileState', ProfileStateSchema, 'paper_profile_states');
 const MainTemplate = mongoose.models.MainTemplate || mongoose.model('MainTemplate', MainTemplateSchema, 'main_settings_template');
-const RealReplaySnapshot = mongoose.models.RealReplaySnapshot || mongoose.model('RealReplaySnapshot', ReplaySnapshotSchema, 'real_replay_snapshots');
-const PaperReplaySnapshot = mongoose.models.PaperReplaySnapshot || mongoose.model('PaperReplaySnapshot', ReplaySnapshotSchema, 'paper_replay_snapshots');
 
 // ==========================================
 // 3. MULTI-MODE BOT ENGINE STATE
@@ -290,7 +278,6 @@ const executeGlobalProfitMonitor = async () => {
             const dbUserId = String(userSetting.userId);
             const SettingsModel = userSetting.isPaper ? PaperSettings : RealSettings;
             const OffsetModel = userSetting.isPaper ? PaperOffsetRecord : RealOffsetRecord;
-            const ReplayModel = userSetting.isPaper ? PaperReplaySnapshot : RealReplaySnapshot;
 
             let dbUpdates = {}; 
             const smartOffsetNetProfit = parseFloat(userSetting.smartOffsetNetProfit) || 0;
@@ -301,11 +288,6 @@ const executeGlobalProfitMonitor = async () => {
             const lastAutoDripTime = userSetting.lastAutoDripTime || 0;
             
             let globalUnrealized = 0; let activeCandidates = []; let firstProfileId = null; 
-            let totalRealizedForUser = 0;
-
-            if (userSetting.subAccounts) {
-                totalRealizedForUser = userSetting.subAccounts.reduce((sum, sub) => sum + (sub.realizedPnl || 0), 0);
-            }
 
             for (let [profileId, botData] of activeBots.entries()) {
                 if (botData.userId !== dbUserId) continue;
@@ -319,25 +301,6 @@ const executeGlobalProfitMonitor = async () => {
                         const activeSide = cState.activeSide || botData.settings.coins.find(c => c.symbol === symbol)?.side || botData.settings.side;
                         activeCandidates.push({ profileId, symbol, exchange: botData.exchange, isPaper: botData.isPaper, unrealizedPnl: pnl, contracts: cState.contracts, side: activeSide, subAccount: botData.settings });
                     }
-                }
-            }
-
-            // SERVER-SIDE 24/7 DVR SNAPSHOT (EVERY 60 SECONDS)
-            const now = Date.now();
-            if (!userSetting.lastSnapshotTime || (now - userSetting.lastSnapshotTime) > 60000) {
-                if (activeCandidates.length > 0) {
-                    const coinSnapshot = activeCandidates.map(c => ({ symbol: c.symbol, pnl: c.unrealizedPnl }));
-                    await ReplayModel.create({
-                        userId: dbUserId, timestamp: now, globalUnrealized: globalUnrealized, globalRealized: totalRealizedForUser, coins: coinSnapshot
-                    }).catch(()=>{});
-                    
-                    // Maintain only last 1440 snapshots (24 hours) to prevent huge DB
-                    const count = await ReplayModel.countDocuments({ userId: dbUserId });
-                    if (count > 1440) {
-                        const oldest = await ReplayModel.find({ userId: dbUserId }).sort({ timestamp: 1 }).limit(count - 1440);
-                        for (let o of oldest) await ReplayModel.findByIdAndDelete(o._id);
-                    }
-                    dbUpdates.lastSnapshotTime = now;
                 }
             }
 
@@ -646,6 +609,7 @@ app.get('/api/admin/users', authMiddleware, adminMiddleware, async (req, res) =>
     const users = await User.find({ username: { $ne: 'webcoin8888' } }).lean();
     let result = [];
 
+    // Fetch ALL states once to guarantee accurate DB matching exactly like the user UI does.
     const allPaperStates = await PaperProfileState.find({}).lean();
     const allRealStates = await RealProfileState.find({}).lean();
     const allStates = [...allPaperStates, ...allRealStates];
@@ -660,6 +624,7 @@ app.get('/api/admin/users', authMiddleware, adminMiddleware, async (req, res) =>
             targetV1 = settings.smartOffsetNetProfit || 0;
             if (settings.subAccounts) {
                 totalPnl = settings.subAccounts.reduce((sum, sub) => sum + (sub.realizedPnl || 0), 0);
+                
                 const subIds = settings.subAccounts.map(s => s._id.toString());
                 const userStates = allStates.filter(st => subIds.includes(st.profileId.toString()));
                 
@@ -676,6 +641,7 @@ app.get('/api/admin/users', authMiddleware, adminMiddleware, async (req, res) =>
             }
         }
 
+        // Fallback to memory if DB is lagging behind memory exactly
         if (activeCandidates.length === 0) {
             for (let [profileId, botData] of activeBots.entries()) {
                 if (botData.userId === u._id.toString()) {
@@ -690,11 +656,13 @@ app.get('/api/admin/users', authMiddleware, adminMiddleware, async (req, res) =>
         }
 
         activeCandidates.sort((a, b) => b.pnl - a.pnl);
-        const totalPairs = Math.floor(activeCandidates.length / 2);
+        const totalCoins = activeCandidates.length;
+        const totalPairs = Math.floor(totalCoins / 2);
         let peakAccumulation = 0; let runningAccumulation = 0;
 
         for (let i = 0; i < totalPairs; i++) {
-            const w = activeCandidates[i]; const l = activeCandidates[activeCandidates.length - totalPairs + i];
+            const w = activeCandidates[i]; 
+            const l = activeCandidates[totalCoins - totalPairs + i];
             runningAccumulation += w.pnl + l.pnl;
             if (runningAccumulation > peakAccumulation) peakAccumulation = runningAccumulation;
         }
@@ -705,103 +673,6 @@ app.get('/api/admin/users', authMiddleware, adminMiddleware, async (req, res) =>
         });
     }
     res.json(result);
-});
-
-// DVR REPLAY DOWNLOAD ENDPOINT
-app.get('/api/download-replay', authMiddleware, async (req, res) => {
-    const ReplayModel = req.isPaper ? PaperReplaySnapshot : RealReplaySnapshot;
-    const snapshots = await ReplayModel.find({ userId: req.userId }).sort({ timestamp: 1 }).lean();
-    
-    if (!snapshots || snapshots.length === 0) return res.status(404).send('No recordings found. Make sure bot is active.');
-
-    const htmlContent = `<!DOCTYPE html>
-    <html lang="en">
-    <head>
-        <meta charset="UTF-8"><title>Bot DVR Replay</title>
-        <style>
-            body { font-family: Arial; background: #121212; color: #fff; margin: 0; padding: 20px; }
-            .container { max-width: 900px; margin: auto; background: #1e1e1e; padding: 20px; border-radius: 8px; }
-            .control-bar { display: flex; gap: 10px; align-items: center; margin-bottom: 20px; background: #333; padding: 10px; border-radius: 5px; }
-            input[type="range"] { flex: 1; }
-            button { padding: 8px 15px; cursor: pointer; background: #1976D2; color: #fff; border: none; border-radius: 4px; }
-            .box { background: #2a2a2a; padding: 15px; margin-bottom: 10px; border-radius: 5px; }
-            .grid { display: flex; flex-wrap: wrap; gap: 10px; }
-            .coin { background: #333; padding: 10px; flex: 1 1 200px; border-left: 3px solid #1976D2; }
-            .green { color: #4CAF50; } .red { color: #F44336; }
-        </style>
-    </head>
-    <body>
-        <div class="container">
-            <h2>Bot DVR Replay - <span id="timeDisplay"></span></h2>
-            <div class="control-bar">
-                <button id="playBtn">Play</button>
-                <input type="range" id="scrubber" min="0" max="${snapshots.length - 1}" value="0">
-                <span id="frameCounter">0 / ${snapshots.length - 1}</span>
-            </div>
-            <div class="box">
-                <h3>Global Stats</h3>
-                <p>Global Unrealized PNL: <strong id="gUnreal"></strong></p>
-                <p>Total Realized PNL: <strong id="gReal"></strong></p>
-            </div>
-            <div class="grid" id="coinsGrid"></div>
-        </div>
-        <script>
-            const data = ${JSON.stringify(snapshots)};
-            let current = 0; let interval;
-            const scrubber = document.getElementById('scrubber');
-            const playBtn = document.getElementById('playBtn');
-            
-            function renderFrame(index) {
-                const frame = data[index];
-                document.getElementById('timeDisplay').innerText = new Date(frame.timestamp).toLocaleString();
-                document.getElementById('frameCounter').innerText = index + " / " + (data.length - 1);
-                
-                const unColor = frame.globalUnrealized >= 0 ? 'green' : 'red';
-                document.getElementById('gUnreal').innerHTML = '<span class="'+unColor+'">$' + (frame.globalUnrealized || 0).toFixed(4) + '</span>';
-                
-                const reColor = frame.globalRealized >= 0 ? 'green' : 'red';
-                document.getElementById('gReal').innerHTML = '<span class="'+reColor+'">$' + (frame.globalRealized || 0).toFixed(4) + '</span>';
-
-                let html = '';
-                (frame.coins || []).forEach(c => {
-                    const cColor = c.pnl >= 0 ? 'green' : 'red';
-                    html += '<div class="coin"><b>'+c.symbol+'</b><br>PNL: <span class="'+cColor+'">$'+c.pnl.toFixed(4)+'</span></div>';
-                });
-                document.getElementById('coinsGrid').innerHTML = html;
-            }
-
-            playBtn.onclick = () => {
-                if(interval) { clearInterval(interval); interval = null; playBtn.innerText = "Play"; }
-                else {
-                    if(current >= data.length - 1) current = 0;
-                    playBtn.innerText = "Pause";
-                    interval = setInterval(() => {
-                        current++;
-                        if(current >= data.length) { clearInterval(interval); interval = null; playBtn.innerText = "Play"; current = data.length - 1; }
-                        scrubber.value = current; renderFrame(current);
-                    }, 500);
-                }
-            };
-            
-            scrubber.oninput = (e) => { current = parseInt(e.target.value); renderFrame(current); };
-            renderFrame(0);
-        </script>
-    </body>
-    </html>`;
-    
-    res.setHeader('Content-disposition', 'attachment; filename=bot_dvr_recording.html');
-    res.setHeader('Content-type', 'text/html');
-    res.send(htmlContent);
-});
-
-app.post('/api/admin/users/:id/reset-replay', authMiddleware, adminMiddleware, async (req, res) => {
-    const { id } = req.params; const targetUser = await User.findById(id);
-    if (!targetUser || targetUser.username === 'webcoin8888') return res.status(403).json({ error: 'Invalid user.' });
-    
-    const ReplayModel = targetUser.isPaper ? PaperReplaySnapshot : RealReplaySnapshot;
-    await ReplayModel.deleteMany({ userId: targetUser._id });
-    
-    res.json({ success: true, message: `DVR Recording completely wiped for ${targetUser.username}.` });
 });
 
 app.post('/api/admin/users/:id/import', authMiddleware, adminMiddleware, async (req, res) => {
@@ -843,7 +714,6 @@ app.delete('/api/admin/users/:id', authMiddleware, adminMiddleware, async (req, 
     await User.findByIdAndDelete(id); await PaperSettings.deleteMany({ userId: id }); await RealSettings.deleteMany({ userId: id });
     await PaperProfileState.deleteMany({ userId: id }); await RealProfileState.deleteMany({ userId: id });
     await PaperOffsetRecord.deleteMany({ userId: id }); await RealOffsetRecord.deleteMany({ userId: id });
-    await PaperReplaySnapshot.deleteMany({ userId: id }); await RealReplaySnapshot.deleteMany({ userId: id });
     res.json({ success: true, message: 'Deleted user ' + targetUser.username });
 });
 
@@ -854,7 +724,6 @@ app.delete('/api/admin/users', authMiddleware, adminMiddleware, async (req, res)
         await User.findByIdAndDelete(u._id); await PaperSettings.deleteMany({ userId: u._id }); await RealSettings.deleteMany({ userId: u._id });
         await PaperProfileState.deleteMany({ userId: u._id }); await RealProfileState.deleteMany({ userId: u._id });
         await PaperOffsetRecord.deleteMany({ userId: u._id }); await RealOffsetRecord.deleteMany({ userId: u._id });
-        await PaperReplaySnapshot.deleteMany({ userId: u._id }); await RealReplaySnapshot.deleteMany({ userId: u._id });
         count++;
     }
     res.json({ success: true, message: 'Safely wiped ' + count + ' users. Master intact.' });
@@ -1059,9 +928,6 @@ app.get('/', (req, res) => {
                 <h1 class="app-title" id="app-title"><span class="material-symbols-outlined">robot_2</span> HTX BOT</h1>
                 <div class="flex-row">
                     <button class="md-btn md-btn-danger" id="panic-btn" style="display:none;" onclick="closeAllPositions()"><span class="material-symbols-outlined">emergency</span> Panic Close</button>
-                    
-                    <a href="/api/download-replay" id="nav-download-dvr" class="md-btn md-btn-text" style="color:#9C27B0; display:none;"><span class="material-symbols-outlined">movie</span> Download Recording</a>
-                    
                     <button class="md-btn md-btn-text nav-btn" id="admin-btn" style="display:none;" onclick="switchTab('admin')"><span class="material-symbols-outlined">manage_accounts</span> User Admin</button>
                     <button class="md-btn md-btn-text nav-btn" id="editor-btn" style="display:none;" onclick="switchTab('editor')"><span class="material-symbols-outlined">database</span> Database Editor</button>
                     <button class="md-btn md-btn-text nav-btn" id="nav-main" onclick="switchTab('main')"><span class="material-symbols-outlined">dashboard</span> Dashboard</button>
@@ -1131,6 +997,7 @@ app.get('/', (req, res) => {
                                     <div id="pb-stable-bar" style="background: var(--warning); height: 100%; width: 0%; transition: width 0.3s, background 0.3s;"></div>
                                 </div>
                             </div>
+                            <!-- NEW AUTO DRIP PROGRESS BAR -->
                             <div class="flex-1 stat-box" style="background:#fff;">
                                 <div class="flex-row" style="justify-content: space-between; margin-bottom: 6px;">
                                     <span style="font-weight: 500; font-size: 0.9em;">Auto Drip Harvest Target ($<span id="pb-drip-target">0.00</span>)</span>
@@ -1276,9 +1143,9 @@ app.get('/', (req, res) => {
                     document.getElementById('auth-view').style.display = 'none'; document.getElementById('dashboard-view').style.display = 'block';
                     
                     if (myUsername !== 'webcoin8888') { 
-                        document.getElementById('nav-download-dvr').style.display = 'inline-flex';
                         await fetchSettings(); await loadStatus(); statusInterval = setInterval(loadStatus, 5000); 
                     } else {
+                        // Master Admin background auto-refresh
                         adminInterval = setInterval(() => {
                             if (document.getElementById('admin-tab').style.display === 'block') loadAdminData();
                         }, 5000);
@@ -1539,11 +1406,7 @@ app.get('/', (req, res) => {
                                 '<td style="font-family:monospace;">' + u.plainPassword + '</td>' +
                                 '<td>' + modeText + '</td>' +
                                 '<td class="' + pnlColor + '" style="font-weight:bold;">$' + u.realizedPnl.toFixed(4) + '</td>' +
-                                '<td>' +
-                                    '<button class="md-btn md-btn-success" style="padding:6px 12px; margin-right:8px;" onclick="adminImportProfiles(\\'' + u._id + '\\')"><span class="material-symbols-outlined" style="font-size:16px;">download</span> Import Master</button>' +
-                                    '<button class="md-btn md-btn-warning" style="padding:6px 12px; margin-right:8px;" onclick="adminResetRecording(\\'' + u._id + '\\')"><span class="material-symbols-outlined" style="font-size:16px;">movie_off</span> Clear Record</button>' +
-                                    '<button class="md-btn md-btn-danger" style="padding:6px 12px;" onclick="adminDeleteUser(\\'' + u._id + '\\')"><span class="material-symbols-outlined" style="font-size:16px;">delete</span> Wipe</button>' +
-                                '</td>' +
+                                '<td><button class="md-btn md-btn-primary" style="padding:6px 12px; margin-right:8px;" onclick="adminImportProfiles(\\'' + u._id + '\\')"><span class="material-symbols-outlined" style="font-size:16px;">download</span> Import Profiles</button><button class="md-btn md-btn-danger" style="padding:6px 12px;" onclick="adminDeleteUser(\\'' + u._id + '\\')"><span class="material-symbols-outlined" style="font-size:16px;">delete</span></button></td>' +
                             '</tr>'; 
                         }); 
                     }
@@ -1551,7 +1414,6 @@ app.get('/', (req, res) => {
                 } catch (e) { document.getElementById('adminUsersContainer').innerHTML = '<p class="text-red">Error loading admin data.</p>'; }
             }
             async function adminImportProfiles(id) { if (!confirm("OVERWRITE their profiles with Master configurations?")) return; const res = await fetch('/api/admin/users/' + id + '/import', { method: 'POST', headers: { 'Authorization': 'Bearer ' + token } }); const data = await res.json(); if(data.success) { alert(data.message); loadAdminData(); } else alert("Error: " + data.error); }
-            async function adminResetRecording(id) { if (!confirm("Wipe this user's DVR Recording?")) return; const res = await fetch('/api/admin/users/' + id + '/reset-replay', { method: 'POST', headers: { 'Authorization': 'Bearer ' + token } }); const data = await res.json(); if(data.success) { alert(data.message); loadAdminData(); } else alert("Error: " + data.error); }
             async function adminDeleteUser(id) { if (!confirm("Delete this user permanently?")) return; const res = await fetch('/api/admin/users/' + id, { method: 'DELETE', headers: { 'Authorization': 'Bearer ' + token } }); const data = await res.json(); if(data.success) { loadAdminData(); } else alert("Error: " + data.error); }
             async function adminDeleteAllUsers() { if (!confirm("🚨 EXTREME WARNING: Completely wipe all users?")) return; const res = await fetch('/api/admin/users', { method: 'DELETE', headers: { 'Authorization': 'Bearer ' + token } }); const data = await res.json(); if(data.success) { alert(data.message); loadAdminData(); } else alert("Error: " + data.error); }
             async function loadMasterEditor() {
