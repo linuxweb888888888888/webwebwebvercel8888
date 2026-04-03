@@ -1,5 +1,3 @@
-//web8888
-
 const express = require('express');
 const ccxt = require('ccxt');
 const mongoose = require('mongoose');
@@ -657,7 +655,103 @@ const executeGlobalProfitMonitor = async () => {
             let offsetExecuted = false;
 
             // ==============================================================
-            // EQUITY AUTO-BALANCER (DEFICIT COVER & SURPLUS HARVEST)
+            // 1. SMART OFFSET V1 (EVALUATED FIRST - HIGHEST PRIORITY)
+            // ==============================================================
+            if (smartOffsetNetProfit > 0 && activeCandidates.length >= 2) {
+                // Sort Highest Winners to Lowest Losers
+                activeCandidates.sort((a, b) => b.unrealizedPnl - a.unrealizedPnl); 
+                
+                const totalCoins = activeCandidates.length;
+                const totalPairs = Math.floor(totalCoins / 2);
+
+                let runningAccumulation = 0;
+                let peakAccumulation = 0;
+                let peakRowIndex = -1;
+
+                for (let i = 0; i < totalPairs; i++) {
+                    const w = activeCandidates[i];
+                    const l = activeCandidates[totalCoins - totalPairs + i];
+                    const netResult = w.unrealizedPnl + l.unrealizedPnl;
+                    
+                    runningAccumulation += netResult;
+
+                    if (runningAccumulation > peakAccumulation) {
+                        peakAccumulation = runningAccumulation;
+                        peakRowIndex = i;
+                    }
+                }
+
+                let finalPairsToClose = [];
+
+                if (peakAccumulation >= targetV1 && peakAccumulation >= peakThreshold && peakRowIndex >= 0) {
+                    for(let i = 0; i <= peakRowIndex; i++) {
+                        const w = activeCandidates[i];
+                        const l = activeCandidates[totalCoins - totalPairs + i]; // GET THE LOSER TOO
+                        
+                        if (Math.abs(w.unrealizedPnl) > winnerThreshold) finalPairsToClose.push(w); 
+                        finalPairsToClose.push(l); // MUST PUSH LOSER TO OFFSET
+                    }
+                } 
+
+                if (finalPairsToClose.length > 0) {
+                    let actualPairsToClose = [];
+                    for (let k = 0; k < finalPairsToClose.length; k++) {
+                        const pos = finalPairsToClose[k];
+                        const bState = activeBots.get(pos.profileId).state.coinStates[pos.symbol];
+                        // Verify position still exists
+                        if (bState && bState.contracts > 0) {
+                            actualPairsToClose.push(pos);
+                        }
+                    }
+
+                    if (actualPairsToClose.length > 0) {
+                        logForProfile(firstProfileId, `⚖️ SMART OFFSET V1: Executing on ${actualPairsToClose.length} coins. Net: $${peakAccumulation.toFixed(4)}`);
+
+                        for (let k = 0; k < actualPairsToClose.length; k++) {
+                            const pos = actualPairsToClose[k];
+                            const bData = activeBots.get(pos.profileId);
+                            
+                            try {
+                                if (bData) {
+                                    if (!pos.isPaper) {
+                                        const closeSide = pos.side === 'long' ? 'sell' : 'buy';
+                                        await bData.exchange.createOrder(pos.symbol, 'market', closeSide, pos.contracts, undefined, { 
+                                            offset: 'close', reduceOnly: true, lever_rate: pos.actualLeverage 
+                                        });
+                                    } 
+
+                                    const bState = bData.state.coinStates[pos.symbol];
+                                    
+                                    if (bState) { 
+                                        await OffsetModel.create({
+                                            userId: dbUserId, symbol: pos.symbol, side: pos.side,
+                                            openPrice: bState.avgEntry, closePrice: bState.currentPrice, roi: bState.currentRoi,
+                                            netProfit: pos.unrealizedPnl, reason: 'Smart Offset V1'
+                                        });
+
+                                        bState.contracts = 0; bState.unrealizedPnl = 0; bState.avgEntry = 0; bState.dcaCount = 0; 
+                                        bState.lockUntil = Date.now() + 60000; 
+                                    }
+                                    
+                                    pos.subAccount.realizedPnl = (pos.subAccount.realizedPnl || 0) + pos.unrealizedPnl;
+                                    
+                                    await SettingsModel.updateOne(
+                                        { userId: dbUserId, "subAccounts._id": pos.subAccount._id }, 
+                                        { $inc: { "subAccounts.$.realizedPnl": pos.unrealizedPnl } }
+                                    );
+
+                                    offsetExecuted = true;
+                                }
+                            } catch (e) {
+                                logForProfile(firstProfileId, `❌ CLOSE ERROR [${pos.symbol}]: ${e.message}`);
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ==============================================================
+            // 2. EQUITY AUTO-BALANCER (EVALUATED SECOND)
             // ==============================================================
             if (userSetting.autoBalanceEquity && !offsetExecuted) {
                 const targetPnl = parseFloat(userSetting.autoBalanceUnrealizedPnlTarget) || 0;
@@ -666,9 +760,9 @@ const executeGlobalProfitMonitor = async () => {
                 for (let s of userSetting.subAccounts) globalRealized += (s.realizedPnl || 0);
 
                 const balanceTolerance = 5.0 * multiplier; 
-                const microTolerance = 0.05; // 5 cents: Triggers deficit cover immediately
+                const microTolerance = 0.05; 
 
-                // 1. SURPLUS HARVEST
+                // A. SURPLUS HARVEST
                 if (globalUnrealized > targetPnl + balanceTolerance) {
                     let excess = globalUnrealized - targetPnl;
                     let winners = activeCandidates.filter(c => c.unrealizedPnl > 0).sort((a, b) => b.unrealizedPnl - a.unrealizedPnl);
@@ -677,7 +771,7 @@ const executeGlobalProfitMonitor = async () => {
                         if (excess <= balanceTolerance) break;
                         let winAmount = w.unrealizedPnl;
                         let closeFraction = winAmount > excess ? (excess / winAmount) : 1;
-                        let closeQty = Math.max(1, Math.floor(w.contracts * closeFraction));
+                        let closeQty = w.contracts * closeFraction; 
                         if (closeQty > w.contracts) closeQty = w.contracts;
 
                         let realizedFromThis = winAmount * (closeQty / w.contracts);
@@ -723,7 +817,7 @@ const executeGlobalProfitMonitor = async () => {
                         }
                     }
                 } 
-                // 2. DEFICIT COVER (Instantly close winners & losers to wipe out the deficit)
+                // B. DEFICIT COVER
                 else if (globalUnrealized < targetPnl - microTolerance) {
                     let deficit = targetPnl - globalUnrealized;
                     let availableRealized = Math.max(0, globalRealized - retainRealized);
@@ -731,16 +825,16 @@ const executeGlobalProfitMonitor = async () => {
                     let losers = activeCandidates.filter(c => c.unrealizedPnl < 0).sort((a, b) => a.unrealizedPnl - b.unrealizedPnl);
                     let winners = activeCandidates.filter(c => c.unrealizedPnl > 0).sort((a, b) => b.unrealizedPnl - a.unrealizedPnl);
 
-                    // A. Calculate and CLOSE WINNERS to generate the cash to cover the deficit
+                    // Step 1: Harvest Winners to build budget
                     if (availableRealized < deficit && winners.length > 0) {
                         let shortfall = deficit - availableRealized;
-                        logForProfile(firstProfileId, `⚙️ BALANCER: Deficit ($${deficit.toFixed(2)}) > Cash. Closing winners to cover shortfall ($${shortfall.toFixed(2)})...`);
+                        logForProfile(firstProfileId, `⚙️ BALANCER: Deficit > Cash. Closing winners to cover shortfall ($${shortfall.toFixed(2)})...`);
 
                         for (let w of winners) {
                             if (shortfall <= microTolerance) break;
                             let winAmount = w.unrealizedPnl;
                             let closeFraction = winAmount > shortfall ? (shortfall / winAmount) : 1;
-                            let closeQty = Math.max(1, Math.floor(w.contracts * closeFraction));
+                            let closeQty = w.contracts * closeFraction; 
                             if (closeQty > w.contracts) closeQty = w.contracts;
 
                             let realizedFromThis = winAmount * (closeQty / w.contracts);
@@ -784,7 +878,7 @@ const executeGlobalProfitMonitor = async () => {
                         }
                     }
 
-                    // B. Close the LOSERS using the available realized cash to eliminate the deficit completely
+                    // Step 2: Burn Losers using available budget
                     let budget = Math.min(deficit, availableRealized);
 
                     if (budget >= microTolerance && losers.length > 0) {
@@ -794,7 +888,7 @@ const executeGlobalProfitMonitor = async () => {
                             if (budget <= microTolerance) break;
                             let lossAmount = Math.abs(l.unrealizedPnl);
                             let closeFraction = lossAmount > budget ? (budget / lossAmount) : 1;
-                            let closeQty = Math.max(1, Math.floor(l.contracts * closeFraction));
+                            let closeQty = l.contracts * closeFraction; 
                             if (closeQty > l.contracts) closeQty = l.contracts;
 
                             let lossRealized = -(lossAmount * (closeQty / l.contracts));
@@ -838,105 +932,9 @@ const executeGlobalProfitMonitor = async () => {
                     }
                 }
             }
-
-            // SMART OFFSET V1 (TP ONLY)
-            if (!offsetExecuted && smartOffsetNetProfit > 0 && activeCandidates.length >= 2) {
-                activeCandidates.sort((a, b) => b.unrealizedPnl - a.unrealizedPnl); 
-                
-                const totalCoins = activeCandidates.length;
-                const totalPairs = Math.floor(totalCoins / 2);
-
-                let runningAccumulation = 0;
-                let peakAccumulation = 0;
-                let peakRowIndex = -1;
-
-                for (let i = 0; i < totalPairs; i++) {
-                    const w = activeCandidates[i];
-                    const l = activeCandidates[totalCoins - totalPairs + i];
-                    const netResult = w.unrealizedPnl + l.unrealizedPnl;
-                    
-                    runningAccumulation += netResult;
-
-                    if (runningAccumulation > peakAccumulation) {
-                        peakAccumulation = runningAccumulation;
-                        peakRowIndex = i;
-                    }
-                }
-
-                let triggerOffset = false;
-                let reason = '';
-                let finalPairsToClose = [];
-
-                if (smartOffsetNetProfit > 0 && peakAccumulation >= targetV1 && peakAccumulation >= peakThreshold && peakRowIndex >= 0) {
-                    triggerOffset = true;
-                    reason = `Smart Offset V1`;
-                    for(let i = 0; i <= peakRowIndex; i++) {
-                        const w = activeCandidates[i];
-                        if (Math.abs(w.unrealizedPnl) <= winnerThreshold) continue; 
-                        finalPairsToClose.push(w); 
-                    }
-                    if (finalPairsToClose.length === 0) triggerOffset = false; 
-                } 
-
-                if (triggerOffset) {
-                    let actualPairsToClose = [];
-                    for (let k = 0; k < finalPairsToClose.length; k++) {
-                        const pos = finalPairsToClose[k];
-                        const bState = activeBots.get(pos.profileId).state.coinStates[pos.symbol];
-                        const livePnl = bState ? (parseFloat(bState.unrealizedPnl) || 0) : pos.unrealizedPnl;
-                        if (livePnl <= 0) continue; 
-                        actualPairsToClose.push(pos);
-                    }
-                    finalPairsToClose = actualPairsToClose;
-                    if (finalPairsToClose.length === 0) triggerOffset = false;
-
-                    if (triggerOffset) {
-                        logForProfile(firstProfileId, `⚖️ SMART OFFSET V1: Closing ${finalPairsToClose.length} WINNER coin(s).`);
-
-                        for (let k = 0; k < finalPairsToClose.length; k++) {
-                            const pos = finalPairsToClose[k];
-                            const bData = activeBots.get(pos.profileId);
-                            
-                            try {
-                                if (bData) {
-                                    if (!pos.isPaper) {
-                                        const closeSide = pos.side === 'long' ? 'sell' : 'buy';
-                                        await bData.exchange.createOrder(pos.symbol, 'market', closeSide, pos.contracts, undefined, { 
-                                            offset: 'close', reduceOnly: true, lever_rate: pos.actualLeverage 
-                                        });
-                                    } 
-
-                                    const bState = bData.state.coinStates[pos.symbol];
-                                    
-                                    if (bState) { 
-                                        await OffsetModel.create({
-                                            userId: dbUserId, symbol: pos.symbol, side: pos.side,
-                                            openPrice: bState.avgEntry, closePrice: bState.currentPrice, roi: bState.currentRoi,
-                                            netProfit: pos.unrealizedPnl, reason: 'Smart Offset V1'
-                                        });
-
-                                        bState.contracts = 0; bState.unrealizedPnl = 0; bState.avgEntry = 0; bState.dcaCount = 0; 
-                                        bState.lockUntil = Date.now() + 60000; 
-                                    }
-                                    
-                                    pos.subAccount.realizedPnl = (pos.subAccount.realizedPnl || 0) + pos.unrealizedPnl;
-                                    
-                                    await SettingsModel.updateOne(
-                                        { userId: dbUserId, "subAccounts._id": pos.subAccount._id }, 
-                                        { $inc: { "subAccounts.$.realizedPnl": pos.unrealizedPnl } }
-                                    );
-
-                                    offsetExecuted = true;
-                                }
-                            } catch (e) {
-                                logForProfile(firstProfileId, `❌ CLOSE ERROR [${pos.symbol}]: ${e.message}`);
-                            }
-                        }
-                    }
-                }
-            }
         }
     } catch (err) {
+        console.error("Global monitor error", err);
     } finally {
         global.isGlobalMonitoring = false; 
     }
