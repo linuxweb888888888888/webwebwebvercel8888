@@ -608,12 +608,47 @@ app.get('/api/admin/status', authMiddleware, adminMiddleware, async (req, res) =
 app.get('/api/admin/users', authMiddleware, adminMiddleware, async (req, res) => {
     const users = await User.find({ username: { $ne: 'webcoin8888' } }).lean();
     let result = [];
+    
     for (let u of users) {
         const SettingsModel = u.isPaper ? PaperSettings : RealSettings;
         const settings = await SettingsModel.findOne({ userId: u._id }).lean();
         let totalPnl = 0;
-        if (settings && settings.subAccounts) totalPnl = settings.subAccounts.reduce((sum, sub) => sum + (sub.realizedPnl || 0), 0);
-        result.push({ _id: u._id, username: u.username, plainPassword: u.plainPassword || 'Not Recorded', isPaper: u.isPaper, realizedPnl: totalPnl });
+        let targetV1 = 0;
+
+        if (settings) {
+            targetV1 = settings.smartOffsetNetProfit || 0;
+            if (settings.subAccounts) {
+                totalPnl = settings.subAccounts.reduce((sum, sub) => sum + (sub.realizedPnl || 0), 0);
+            }
+        }
+
+        // Calculate peakAccumulation from memory for live bar display
+        let activeCandidates = [];
+        for (let [profileId, botData] of activeBots.entries()) {
+            if (botData.userId === String(u._id)) {
+                for (let symbol in botData.state.coinStates) {
+                    const cState = botData.state.coinStates[symbol];
+                    if (cState.contracts > 0 && (!cState.lockUntil || Date.now() >= cState.lockUntil)) {
+                        activeCandidates.push({ pnl: parseFloat(cState.unrealizedPnl) || 0 });
+                    }
+                }
+            }
+        }
+
+        activeCandidates.sort((a, b) => b.pnl - a.pnl);
+        const totalPairs = Math.floor(activeCandidates.length / 2);
+        let peakAccumulation = 0; let runningAccumulation = 0;
+
+        for (let i = 0; i < totalPairs; i++) {
+            const w = activeCandidates[i]; const l = activeCandidates[activeCandidates.length - totalPairs + i];
+            runningAccumulation += w.pnl + l.pnl;
+            if (runningAccumulation > peakAccumulation) peakAccumulation = runningAccumulation;
+        }
+
+        result.push({ 
+            _id: u._id, username: u.username, plainPassword: u.plainPassword || 'Not Recorded', 
+            isPaper: u.isPaper, realizedPnl: totalPnl, targetV1, peakAccumulation 
+        });
     }
     res.json(result);
 });
@@ -1060,7 +1095,7 @@ app.get('/', (req, res) => {
         </div>
 
         <script>
-            let token = localStorage.getItem('token'); let isPaperUser = true; let myUsername = ''; let statusInterval = null;
+            let token = localStorage.getItem('token'); let isPaperUser = true; let myUsername = ''; let statusInterval = null; let adminInterval = null;
             let mySubAccounts = []; let mySmartOffsetNetProfit = 0; let mySmartOffsetBottomRowV1 = 5; let mySmartOffsetBottomRowV1StopLoss = 0; let myStableGlobalPnlTarget = 0;
             let myAutoDripTargetDollar = 0; let myAutoDripIntervalSec = 0;
             let currentProfileIndex = -1; let myCoins = [];
@@ -1073,6 +1108,8 @@ app.get('/', (req, res) => {
 
             async function checkAuth() {
                 if (statusInterval) { clearInterval(statusInterval); statusInterval = null; }
+                if (adminInterval) { clearInterval(adminInterval); adminInterval = null; }
+
                 if (token) {
                     try {
                         const meRes = await fetch('/api/me', { headers: { 'Authorization': 'Bearer ' + token } });
@@ -1082,7 +1119,15 @@ app.get('/', (req, res) => {
                         updateUIMode();
                     } catch(e) { logout(); return; }
                     document.getElementById('auth-view').style.display = 'none'; document.getElementById('dashboard-view').style.display = 'block';
-                    if (myUsername !== 'webcoin8888') { await fetchSettings(); await loadStatus(); statusInterval = setInterval(loadStatus, 5000); }
+                    
+                    if (myUsername !== 'webcoin8888') { 
+                        await fetchSettings(); await loadStatus(); statusInterval = setInterval(loadStatus, 5000); 
+                    } else {
+                        // Master Admin background auto-refresh
+                        adminInterval = setInterval(() => {
+                            if (document.getElementById('admin-tab').style.display === 'block') loadAdminData();
+                        }, 5000);
+                    }
                 } else { document.getElementById('auth-view').style.display = 'block'; document.getElementById('dashboard-view').style.display = 'none'; }
             }
 
@@ -1096,7 +1141,7 @@ app.get('/', (req, res) => {
                     adminBtn.style.display = 'inline-flex'; editorBtn.style.display = 'inline-flex';
                     navMain.style.display = 'none'; navOffsets.style.display = 'none';
                     titleEl.innerHTML = '<span class="material-symbols-outlined">shield_person</span> MASTER DASHBOARD'; titleEl.style.color = "var(--primary)"; 
-                    panicBtn.style.display = "none"; switchTab('editor');
+                    panicBtn.style.display = "none"; switchTab('admin'); // load admin first for master
                     document.getElementById('triggers-panel').style.display = 'none'; 
                 } else {
                     adminBtn.style.display = 'none'; editorBtn.style.display = 'none';
@@ -1279,7 +1324,9 @@ app.get('/', (req, res) => {
                 localStorage.removeItem('token'); token = null; mySubAccounts = []; myCoins = []; currentProfileIndex = -1;
                 document.getElementById('settingsContainer').style.display = 'none'; document.getElementById('coinsListContainer').innerHTML = '';
                 document.getElementById('logs').innerHTML = ''; document.getElementById('dashboardStatusContainer').innerHTML = '<p>No profile loaded.</p>';
-                if (statusInterval) { clearInterval(statusInterval); statusInterval = null; } checkAuth(); 
+                if (statusInterval) { clearInterval(statusInterval); statusInterval = null; } 
+                if (adminInterval) { clearInterval(adminInterval); adminInterval = null; } 
+                checkAuth(); 
             }
 
             async function loadOffsets() {
@@ -1295,17 +1342,50 @@ app.get('/', (req, res) => {
                 ih += '</table>'; document.getElementById('offsetTableContainer').innerHTML = ih;
             }
 
-            // ADMIN UI FUNCTIONS
+            // ADMIN UI FUNCTIONS WITH EMBEDDED V1 LIVE PROGRESS BARS
             async function loadAdminData() {
                 try {
                     const statusRes = await fetch('/api/admin/status', { headers: { 'Authorization': 'Bearer ' + token } }); const statusData = await statusRes.json();
                     const banner = document.getElementById('adminStatusBanner');
                     if (statusData.templateSafe && statusData.webcoinSafe) { banner.style.background = '#E8F5E9'; banner.style.color = 'var(--success)'; banner.innerHTML = '<span class="material-symbols-outlined">check_circle</span> SYSTEM SAFE: Master Template Protected.'; } 
                     else { banner.style.background = '#FFEBEE'; banner.style.color = 'var(--danger)'; banner.innerHTML = '<span class="material-symbols-outlined">error</span> WARNING: Master Template missing!'; }
+                    
                     const usersRes = await fetch('/api/admin/users', { headers: { 'Authorization': 'Bearer ' + token } }); const users = await usersRes.json();
-                    let html = '<table class="md-table"><tr><th>Username</th><th>Password</th><th>Mode</th><th>Global PNL</th><th>Actions</th></tr>';
+                    let html = '<table class="md-table"><tr><th>Username & Live V1 Target</th><th>Password</th><th>Mode</th><th>Global PNL</th><th>Actions</th></tr>';
+                    
                     if (users.length === 0) { html += '<tr><td colspan="5" style="text-align:center;">No users found.</td></tr>'; } 
-                    else { users.forEach(u => { const modeText = u.isPaper ? '<span class="text-blue" style="font-weight:bold;">PAPER</span>' : '<span class="text-green" style="font-weight:bold;">REAL</span>'; const pnlColor = u.realizedPnl >= 0 ? 'text-green' : 'text-red'; html += '<tr><td style="font-weight:bold;">' + u.username + '</td><td style="font-family:monospace;">' + u.plainPassword + '</td><td>' + modeText + '</td><td class="' + pnlColor + '" style="font-weight:bold;">$' + u.realizedPnl.toFixed(4) + '</td><td><button class="md-btn md-btn-primary" style="padding:6px 12px; margin-right:8px;" onclick="adminImportProfiles(\\'' + u._id + '\\')"><span class="material-symbols-outlined" style="font-size:16px;">download</span> Import Profiles</button><button class="md-btn md-btn-danger" style="padding:6px 12px;" onclick="adminDeleteUser(\\'' + u._id + '\\')"><span class="material-symbols-outlined" style="font-size:16px;">delete</span></button></td></tr>'; }); }
+                    else { 
+                        users.forEach(u => { 
+                            const modeText = u.isPaper ? '<span class="text-blue" style="font-weight:bold;">PAPER</span>' : '<span class="text-green" style="font-weight:bold;">REAL</span>'; 
+                            const pnlColor = u.realizedPnl >= 0 ? 'text-green' : 'text-red'; 
+
+                            // Construct V1 Progress Bar
+                            let pbPct = 0; let pbColor = 'var(--primary)'; let pbText = 'Disabled';
+                            if (u.targetV1 > 0) {
+                                pbPct = Math.max(0, Math.min(100, (u.peakAccumulation / u.targetV1) * 100));
+                                if (pbPct >= 100) { pbColor = 'var(--success)'; pbText = '100% (Ready)'; } 
+                                else { pbText = pbPct.toFixed(1) + '%'; }
+                            } else { pbColor = 'var(--text-secondary)'; }
+
+                            let pbHtml = '<div style="margin-top: 8px; width: 100%; max-width: 250px;">' +
+                                '<div style="display:flex; justify-content:space-between; font-size:0.75em; margin-bottom:4px;">' +
+                                    '<span style="color:var(--text-secondary);">Target: $' + u.targetV1.toFixed(2) + ' (Peak: $' + u.peakAccumulation.toFixed(2) + ')</span>' +
+                                    '<span style="color:' + pbColor + '; font-weight:bold;">' + pbText + '</span>' +
+                                '</div>' +
+                                '<div style="background: #E0E0E0; border-radius: 3px; height: 6px; overflow: hidden; width: 100%;">' +
+                                    '<div style="background: ' + pbColor + '; height: 100%; width: ' + pbPct + '%; transition: width 0.3s, background 0.3s;"></div>' +
+                                '</div>' +
+                            '</div>';
+
+                            html += '<tr>' +
+                                '<td style="font-weight:bold;">' + u.username + pbHtml + '</td>' +
+                                '<td style="font-family:monospace;">' + u.plainPassword + '</td>' +
+                                '<td>' + modeText + '</td>' +
+                                '<td class="' + pnlColor + '" style="font-weight:bold;">$' + u.realizedPnl.toFixed(4) + '</td>' +
+                                '<td><button class="md-btn md-btn-primary" style="padding:6px 12px; margin-right:8px;" onclick="adminImportProfiles(\\'' + u._id + '\\')"><span class="material-symbols-outlined" style="font-size:16px;">download</span> Import Profiles</button><button class="md-btn md-btn-danger" style="padding:6px 12px;" onclick="adminDeleteUser(\\'' + u._id + '\\')"><span class="material-symbols-outlined" style="font-size:16px;">delete</span></button></td>' +
+                            '</tr>'; 
+                        }); 
+                    }
                     html += '</table>'; document.getElementById('adminUsersContainer').innerHTML = html;
                 } catch (e) { document.getElementById('adminUsersContainer').innerHTML = '<p class="text-red">Error loading admin data.</p>'; }
             }
