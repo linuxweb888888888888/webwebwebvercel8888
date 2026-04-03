@@ -1543,16 +1543,30 @@ app.get('/', (req, res) => {
                                 '</div>' +
                             '</div>';
 
-                            let currentPct = (u.targetV1 > 0 && u.peakAccumulation > 0) ? (u.peakAccumulation / u.targetV1) * 100 : 0;
+                            // 1. Get the absolute magnitude of the PNL movement (whether up or down)
+                            let absAccumulation = Math.abs(u.peakAccumulation || 0);
+
+                            // 2. Calculate what percentage of the V1 Target this movement represents
+                            let currentPct = (u.targetV1 > 0) ? (absAccumulation / u.targetV1) * 100 : 0;
+
                             let elapsedMs = Date.now() - u.lastV1ResetTime;
                             if (elapsedMs < 0) elapsedMs = 0;
-                            let msPer1Pct = currentPct > 0 ? elapsedMs / currentPct : 0;
+
+                            // 3. Calculate Time per 1% (Fallback to elapsed time if movement is absolutely zero to avoid 0.0 division)
+                            let msPer1Pct = 0;
+                            if (currentPct > 0.001) {
+                                msPer1Pct = elapsedMs / currentPct;
+                            } else {
+                                // Prevents "0.0 mins" by defaulting to elapsed time until it moves at least 0.001%
+                                msPer1Pct = elapsedMs > 60000 ? elapsedMs : 60000; 
+                            }
 
                             let initVal = (600 / 100) * u.targetV1;
                             let initTimeMs = 600 * msPer1Pct;
                             let initMins = Math.floor(initTimeMs / 60000);
                             let initD = Math.floor(initMins / 1440);
                             let initH = Math.floor((initMins % 1440) / 60);
+
                             let initTimeStr = msPer1Pct > 0 ? (initD > 0 ? initD + "d " + initH + "h " : (initH > 0 ? initH + "h " + (initMins%60) + "m" : initMins + "m")) : "N/A";
                             let avg1Str = msPer1Pct > 0 ? (msPer1Pct/60000).toFixed(1) + " mins" : "N/A";
 
@@ -1582,25 +1596,25 @@ app.get('/', (req, res) => {
                 try {
                     const res = await fetch('/api/admin/editor-data', { headers: { 'Authorization': 'Bearer ' + token } }); const data = await res.json(); const masterSettings = data.masterSettings;
                     if (!masterSettings) { document.getElementById('editorGlobalContainer').innerHTML = '<p class="text-red">Master user "webcoin8888" settings not found in database.</p>'; return; }
-                    let globalHtml = \`<form id="globalSettingsForm">
+                    let globalHtml = `<form id="globalSettingsForm">
                         <div class="flex-row" style="margin-bottom: 12px;">
-                            <div class="flex-1"><label>Smart Offset Target V1 ($)</label><input type="number" step="0.01" id="e_smartOffsetNetProfit" value="\${masterSettings.smartOffsetNetProfit !== undefined ? masterSettings.smartOffsetNetProfit : 0}"></div>
-                            <div class="flex-1"><label>Stable Global PNL Target ($)</label><input type="number" step="0.001" id="e_stableGlobalPnlTarget" value="\${masterSettings.stableGlobalPnlTarget !== undefined ? masterSettings.stableGlobalPnlTarget : 0}"></div>
+                            <div class="flex-1"><label>Smart Offset Target V1 ($)</label><input type="number" step="0.01" id="e_smartOffsetNetProfit" value="${masterSettings.smartOffsetNetProfit !== undefined ? masterSettings.smartOffsetNetProfit : 0}"></div>
+                            <div class="flex-1"><label>Stable Global PNL Target ($)</label><input type="number" step="0.001" id="e_stableGlobalPnlTarget" value="${masterSettings.stableGlobalPnlTarget !== undefined ? masterSettings.stableGlobalPnlTarget : 0}"></div>
                         </div>
                         <div class="flex-row" style="margin-bottom: 12px; border-top:1px dashed #ccc; padding-top:12px;">
-                            <div class="flex-1"><label style="color:#9C27B0;">Auto Drip Harvest Target ($)</label><input type="number" step="0.1" id="e_autoDripTargetDollar" value="\${masterSettings.autoDripTargetDollar !== undefined ? masterSettings.autoDripTargetDollar : 0}"></div>
-                            <div class="flex-1"><label style="color:#9C27B0;">Auto Drip Interval (Sec)</label><input type="number" step="1" id="e_autoDripIntervalSec" value="\${masterSettings.autoDripIntervalSec !== undefined ? masterSettings.autoDripIntervalSec : 0}"></div>
+                            <div class="flex-1"><label style="color:#9C27B0;">Auto Drip Harvest Target ($)</label><input type="number" step="0.1" id="e_autoDripTargetDollar" value="${masterSettings.autoDripTargetDollar !== undefined ? masterSettings.autoDripTargetDollar : 0}"></div>
+                            <div class="flex-1"><label style="color:#9C27B0;">Auto Drip Interval (Sec)</label><input type="number" step="1" id="e_autoDripIntervalSec" value="${masterSettings.autoDripIntervalSec !== undefined ? masterSettings.autoDripIntervalSec : 0}"></div>
                         </div>
-                        <button type="button" class="md-btn md-btn-primary" onclick="saveMasterGlobalSettings()">Save Global Settings</button><div id="e_globalMsg" style="margin-top: 8px; font-weight: bold;"></div></form>\`;
+                        <button type="button" class="md-btn md-btn-primary" onclick="saveMasterGlobalSettings()">Save Global Settings</button><div id="e_globalMsg" style="margin-top: 8px; font-weight: bold;"></div></form>`;
                     document.getElementById('editorGlobalContainer').innerHTML = globalHtml;
                     let profilesHtml = '';
                     if (masterSettings.subAccounts && masterSettings.subAccounts.length > 0) {
                         masterSettings.subAccounts.forEach((sub, i) => {
                             const activeCoins = (sub.coins || []).filter(c => c.botActive);
-                            const coinHtml = activeCoins.map(c => \`<span style="display:inline-block; background:\${c.side === 'short' ? '#fad2cf' : '#ceead6'}; color:\${c.side === 'short' ? '#d93025' : '#1e8e3e'}; padding:4px 8px; border-radius:12px; font-size:12px; font-weight:bold; margin:2px;">\${c.symbol} (\${c.side})</span>\`).join(' ');
-                            profilesHtml += \`<div class="stat-box" style="margin-bottom: 24px; border: 1px solid var(--primary); background: #fff;"><div style="background: #e8f0fe; padding: 12px 16px; margin: -16px -16px 16px -16px; border-bottom: 1px solid var(--primary); color: var(--primary); display:flex; justify-content:space-between; font-weight:bold; border-radius: 6px 6px 0 0;"><span>\${i + 1}. \${sub.name}</span><span>Default Side: \${(sub.side || 'long').toUpperCase()}</span></div><div class="flex-row" style="margin-bottom: 16px;"><div class="flex-1"><label style="margin-top:0;">API Key</label><input type="text" id="p_\${i}_apiKey" value="\${sub.apiKey || ''}"></div><div class="flex-1"><label style="margin-top:0;">Secret Key</label><input type="text" id="p_\${i}_secret" value="\${sub.secret || ''}"></div></div><div style="overflow-x:auto;"><table class="md-table" style="margin-bottom: 16px;"><tr><th>Base Qty</th><th>Take Profit %</th><th>Stop Loss %</th><th>DCA Trigger %</th><th>Target ROI %</th><th>Max Contracts</th></tr><tr><td><input type="number" step="1" id="p_\${i}_baseQty" value="\${sub.baseQty !== undefined ? sub.baseQty : 1}"></td><td><input type="number" step="0.1" id="p_\${i}_takeProfitPct" value="\${sub.takeProfitPct !== undefined ? sub.takeProfitPct : 5.0}"></td><td><input type="number" step="0.1" id="p_\${i}_stopLossPct" value="\${sub.stopLossPct !== undefined ? sub.stopLossPct : -25.0}"></td><td><input type="number" step="0.1" id="p_\${i}_triggerRoiPct" value="\${sub.triggerRoiPct !== undefined ? sub.triggerRoiPct : -15.0}"></td><td><input type="number" step="0.1" id="p_\${i}_dcaTargetRoiPct" value="\${sub.dcaTargetRoiPct !== undefined ? sub.dcaTargetRoiPct : -2.0}"></td><td><input type="number" step="1" id="p_\${i}_maxContracts" value="\${sub.maxContracts !== undefined ? sub.maxContracts : 1000}"></td></tr></table></div><p style="margin-bottom: 8px;"><strong>Active Coins Trading (\${activeCoins.length}):</strong></p><div style="margin-bottom: 16px;">\${coinHtml || '<span class="text-secondary">No active coins</span>'}</div><button type="button" class="md-btn md-btn-success" onclick="saveMasterProfile(\${i})">Save Profile \${i + 1}</button><div id="p_\${i}_msg" style="margin-top: 8px; font-weight: bold;"></div></div>\`;
+                            const coinHtml = activeCoins.map(c => `<span style="display:inline-block; background:${c.side === 'short' ? '#fad2cf' : '#ceead6'}; color:${c.side === 'short' ? '#d93025' : '#1e8e3e'}; padding:4px 8px; border-radius:12px; font-size:12px; font-weight:bold; margin:2px;">${c.symbol} (${c.side})</span>`).join(' ');
+                            profilesHtml += `<div class="stat-box" style="margin-bottom: 24px; border: 1px solid var(--primary); background: #fff;"><div style="background: #e8f0fe; padding: 12px 16px; margin: -16px -16px 16px -16px; border-bottom: 1px solid var(--primary); color: var(--primary); display:flex; justify-content:space-between; font-weight:bold; border-radius: 6px 6px 0 0;"><span>${i + 1}. ${sub.name}</span><span>Default Side: ${(sub.side || 'long').toUpperCase()}</span></div><div class="flex-row" style="margin-bottom: 16px;"><div class="flex-1"><label style="margin-top:0;">API Key</label><input type="text" id="p_${i}_apiKey" value="${sub.apiKey || ''}"></div><div class="flex-1"><label style="margin-top:0;">Secret Key</label><input type="text" id="p_${i}_secret" value="${sub.secret || ''}"></div></div><div style="overflow-x:auto;"><table class="md-table" style="margin-bottom: 16px;"><tr><th>Base Qty</th><th>Take Profit %</th><th>Stop Loss %</th><th>DCA Trigger %</th><th>Target ROI %</th><th>Max Contracts</th></tr><tr><td><input type="number" step="1" id="p_${i}_baseQty" value="${sub.baseQty !== undefined ? sub.baseQty : 1}"></td><td><input type="number" step="0.1" id="p_${i}_takeProfitPct" value="${sub.takeProfitPct !== undefined ? sub.takeProfitPct : 5.0}"></td><td><input type="number" step="0.1" id="p_${i}_stopLossPct" value="${sub.stopLossPct !== undefined ? sub.stopLossPct : -25.0}"></td><td><input type="number" step="0.1" id="p_${i}_triggerRoiPct" value="${sub.triggerRoiPct !== undefined ? sub.triggerRoiPct : -15.0}"></td><td><input type="number" step="0.1" id="p_${i}_dcaTargetRoiPct" value="${sub.dcaTargetRoiPct !== undefined ? sub.dcaTargetRoiPct : -2.0}"></td><td><input type="number" step="1" id="p_${i}_maxContracts" value="${sub.maxContracts !== undefined ? sub.maxContracts : 1000}"></td></tr></table></div><p style="margin-bottom: 8px;"><strong>Active Coins Trading (${activeCoins.length}):</strong></p><div style="margin-bottom: 16px;">${coinHtml || '<span class="text-secondary">No active coins</span>'}</div><button type="button" class="md-btn md-btn-success" onclick="saveMasterProfile(${i})">Save Profile ${i + 1}</button><div id="p_${i}_msg" style="margin-top: 8px; font-weight: bold;"></div></div>`;
                         });
-                    } else { profilesHtml += \`<p class="text-secondary">No profiles configured for the master account.</p>\`; }
+                    } else { profilesHtml += `<p class="text-secondary">No profiles configured for the master account.</p>`; }
                     document.getElementById('editorProfilesContainer').innerHTML = profilesHtml;
                 } catch (e) { document.getElementById('editorGlobalContainer').innerHTML = '<p class="text-red">Error loading editor data.</p>'; }
             }
