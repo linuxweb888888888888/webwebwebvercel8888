@@ -3,7 +3,6 @@ const ccxt = require('ccxt');
 const mongoose = require('mongoose');
 const jwt = require('jsonwebtoken');
 const path = require('path');
-const https = require('https');
 
 // Safe Bcrypt Fallback for Vercel
 let bcrypt;
@@ -17,10 +16,7 @@ const PORT = process.env.PORT || 3000;
 const JWT_SECRET = process.env.JWT_SECRET || 'super_secret_jwt_key_change_this_in_production';
 
 // DATABASE URL
-const MONGO_URI = process.env.MONGO_URI || 'mongodb+srv://web88888888888888_db_user:ZETrZHXzaxoekjkm@clusterweb8888.l0rv6hv.mongodb.net/botdb?appName=Clusterweb8888';
-
-// NEW MASTER COIN LIST (54 Coins)
-const PREDEFINED_COINS = ["OP", "BIGTIME", "MOVE", "SSV", "COAI", "TIA", "MERL", "MASK", "PYTH", "ETHFI", "CFX", "MEME", "LUNA", "STEEM", "BERA", "2Z", "FIL", "APT", "1INCH", "ARB", "XPL", "ENA", "MMT", "AXS", "TON", "CAKE", "BSV", "JUP", "WIF", "LIGHT", "PI", "SUSHI", "LPT", "CRV", "TAO", "ORDI", "YFI", "LA", "ICP", "FTT", "GIGGLE", "LDO", "OPN", "INJ", "SNX", "DASH", "WLD", "KAITO", "TRUMP", "WAVES", "ZEN", "ENS", "ASTER", "VIRTUAL"];
+const MONGO_URI = 'mongodb+srv://web88888888888888_db_user:ZETrZHXzaxoekjkm@clusterweb8888.l0rv6hv.mongodb.net/botdb?appName=Clusterweb8888';
 
 // ==========================================
 // 1. MONGODB DATABASE SETUP
@@ -73,11 +69,9 @@ const SubAccountSchema = new mongoose.Schema({
     leverage: { type: Number, default: 10 },
     baseQty: { type: Number, default: 1 },
     takeProfitPct: { type: Number, default: 5.0 },
-    takeProfitPnl: { type: Number, default: 0 },
     stopLossPct: { type: Number, default: -25.0 },
     triggerRoiPct: { type: Number, default: -15.0 },
     dcaTargetRoiPct: { type: Number, default: -2.0 },
-    triggerDcaPnl: { type: Number, default: -2.0 }, 
     maxContracts: { type: Number, default: 1000 },
     realizedPnl: { type: Number, default: 0 },
     coins: [CoinSettingSchema]
@@ -85,32 +79,42 @@ const SubAccountSchema = new mongoose.Schema({
 
 const SettingsSchema = new mongoose.Schema({
     userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, unique: true },
-    qtyMultiplier: { type: Number, default: 1 },
-    globalSingleCoinTpPnl: { type: Number, default: 0 }, 
+    globalTargetPnl: { type: Number, default: 0 },       
+    globalTrailingPnl: { type: Number, default: 0 },     
     smartOffsetNetProfit: { type: Number, default: 0 },
-    
-    autoBalanceEquity: { type: Boolean, default: false },
-    autoBalanceUnrealizedPnlTarget: { type: Number, default: 0 },
-    autoBalanceRetainRealized: { type: Number, default: 0 },
-    
+    smartOffsetBottomRowV1: { type: Number, default: 5 }, 
+    smartOffsetBottomRowV1StopLoss: { type: Number, default: 0 }, 
+    smartOffsetStopLoss: { type: Number, default: 0 }, 
+    smartOffsetNetProfit2: { type: Number, default: 0 }, 
+    smartOffsetStopLoss2: { type: Number, default: 0 }, 
+    smartOffsetMaxLossPerMinute: { type: Number, default: 0 }, 
+    smartOffsetMaxLossTimeframeSeconds: { type: Number, default: 60 },
+    minuteCloseAutoDynamic: { type: Boolean, default: false },
+    minuteCloseTpMinPnl: { type: Number, default: 0 }, 
+    minuteCloseTpMaxPnl: { type: Number, default: 0 },
+    minuteCloseSlMinPnl: { type: Number, default: 0 }, 
+    minuteCloseSlMaxPnl: { type: Number, default: 0 },
+    noPeakSlTimeframeSeconds: { type: Number, default: 1800 }, // <--- CHANGED TO SECONDS (1800s = 30m)
+    noPeakSlGatePnl: { type: Number, default: 0 }, 
     subAccounts: [SubAccountSchema],
-
-    cyclePauseEnabled: { type: Boolean, default: false },
-    cyclePauseMinutes: { type: Number, default: 0 },
-    cycleResumeMinutes: { type: Number, default: 0 },
-    cycleCurrentState: { type: String, default: 'active' }, 
-    cycleNextSwitchTime: { type: Number, default: 0 }
+    
+    currentGlobalPeak: { type: Number, default: 0 },
+    lastStopLossTime: { type: Number, default: 0 },
+    lastNoPeakSlTime: { type: Number, default: 0 },
+    rollingStopLosses: { type: Array, default: [] },
+    autoDynamicLastExecution: { type: Object, default: null }
 });
 
+// UNIVERSAL HISTORY SCHEMA
 const OffsetRecordSchema = new mongoose.Schema({
     userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
     symbol: { type: String }, 
-    side: { type: String },
-    openPrice: { type: Number },
-    closePrice: { type: Number },
-    roi: { type: Number },
+    reason: { type: String }, 
+    winnerSymbol: { type: String },
+    winnerPnl: { type: Number },
+    loserSymbol: { type: String },
+    loserPnl: { type: Number },
     netProfit: { type: Number, required: true },
-    reason: { type: String },
     timestamp: { type: Date, default: Date.now }
 });
 
@@ -127,6 +131,7 @@ const MainTemplateSchema = new mongoose.Schema({
     settings: { type: Object, required: true }
 });
 
+// MULTI-MODE DB COLLECTIONS
 const RealSettings = mongoose.models.Settings || mongoose.model('Settings', SettingsSchema, 'settings');
 const PaperSettings = mongoose.models.PaperSettings || mongoose.model('PaperSettings', SettingsSchema, 'paper_settings');
 const RealOffsetRecord = mongoose.models.OffsetRecord || mongoose.model('OffsetRecord', OffsetRecordSchema, 'offset_records');
@@ -136,103 +141,13 @@ const PaperProfileState = mongoose.models.PaperProfileState || mongoose.model('P
 const MainTemplate = mongoose.models.MainTemplate || mongoose.model('MainTemplate', MainTemplateSchema, 'main_settings_template');
 
 // ==========================================
-// GLOBAL MARKET CACHE & ORACLES
-// ==========================================
-global.customMaxLeverages = {};
-global.marketSizes = {};
-global.livePrices = global.livePrices || {};
-let isBinanceFetching = false;
-let isHtxFetching = false;
-
-const binanceOracle = new ccxt.binance({ options: { defaultType: 'swap' }, enableRateLimit: true, timeout: 20000 });
-const htxOracle = new ccxt.htx({ options: { defaultType: 'swap' }, enableRateLimit: true, timeout: 30000 });
-
-function fetchGlobalMarketsPromise() {
-    return new Promise(async (resolve) => {
-        try {
-            const markets = await htxOracle.fetchMarkets();
-            if(markets && markets.length > 0) {
-                markets.forEach(m => {
-                    if (m.symbol && m.contractSize) global.marketSizes[m.symbol] = m.contractSize;
-                });
-            }
-        } catch(e) { }
-        resolve();
-    });
-}
-
-function fetchCustomMaxLeveragesPromise() {
-    return new Promise((resolve) => {
-        const req = https.get('https://api.hbdm.com/linear-swap-api/v1/swap_cross_adjustfactor', (res) => {
-            let body = '';
-            res.on('data', chunk => body += chunk);
-            res.on('end', () => {
-                try {
-                    const parsed = JSON.parse(body);
-                    if (parsed && parsed.data) {
-                        parsed.data.forEach(item => {
-                            const symbol = item.contract_code.replace('-', '/') + ':USDT';
-                            let maxL = 1;
-                            if (item.list && item.list.length > 0) {
-                                item.list.forEach(tier => {
-                                    if (tier.lever_rate && tier.lever_rate > maxL) maxL = tier.lever_rate;
-                                });
-                            }
-                            global.customMaxLeverages[symbol] = maxL;
-                        });
-                    }
-                } catch (e) { }
-                resolve();
-            });
-        });
-        req.on('error', () => resolve());
-        req.setTimeout(10000, () => { req.destroy(); resolve(); });
-    });
-}
-
-function getLeverageForCoin(symbol) {
-    if (global.customMaxLeverages && global.customMaxLeverages[symbol]) return global.customMaxLeverages[symbol];
-    if (symbol.includes('BTC')) return 125;
-    if (symbol.includes('ETH')) return 100;
-    return 20; 
-}
-
-function startPriceOracle() {
-    setInterval(async () => {
-        if (isBinanceFetching) return;
-        isBinanceFetching = true;
-        try {
-            const tickers = await binanceOracle.fetchTickers();
-            for (let sym in tickers) { 
-                if (tickers[sym] && tickers[sym].last) global.livePrices[sym] = tickers[sym].last;
-            }
-        } catch(e) { } finally { isBinanceFetching = false; }
-    }, 3000);
-
-    setInterval(async () => {
-        if (isHtxFetching) return;
-        isHtxFetching = true;
-        try {
-            const tickers = await htxOracle.fetchTickers();
-            for (let sym in tickers) { 
-                if (tickers[sym] && tickers[sym].last) global.livePrices[sym] = tickers[sym].last;
-            }
-        } catch(e) { } finally { isHtxFetching = false; }
-    }, 5000);
-
-    setInterval(() => {
-        fetchCustomMaxLeveragesPromise();
-        fetchGlobalMarketsPromise();
-    }, 3600000); 
-}
-
-// ==========================================
 // 3. MULTI-MODE BOT ENGINE STATE
 // ==========================================
 global.activeBots = global.activeBots || new Map();
 const activeBots = global.activeBots;
 
 function logForProfile(profileId, msg) {
+    console.log(`[Profile: ${profileId}] ${msg}`);
     const bot = activeBots.get(profileId);
     if (bot) {
         bot.state.logs.unshift(`${new Date().toLocaleTimeString()} - ${msg}`);
@@ -240,13 +155,26 @@ function logForProfile(profileId, msg) {
     }
 }
 
-function calculateDcaQtyToHalveGap(currentContracts) {
-    return currentContracts > 0 ? currentContracts : 1;
+function calculateDcaQty(side, P0, Pc, C0, leverage, targetRoiPct) {
+    const R = targetRoiPct / 100;
+    let Pnew, Cn;
+    if (side === 'long') {
+        Pnew = Pc / (1 + (R / leverage));
+        Cn = C0 * (P0 - Pnew) / (Pnew - Pc);
+    } else {
+        Pnew = Pc / (1 - (R / leverage));
+        Cn = C0 * (Pnew - P0) / (Pc - Pnew);
+    }
+    if (Cn <= 0 || isNaN(Cn) || !isFinite(Cn)) return 0;
+    return Math.ceil(Cn); 
 }
 
 async function startBot(userId, subAccount, isPaper) {
     const userDoc = await User.findById(userId);
-    if (userDoc && userDoc.username === 'webcoin8888') return;
+    if (userDoc && userDoc.username === 'webcoin8888') {
+        console.log(`[Profile: ${subAccount._id}] 🛑 Engine Disabled: Master account (webcoin8888) is for database template editing only.`);
+        return;
+    }
 
     const profileId = subAccount._id.toString();
     if (activeBots.has(profileId)) stopBot(profileId);
@@ -257,8 +185,7 @@ async function startBot(userId, subAccount, isPaper) {
         apiKey: subAccount.apiKey, 
         secret: subAccount.secret, 
         options: { defaultType: 'swap' },
-        enableRateLimit: true,
-        timeout: 30000 
+        enableRateLimit: true 
     });
     
     const ProfileStateModel = isPaper ? PaperProfileState : RealProfileState;
@@ -269,7 +196,6 @@ async function startBot(userId, subAccount, isPaper) {
         dbState = await ProfileStateModel.create({ profileId, userId, logs: [], coinStates: {} });
     }
     
-    const globalSettings = await SettingsModel.findOne({ userId });
     const state = { logs: dbState.logs || [], coinStates: dbState.coinStates || {} };
     let isProcessing = false;
     let lastError = '';
@@ -280,94 +206,61 @@ async function startBot(userId, subAccount, isPaper) {
 
         const botData = activeBots.get(profileId);
         if (!botData) { isProcessing = false; return; }
-
-        if (botData.globalSettings?.cyclePauseEnabled && botData.globalSettings?.cycleCurrentState === 'paused') {
-            isProcessing = false; 
-            return; 
-        }
         
         const currentSettings = botData.settings;
-        let forcedStart = false;
-        currentSettings.coins.forEach(c => {
-            if (!c.botActive) { c.botActive = true; forcedStart = true; }
-        });
-        
-        if (forcedStart) {
-            SettingsModel.updateOne({ "subAccounts._id": currentSettings._id }, { $set: { "subAccounts.$.coins": currentSettings.coins } }).catch(()=>{});
-        }
-        
-        const activeCoins = currentSettings.coins;
+        const activeCoins = currentSettings.coins.filter(c => c.botActive);
+
         if (activeCoins.length === 0) { isProcessing = false; return; }
 
         try {
+            if (!exchange.markets) await exchange.loadMarkets().catch(()=>{});
+            const symbolsToFetch = activeCoins.map(c => c.symbol);
+            
             let positions = [];
+            let allTickers = {};
+
             if (!isPaper) {
-                positions = await exchange.fetchPositions().catch(e => { throw new Error('Positions: ' + e.message); });
+                const [fetchedPos, fetchedTick] = await Promise.all([
+                    exchange.fetchPositions(symbolsToFetch).catch(e => { throw new Error('Positions: ' + e.message); }),
+                    exchange.fetchTickers(symbolsToFetch).catch(e => { throw new Error('Tickers: ' + e.message); })
+                ]);
+                positions = fetchedPos;
+                allTickers = fetchedTick;
+            } else {
+                allTickers = await exchange.fetchTickers(symbolsToFetch).catch(e => { throw new Error('Tickers: ' + e.message); });
             }
 
             for (let coin of activeCoins) {
                 try {
-                    const activeLeverage = getLeverageForCoin(coin.symbol);
-                    
+                    const activeLeverage = 10;
+                    const activeSide = coin.side || currentSettings.side;
+                    const market = exchange.markets[coin.symbol];
+                    const contractSize = (market && market.contractSize) ? market.contractSize : 1;
+
                     if (!state.coinStates[coin.symbol]) {
-                        state.coinStates[coin.symbol] = { status: 'Running', currentPrice: 0, avgEntry: 0, contracts: 0, currentRoi: 0, unrealizedPnl: 0, margin: 0, lastDcaTime: 0, lockUntil: 0, dcaCount: 0 };
+                        state.coinStates[coin.symbol] = { status: 'Running', currentPrice: 0, avgEntry: 0, contracts: 0, currentRoi: 0, unrealizedPnl: 0, margin: 0, lastDcaTime: 0, lockUntil: 0 };
                     }
 
                     let cState = state.coinStates[coin.symbol];
                     if (cState.lockUntil && Date.now() < cState.lockUntil) continue;
-
-                    let activeSide = coin.side || currentSettings.side || 'long';
-                    if (cState.contracts <= 0) {
-                        let activeLongs = 0;
-                        let activeShorts = 0;
-                        for (let sym in state.coinStates) {
-                            const st = state.coinStates[sym];
-                            if (st.contracts > 0) {
-                                if (st.activeSide === 'long') activeLongs++;
-                                if (st.activeSide === 'short') activeShorts++;
-                            }
-                        }
-                        if (activeLongs > activeShorts) activeSide = 'short';
-                        else if (activeShorts > activeLongs) activeSide = 'long';
-                        else activeSide = coin.side || currentSettings.side || 'long';
-                    } else {
-                        activeSide = cState.activeSide || activeSide;
-                    }
                     
-                    const currentPrice = global.livePrices[coin.symbol];
-                    if (!currentPrice) continue; 
+                    const ticker = allTickers[coin.symbol];
+                    if (!ticker || !ticker.last) continue; 
                     
-                    cState.currentPrice = currentPrice;
+                    cState.currentPrice = ticker.last;
                     cState.activeSide = activeSide;
 
-                    let contractSize = 1;
-                    if (global.marketSizes && global.marketSizes[coin.symbol]) {
-                        contractSize = global.marketSizes[coin.symbol];
-                    } else if (exchange.markets && exchange.markets[coin.symbol]) {
-                        contractSize = exchange.markets[coin.symbol].contractSize || 1;
-                    }
-
-                    const ESTIMATED_FEE_RATE = 0.0004; 
+                    const ESTIMATED_FEE_RATE = 0.001; 
 
                     if (!isPaper) {
-                        const leveragePos = positions.find(p => p.symbol === coin.symbol);
-                        let liveLeverage = activeLeverage;
-                        if (leveragePos) {
-                            if (leveragePos.info && leveragePos.info.lever_rate) liveLeverage = parseInt(leveragePos.info.lever_rate);
-                            else if (leveragePos.leverage) liveLeverage = parseInt(leveragePos.leverage);
-                        }
-                        cState.actualLeverage = liveLeverage;
-
-                        const pos = positions.find(p => p.symbol === coin.symbol && p.side === activeSide && parseFloat(p.contracts || p.info?.volume || 0) > 0);
-
-                        cState.contracts = pos ? parseFloat(pos.contracts || pos.info?.volume || 0) : 0;
-                        cState.avgEntry = pos ? parseFloat(pos.entryPrice || 0) : 0;
-                        if (cState.contracts === 0) cState.dcaCount = 0; 
+                        const pos = positions.find(p => p.symbol === coin.symbol && p.side === activeSide);
+                        cState.contracts = pos ? pos.contracts : 0;
+                        cState.avgEntry = pos ? pos.entryPrice : 0;
                         
                         let grossPnl = 0;
                         if (pos) {
                             if (pos.unrealizedPnl !== undefined && pos.unrealizedPnl !== null) {
-                                grossPnl = parseFloat(pos.unrealizedPnl);
+                                grossPnl = pos.unrealizedPnl;
                             } else {
                                 grossPnl = (activeSide === 'long') 
                                     ? (cState.currentPrice - cState.avgEntry) * cState.contracts * contractSize 
@@ -377,15 +270,12 @@ async function startBot(userId, subAccount, isPaper) {
 
                         const positionValue = cState.contracts * contractSize * cState.currentPrice;
                         const estimatedFee = positionValue * ESTIMATED_FEE_RATE;
-                        cState.unrealizedPnl = cState.contracts > 0 ? (grossPnl - estimatedFee) : 0;
-                        cState.margin = pos ? (parseFloat(pos.initialMargin) || parseFloat(pos.collateral) || 0) : 0;
-                        if (cState.margin === 0 && cState.contracts > 0) cState.margin = (cState.contracts * contractSize * cState.avgEntry) / cState.actualLeverage;
 
+                        cState.unrealizedPnl = cState.contracts > 0 ? (grossPnl - estimatedFee) : 0;
+                        cState.margin = pos ? (pos.initialMargin || pos.cost || 0) : 0;
                         cState.currentRoi = (cState.margin > 0 && cState.contracts > 0) ? (cState.unrealizedPnl / cState.margin) * 100 : 0; 
                         cState.status = cState.contracts > 0 ? 'In Position' : 'Waiting to Enter';
                     } else {
-                        cState.actualLeverage = activeLeverage;
-                        if (cState.contracts === 0) cState.dcaCount = 0; 
                         cState.status = cState.contracts > 0 ? 'In Position' : 'Waiting to Enter';
                         if (cState.contracts > 0) {
                             let margin = (cState.avgEntry * cState.contracts * contractSize) / activeLeverage;
@@ -409,9 +299,12 @@ async function startBot(userId, subAccount, isPaper) {
                     // 1. OPEN BASE POSITION
                     if (cState.contracts <= 0) {
                         const safeBaseQty = Math.max(1, Math.floor(currentSettings.baseQty));
+                        const modeTxt = isPaper ? "PAPER" : "REAL";
+                        logForProfile(profileId, `[${modeTxt}] 🛒 Opening base position of ${safeBaseQty} contracts (${activeSide}) at ~${cState.currentPrice}.`);
+                        
                         if (!isPaper) {
                             const orderSide = activeSide === 'long' ? 'buy' : 'sell';
-                            await exchange.createOrder(coin.symbol, 'market', orderSide, safeBaseQty, undefined, { offset: 'open', lever_rate: cState.actualLeverage });
+                            await exchange.createOrder(coin.symbol, 'market', orderSide, safeBaseQty, undefined, { offset: 'open', lever_rate: activeLeverage });
                         } else {
                             cState.avgEntry = cState.currentPrice; 
                             cState.contracts = safeBaseQty; 
@@ -419,110 +312,88 @@ async function startBot(userId, subAccount, isPaper) {
                             cState.unrealizedPnl = 0; 
                             cState.margin = (cState.avgEntry * cState.contracts * contractSize) / activeLeverage;
                         }
-                        cState.lockUntil = Date.now() + 15000; 
+
+                        // PRECISE EXCHANGE LOG: Opening Position
+                        const OffsetModel = isPaper ? PaperOffsetRecord : RealOffsetRecord;
+                        OffsetModel.create({
+                            userId: userId,
+                            symbol: coin.symbol,
+                            winnerSymbol: coin.symbol, 
+                            reason: `Open Base Position (${safeBaseQty} contracts)`,
+                            netProfit: 0
+                        }).catch(()=>{});
+                        
+                        cState.lockUntil = Date.now() + 5000; 
                         continue; 
                     }
 
                     // 2. TAKE PROFIT OR STOP LOSS
-                    let isTakeProfit = false;
-                    let tpReasonTxt = '';
-                    let isStopLoss = false;
-                    let slReasonTxt = '';
-                    
-                    const globalTpPnlTarget = parseFloat(botData.globalSettings?.globalSingleCoinTpPnl) || 0;
-                    const profileTpPnlTarget = parseFloat(currentSettings.takeProfitPnl) || 0;
-                    const tpPnlTarget = globalTpPnlTarget > 0 ? globalTpPnlTarget : profileTpPnlTarget;
-                    
-                    const tpPctTarget = parseFloat(currentSettings.takeProfitPct) || 0;
-                    const currentPnl = parseFloat(cState.unrealizedPnl) || 0;
-                    const currentRoi = parseFloat(cState.currentRoi) || 0;
-                    const slPctTarget = parseFloat(currentSettings.stopLossPct) || -25.0;
-
-                    if (tpPnlTarget > 0 && currentPnl >= tpPnlTarget) {
-                        isTakeProfit = true;
-                        tpReasonTxt = `Take Profit ($${tpPnlTarget.toFixed(2)})`;
-                    } else if (tpPctTarget > 0 && currentRoi >= tpPctTarget) {
-                        isTakeProfit = true;
-                        tpReasonTxt = `Take Profit (${tpPctTarget}%)`;
-                    }
-                    
-                    if (slPctTarget < 0 && currentRoi <= slPctTarget) {
-                        isStopLoss = true;
-                        slReasonTxt = `Stop Loss Hit (${slPctTarget}%)`;
-                    }
+                    const isTakeProfit = cState.currentRoi >= currentSettings.takeProfitPct;
+                    const isStopLoss = currentSettings.stopLossPct < 0 && cState.currentRoi <= currentSettings.stopLossPct;
 
                     if (isTakeProfit || isStopLoss) {
-                        const reasonTxt = isTakeProfit ? tpReasonTxt : slReasonTxt;
+                        const reasonTxt = isTakeProfit ? `Take Profit Hit (ROI >= ${currentSettings.takeProfitPct}%)` : `Stop Loss Hit (ROI <= ${currentSettings.stopLossPct}%)`;
                         const modeTxt = isPaper ? "PAPER" : "REAL";
+                        logForProfile(profileId, `[${modeTxt}] ${reasonTxt}. Closing ${cState.contracts} contracts.`);
                         
-                        try {
-                            if (!isPaper) {
-                                const closeSide = activeSide === 'long' ? 'sell' : 'buy';
-                                await exchange.createOrder(coin.symbol, 'market', closeSide, cState.contracts, undefined, { 
-                                    offset: 'close', reduceOnly: true, lever_rate: cState.actualLeverage 
-                                });
-                            }
-
-                            const OffsetModel = isPaper ? PaperOffsetRecord : RealOffsetRecord;
-                            await OffsetModel.create({ 
-                                userId: userId, 
-                                symbol: coin.symbol, 
-                                side: activeSide,
-                                openPrice: cState.avgEntry,
-                                closePrice: cState.currentPrice,
-                                roi: currentRoi,
-                                netProfit: currentPnl,
-                                reason: reasonTxt 
-                            });
-
-                            cState.lockUntil = Date.now() + 15000;
-                            cState.dcaCount = 0; 
-                            currentSettings.realizedPnl = (currentSettings.realizedPnl || 0) + currentPnl;
-                            
-                            if (isPaper) {
-                                cState.contracts = 0; cState.unrealizedPnl = 0; cState.currentRoi = 0; cState.avgEntry = 0;
-                            }
-
-                            // ATOMIC DB UPDATE
-                            await SettingsModel.updateOne(
-                                { userId: userId, "subAccounts._id": currentSettings._id }, 
-                                { $inc: { "subAccounts.$.realizedPnl": currentPnl } }
-                            );
-
-                            logForProfile(profileId, `[${modeTxt}] ⚡ ${coin.symbol} Closed: ${reasonTxt}. Profit: $${currentPnl.toFixed(2)}`);
-                            continue; 
-
-                        } catch (closeErr) {
-                            logForProfile(profileId, `[${modeTxt}] ❌ CLOSE ERROR [${coin.symbol}]: ${closeErr.message}`);
-                            continue;
+                        if (!isPaper) {
+                            const closeSide = activeSide === 'long' ? 'sell' : 'buy';
+                            await exchange.createOrder(coin.symbol, 'market', closeSide, cState.contracts, undefined, { offset: 'close' });
                         }
+
+                        cState.lockUntil = Date.now() + 5000;
+                        currentSettings.realizedPnl = (currentSettings.realizedPnl || 0) + cState.unrealizedPnl;
+                        
+                        // PRECISE EXCHANGE LOG: Close Position
+                        const OffsetModel = isPaper ? PaperOffsetRecord : RealOffsetRecord;
+                        OffsetModel.create({
+                            userId: userId,
+                            symbol: coin.symbol,
+                            winnerSymbol: coin.symbol,
+                            reason: reasonTxt,
+                            netProfit: cState.unrealizedPnl
+                        }).catch(()=>{});
+
+                        if (isPaper) {
+                            cState.contracts = 0; cState.unrealizedPnl = 0; cState.currentRoi = 0; cState.avgEntry = 0;
+                        }
+
+                        SettingsModel.updateOne({ "subAccounts._id": currentSettings._id }, { $set: { "subAccounts.$.realizedPnl": currentSettings.realizedPnl } }).catch(()=>{});
+                        continue; 
                     }
 
-                    // 3. DCA PNL STEP GRID TRIGGER
-                    const profileTriggerDcaTarget = parseFloat(currentSettings.triggerDcaPnl) || -2.0;
-                    const baseTriggerPnl = profileTriggerDcaTarget;
-                    const currentDcaStep = cState.dcaCount || 0;
-                    const activeTriggerPnl = baseTriggerPnl * Math.pow(2, currentDcaStep);
-
-                    if (baseTriggerPnl < 0 && cState.unrealizedPnl <= activeTriggerPnl && (Date.now() - (cState.lastDcaTime || 0) > 12000)) {
-                        
-                        const reqQty = calculateDcaQtyToHalveGap(cState.contracts);
+                    // 3. DCA TRIGGER
+                    if (cState.currentRoi <= currentSettings.triggerRoiPct && (Date.now() - (cState.lastDcaTime || 0) > 12000)) {
+                        const reqQty = calculateDcaQty(activeSide, cState.avgEntry, cState.currentPrice, cState.contracts, activeLeverage, currentSettings.dcaTargetRoiPct);
 
                         if (reqQty <= 0) {
                             cState.lastDcaTime = Date.now();
                         } else if ((cState.contracts + reqQty) > currentSettings.maxContracts) {
+                            logForProfile(profileId, `[${isPaper ? 'PAPER' : 'REAL'}] 🛡️ DCA Safety Triggered. Max contracts reached.`);
                             cState.lastDcaTime = Date.now(); 
                         } else {
+                            logForProfile(profileId, `[${isPaper ? 'PAPER' : 'REAL'}] ⚡ Executing DCA: Buying ${reqQty} contracts at ~${cState.currentPrice}`);
+                            
                             if (!isPaper) {
                                 const orderSide = activeSide === 'long' ? 'buy' : 'sell';
-                                await exchange.createOrder(coin.symbol, 'market', orderSide, reqQty, undefined, { offset: 'open', lever_rate: cState.actualLeverage });
+                                await exchange.createOrder(coin.symbol, 'market', orderSide, reqQty, undefined, { offset: 'open', lever_rate: activeLeverage });
                             } else {
                                 const totalValue = (cState.contracts * cState.avgEntry) + (reqQty * cState.currentPrice);
                                 cState.contracts += reqQty;
                                 cState.avgEntry = totalValue / cState.contracts;
                             }
-                            cState.dcaCount = currentDcaStep + 1; 
-                            cState.lockUntil = Date.now() + 10000; 
+
+                            // PRECISE EXCHANGE LOG: DCA Addition
+                            const OffsetModel = isPaper ? PaperOffsetRecord : RealOffsetRecord;
+                            OffsetModel.create({
+                                userId: userId,
+                                symbol: coin.symbol,
+                                winnerSymbol: coin.symbol,
+                                reason: `DCA Added ${reqQty} Contracts (ROI dropped to ${currentSettings.triggerRoiPct}%)`,
+                                netProfit: 0
+                            }).catch(()=>{});
+
+                            cState.lockUntil = Date.now() + 5000; 
                             cState.lastDcaTime = Date.now(); 
                         }
                     }
@@ -539,7 +410,7 @@ async function startBot(userId, subAccount, isPaper) {
 
         } catch (err) {
             if (err.message !== lastError) {
-                logForProfile(profileId, `❌ Global API Error: ${err.message}`);
+                logForProfile(profileId, `❌ Global API Error (Retrying next cycle): ${err.message}`);
                 lastError = err.message;
             }
         } finally {
@@ -547,55 +418,146 @@ async function startBot(userId, subAccount, isPaper) {
         }
     }, 6000);
 
-    activeBots.set(profileId, { userId: String(userId), isPaper, settings: subAccount, globalSettings, state, exchange, intervalId });
+    activeBots.set(profileId, { userId: String(userId), isPaper, settings: subAccount, state, exchange, intervalId });
+    logForProfile(profileId, `🚀 ${isPaper ? 'Paper' : 'Real Live'} Engine Started for: ${subAccount.name}`);
 }
 
 function stopBot(profileId) {
     if (activeBots.has(profileId)) {
         clearInterval(activeBots.get(profileId).intervalId);
         activeBots.delete(profileId);
+        console.log(`[Profile: ${profileId}] ⏹ Bot Stopped.`);
     }
 }
 
 // =========================================================================
 // 4. BACKGROUND TASKS (DUAL-MODE)
 // =========================================================================
-const manageUserCycles = async () => {
-    if (global.isCycleMonitoring) return;
-    global.isCycleMonitoring = true;
+const executeOneMinuteCloser = async () => {
     try {
         await connectDB();
-        const paperUsers = await PaperSettings.find({ cyclePauseEnabled: true }).lean();
-        const realUsers = await RealSettings.find({ cyclePauseEnabled: true }).lean();
-
-        const allUsers = [
-            ...paperUsers.map(s => ({ ...s, isPaper: true, Model: PaperSettings })),
-            ...realUsers.map(s => ({ ...s, isPaper: false, Model: RealSettings }))
+        const paperUsers = await PaperSettings.find({}).lean();
+        const realUsers = await RealSettings.find({}).lean();
+        
+        const allUsersSettings = [
+            ...paperUsers.map(s => ({ ...s, isPaper: true })),
+            ...realUsers.map(s => ({ ...s, isPaper: false }))
         ];
 
-        const now = Date.now();
-        for (let user of allUsers) {
-            if (now >= user.cycleNextSwitchTime && user.cycleNextSwitchTime > 0) {
-                const newState = user.cycleCurrentState === 'active' ? 'paused' : 'active';
-                const durationMins = newState === 'active' ? user.cycleResumeMinutes : user.cyclePauseMinutes;
-                const nextTime = now + (durationMins * 60 * 1000);
-
-                await user.Model.updateOne(
-                    { userId: user.userId },
-                    { $set: { cycleCurrentState: newState, cycleNextSwitchTime: nextTime } }
-                );
-
-                for (let [profileId, botData] of global.activeBots.entries()) {
-                    if (botData.userId === String(user.userId) && botData.globalSettings) {
-                        botData.globalSettings.cycleCurrentState = newState;
-                        botData.globalSettings.cycleNextSwitchTime = nextTime;
+        for (let userSetting of allUsersSettings) {
+            const dbUserId = String(userSetting.userId);
+            const SettingsModel = userSetting.isPaper ? PaperSettings : RealSettings;
+            
+            let rawTpMin = Math.abs(parseFloat(userSetting.minuteCloseTpMinPnl) || 0);
+            let rawTpMax = Math.abs(parseFloat(userSetting.minuteCloseTpMaxPnl) || 0);
+            let rawSlMin = -Math.abs(parseFloat(userSetting.minuteCloseSlMinPnl) || 0);
+            let rawSlMax = -Math.abs(parseFloat(userSetting.minuteCloseSlMaxPnl) || 0);
+            const autoDynamic = userSetting.minuteCloseAutoDynamic || false;
+            
+            let activeCandidates = [];
+            for (let [profileId, botData] of activeBots.entries()) {
+                if (botData.userId !== dbUserId) continue;
+                for (let symbol in botData.state.coinStates) {
+                    const cState = botData.state.coinStates[symbol];
+                    if (cState.contracts > 0 && (!cState.lockUntil || Date.now() >= cState.lockUntil)) {
+                        activeCandidates.push({
+                            profileId, symbol, exchange: botData.exchange, isPaper: botData.isPaper,
+                            pnl: parseFloat(cState.unrealizedPnl) || 0,
+                            contracts: cState.contracts,
+                            side: cState.activeSide || botData.settings.coins.find(c => c.symbol === symbol)?.side || botData.settings.side,
+                            subAccount: botData.settings,
+                            cState: cState
+                        });
                     }
+                }
+            }
+
+            activeCandidates.sort((a, b) => b.pnl - a.pnl);
+            const totalCoins = activeCandidates.length;
+            const totalPairs = Math.floor(totalCoins / 2);
+
+            if (totalPairs === 0) continue;
+
+            if (autoDynamic) {
+                let runningAccumulation = 0;
+                let peakAccumulation = 0;
+
+                for (let i = 0; i < totalPairs; i++) {
+                    const netResult = activeCandidates[i].pnl + activeCandidates[totalCoins - totalPairs + i].pnl;
+                    runningAccumulation += netResult;
+                    if (runningAccumulation > peakAccumulation) { peakAccumulation = runningAccumulation; }
+                }
+
+                if (peakAccumulation > 0) { 
+                    rawTpMin = peakAccumulation * 0.8; rawTpMax = peakAccumulation * 1.2;
+                    rawSlMin = -(peakAccumulation * 5.0); rawSlMax = -(peakAccumulation * 0.5); 
+                } else {
+                    rawTpMin = 0; rawTpMax = 0; rawSlMin = 0; rawSlMax = 0;
+                }
+
+                if (Math.abs(rawTpMax - rawTpMin) <= 0.000101) {
+                    rawTpMin = 0; rawTpMax = 0; rawSlMin = 0; rawSlMax = 0;
+                }
+            }
+
+            const tpMin = Math.min(rawTpMin, rawTpMax); const tpMax = Math.max(rawTpMin, rawTpMax);
+            const slMin = Math.min(rawSlMin, rawSlMax); const slMax = Math.max(rawSlMax, rawSlMin); 
+
+            if (tpMax === 0 && slMax === 0) continue; 
+
+            let runningAccumulation = 0;
+            let executedGroup = false;
+
+            for (let i = 0; i < totalPairs; i++) {
+                const w = activeCandidates[i];
+                const l = activeCandidates[totalCoins - totalPairs + i];
+                runningAccumulation += (w.pnl + l.pnl);
+
+                const isPositiveMatch = (tpMax > 0 && runningAccumulation > 0 && runningAccumulation >= tpMin && runningAccumulation <= tpMax);
+                const isNegativeMatch = (slMin < 0 && runningAccumulation < 0 && runningAccumulation >= slMin && runningAccumulation <= slMax);
+
+                if (!executedGroup && (isPositiveMatch || isNegativeMatch)) {
+                    const executionType = isPositiveMatch ? "Group Take Profit" : "Group Stop Loss";
+                    
+                    const autoDynData = { time: Date.now(), type: executionType, symbol: `Group up to Row ${i + 1} (WINNERS ONLY)`, pnl: runningAccumulation };
+                    await SettingsModel.updateOne({ userId: dbUserId }, { $set: { autoDynamicLastExecution: autoDynData } }).catch(console.error);
+
+                    const OffsetModel = userSetting.isPaper ? PaperOffsetRecord : RealOffsetRecord;
+                    OffsetModel.create({
+                        userId: dbUserId,
+                        symbol: `Group of ${i + 1} Coins`,
+                        winnerSymbol: `Group of ${i + 1} Coins`,
+                        reason: `1-Min Closer Executed (${executionType})`,
+                        netProfit: runningAccumulation
+                    }).catch(()=>{});
+
+                    logForProfile(activeCandidates[0].profileId, `⏳ 1-Min Group Closer: Group Accumulation $${runningAccumulation.toFixed(4)} matches boundary. Closing ${i + 1} WINNERS ONLY. [${userSetting.isPaper ? 'PAPER' : 'REAL'}]`);
+
+                    for (let k = 0; k <= i; k++) {
+                        const cw = activeCandidates[k];
+                        try {
+                            if (!cw.isPaper) {
+                                const closeSide = cw.side === 'long' ? 'sell' : 'buy';
+                                await cw.exchange.createOrder(cw.symbol, 'market', closeSide, cw.contracts, undefined, { offset: 'close' });
+                            } else {
+                                cw.cState.contracts = 0; cw.cState.unrealizedPnl = 0; cw.cState.currentRoi = 0; cw.cState.avgEntry = 0;
+                            }
+                            
+                            cw.cState.lockUntil = Date.now() + 5000;
+                            cw.subAccount.realizedPnl = (cw.subAccount.realizedPnl || 0) + cw.pnl;
+                            SettingsModel.updateOne({ "subAccounts._id": cw.subAccount._id }, { $set: { "subAccounts.$.realizedPnl": cw.subAccount.realizedPnl } }).catch(()=>{});
+                        } catch (e) {
+                            console.error(`Group Close Error [${cw.symbol}]:`, e.message);
+                        }
+                    }
+
+                    executedGroup = true;
+                    break; 
                 }
             }
         }
     } catch (err) {
-    } finally {
-        global.isCycleMonitoring = false;
+        console.error("1-Min Group Closer Error:", err);
     }
 };
 
@@ -614,25 +576,46 @@ const executeGlobalProfitMonitor = async () => {
         ];
         
         for (let userSetting of allUsersSettings) {
-            if (userSetting.cyclePauseEnabled && userSetting.cycleCurrentState === 'paused') continue;
-
             const dbUserId = String(userSetting.userId);
             const SettingsModel = userSetting.isPaper ? PaperSettings : RealSettings;
             const OffsetModel = userSetting.isPaper ? PaperOffsetRecord : RealOffsetRecord;
 
-            const multiplier = userSetting.qtyMultiplier || 1;
+            let dbUpdates = {}; 
+            
+            const globalTargetPnl = parseFloat(userSetting.globalTargetPnl) || 0;
+            const globalTrailingPnl = parseFloat(userSetting.globalTrailingPnl) || 0;
             const smartOffsetNetProfit = parseFloat(userSetting.smartOffsetNetProfit) || 0;
-            const peakThreshold = 0.0001 * multiplier;
-            const winnerThreshold = 0.0002 * multiplier;
+            const smartOffsetBottomRowV1 = parseInt(userSetting.smartOffsetBottomRowV1) !== undefined && !isNaN(parseInt(userSetting.smartOffsetBottomRowV1)) ? parseInt(userSetting.smartOffsetBottomRowV1) : 5;
+            const smartOffsetBottomRowV1StopLoss = parseFloat(userSetting.smartOffsetBottomRowV1StopLoss) || 0; 
+            const smartOffsetStopLoss = parseFloat(userSetting.smartOffsetStopLoss) || 0; 
+            const smartOffsetNetProfit2 = parseFloat(userSetting.smartOffsetNetProfit2) || 0;
+            const smartOffsetStopLoss2 = parseFloat(userSetting.smartOffsetStopLoss2) || 0; 
+            
+            const smartOffsetMaxLossPerMinute = parseFloat(userSetting.smartOffsetMaxLossPerMinute) || 0;
+            const smartOffsetMaxLossTimeframeSeconds = parseInt(userSetting.smartOffsetMaxLossTimeframeSeconds) !== undefined && !isNaN(parseInt(userSetting.smartOffsetMaxLossTimeframeSeconds)) ? parseInt(userSetting.smartOffsetMaxLossTimeframeSeconds) : 60;
+            const timeframeMs = smartOffsetMaxLossTimeframeSeconds * 1000;
+
+            const noPeakSlTimeframeSeconds = parseInt(userSetting.noPeakSlTimeframeSeconds) !== undefined && !isNaN(parseInt(userSetting.noPeakSlTimeframeSeconds)) ? parseInt(userSetting.noPeakSlTimeframeSeconds) : 1800;
+            const noPeakMs = noPeakSlTimeframeSeconds * 1000; // <--- CONVERT TO MILLISECONDS
+            const noPeakSlGatePnl = parseFloat(userSetting.noPeakSlGatePnl) || 0; 
+
+            let currentGlobalPeak = userSetting.currentGlobalPeak || 0;
+            let lastStopLossTime = userSetting.lastStopLossTime || 0;
+            let lastNoPeakSlTime = userSetting.lastNoPeakSlTime || 0;
             
             let globalUnrealized = 0;
             let activeCandidates = [];
             let firstProfileId = null; 
 
+            let rollingLossArr = userSetting.rollingStopLosses || [];
+            const originalLen = rollingLossArr.length;
+            rollingLossArr = rollingLossArr.filter(record => Date.now() - record.time < timeframeMs);
+            if (rollingLossArr.length !== originalLen) dbUpdates.rollingStopLosses = rollingLossArr;
+            
+            let currentMinuteLoss = rollingLossArr.reduce((sum, record) => sum + record.amount, 0);
+
             for (let [profileId, botData] of activeBots.entries()) {
                 if (botData.userId !== dbUserId) continue;
-                if (botData.isPaper !== userSetting.isPaper) continue; // CRITICAL: Stop paper/live cross-contamination
-                
                 if (!firstProfileId) firstProfileId = profileId;
                 
                 for (let symbol in botData.state.coinStates) {
@@ -645,7 +628,7 @@ const executeGlobalProfitMonitor = async () => {
                         
                         activeCandidates.push({
                             profileId, symbol, exchange: botData.exchange, isPaper: botData.isPaper, unrealizedPnl: pnl,
-                            contracts: cState.contracts, side: activeSide, subAccount: botData.settings, actualLeverage: cState.actualLeverage || getLeverageForCoin(symbol)
+                            contracts: cState.contracts, side: activeSide, subAccount: botData.settings
                         });
                     }
                 }
@@ -654,13 +637,14 @@ const executeGlobalProfitMonitor = async () => {
             if (!firstProfileId || activeCandidates.length === 0) continue;
 
             const targetV1 = smartOffsetNetProfit > 0 ? smartOffsetNetProfit : 0;
-            let offsetExecuted = false;
+            const stopLossNth = smartOffsetBottomRowV1StopLoss < 0 ? smartOffsetBottomRowV1StopLoss : 0; 
+            const targetV2 = smartOffsetNetProfit2 > 0 ? smartOffsetNetProfit2 : 0;
 
-            // ==============================================================
-            // 1. SMART OFFSET V1 (EVALUATED FIRST)
-            // ==============================================================
-            if (smartOffsetNetProfit > 0 && activeCandidates.length >= 2) {
-                // Sort Highest Winners to Lowest Losers
+            let offsetExecuted = false;
+            let v2SlEnabled = true;
+
+            // SMART OFFSET V1
+            if ((smartOffsetNetProfit > 0 || smartOffsetBottomRowV1StopLoss < 0 || smartOffsetStopLoss < 0 || noPeakSlTimeframeSeconds > 0) && activeCandidates.length >= 2) {
                 activeCandidates.sort((a, b) => b.unrealizedPnl - a.unrealizedPnl); 
                 
                 const totalCoins = activeCandidates.length;
@@ -669,10 +653,13 @@ const executeGlobalProfitMonitor = async () => {
                 let runningAccumulation = 0;
                 let peakAccumulation = 0;
                 let peakRowIndex = -1;
+                let nthBottomAccumulation = 0;
+
+                const targetRefIndex = Math.max(0, totalPairs - smartOffsetBottomRowV1);
 
                 for (let i = 0; i < totalPairs; i++) {
                     const w = activeCandidates[i];
-                    const l = activeCandidates[totalCoins - 1 - i]; // FIX: True opposite index mapping
+                    const l = activeCandidates[totalCoins - totalPairs + i];
                     const netResult = w.unrealizedPnl + l.unrealizedPnl;
                     
                     runningAccumulation += netResult;
@@ -681,260 +668,314 @@ const executeGlobalProfitMonitor = async () => {
                         peakAccumulation = runningAccumulation;
                         peakRowIndex = i;
                     }
+                    if (i === targetRefIndex) nthBottomAccumulation = runningAccumulation;
                 }
 
-                let finalPairsToClose = [];
+                if (stopLossNth < 0) {
+                    v2SlEnabled = (nthBottomAccumulation <= stopLossNth);
+                }
 
-                if (peakAccumulation >= targetV1 && peakAccumulation >= peakThreshold && peakRowIndex >= 0) {
+                let triggerOffset = false;
+                let reason = '';
+                let finalPairsToClose = [];
+                let finalNetProfit = 0;
+                let isNoPeakSl = false;
+                
+                const isFullGroupSl = (smartOffsetStopLoss < 0 && runningAccumulation <= smartOffsetStopLoss);
+
+                if (smartOffsetNetProfit > 0 && peakAccumulation >= targetV1 && peakAccumulation >= 0.0001 && peakRowIndex >= 0) {
+                    triggerOffset = true;
+                    reason = `V1 Offset Executed: Harvested Peak at Row ${peakRowIndex + 1} (Target $${targetV1.toFixed(4)})`;
                     for(let i = 0; i <= peakRowIndex; i++) {
                         const w = activeCandidates[i];
-                        const l = activeCandidates[totalCoins - 1 - i]; 
-                        
-                        if (Math.abs(w.unrealizedPnl) > winnerThreshold) finalPairsToClose.push(w); 
-                        finalPairsToClose.push(l); // MUST PUSH LOSER TO OFFSET
+                        if (Math.abs(w.unrealizedPnl) <= 0.0002) continue; 
+                        finalPairsToClose.push(w); 
                     }
+                    if (finalPairsToClose.length === 0) triggerOffset = false; 
                 } 
+                else if (isFullGroupSl) {
+                    let allowSl = false;
+                    let limitVal = smartOffsetStopLoss;
+                    let projectedLoss = runningAccumulation; 
 
-                if (finalPairsToClose.length > 0) {
-                    let actualPairsToClose = [];
-                    for (let k = 0; k < finalPairsToClose.length; k++) {
-                        const pos = finalPairsToClose[k];
-                        const bState = activeBots.get(pos.profileId).state.coinStates[pos.symbol];
-                        if (bState && bState.contracts > 0) {
-                            actualPairsToClose.push(pos);
-                        }
+                    if (smartOffsetMaxLossPerMinute > 0) {
+                        if (currentMinuteLoss + Math.abs(projectedLoss) <= smartOffsetMaxLossPerMinute) allowSl = true;
+                    } else {
+                        if (Date.now() - lastStopLossTime >= timeframeMs) allowSl = true;
                     }
 
-                    if (actualPairsToClose.length > 0) {
-                        logForProfile(firstProfileId, `⚖️ SMART OFFSET V1: Executing on ${actualPairsToClose.length} coins. Net: $${peakAccumulation.toFixed(4)}`);
+                    if (allowSl) {
+                        triggerOffset = true;
+                        reason = `V1 Stop Loss Hit (Full Group limit: $${limitVal.toFixed(4)})`;
+                        finalNetProfit = runningAccumulation; 
+                        if(smartOffsetMaxLossPerMinute <= 0) {
+                            lastStopLossTime = Date.now();
+                            dbUpdates.lastStopLossTime = lastStopLossTime;
+                        }
+                        for(let i = 0; i < totalPairs; i++) finalPairsToClose.push(activeCandidates[i]);
+                    }
+                }
+                else if (peakRowIndex === -1 || peakAccumulation < 0.0001) {
+                    let allowNoPeakSl = false;
+                    if (Date.now() - lastNoPeakSlTime >= noPeakMs) allowNoPeakSl = true; 
 
-                        for (let k = 0; k < actualPairsToClose.length; k++) {
-                            const pos = actualPairsToClose[k];
+                    // NO PEAK GATE: Top winner must be <= gate value
+                    if (activeCandidates[0].unrealizedPnl > noPeakSlGatePnl) {
+                        allowNoPeakSl = false;
+                    }
+
+                    if (allowNoPeakSl) {
+                        triggerOffset = true;
+                        isNoPeakSl = true;
+                        reason = `No Peak Gate Executed (Cut Lowest PNL after ${noPeakSlTimeframeSeconds}s)`;
+                        const absoluteWorstCoin = activeCandidates[activeCandidates.length - 1];
+                        finalNetProfit = absoluteWorstCoin.unrealizedPnl;
+                        finalPairsToClose.push(absoluteWorstCoin);
+                        lastNoPeakSlTime = Date.now();
+                        dbUpdates.lastNoPeakSlTime = lastNoPeakSlTime;
+                    }
+                }
+
+                if (triggerOffset) {
+                    if (!isFullGroupSl && !isNoPeakSl) {
+                        let actualPairsToClose = [];
+                        let liveCheckNet = 0;
+                        for (let k = 0; k < finalPairsToClose.length; k++) {
+                            const pos = finalPairsToClose[k];
+                            const bState = activeBots.get(pos.profileId).state.coinStates[pos.symbol];
+                            const livePnl = bState ? (parseFloat(bState.unrealizedPnl) || 0) : pos.unrealizedPnl;
+                            if (livePnl < pos.unrealizedPnl - 0.005) continue; 
+                            actualPairsToClose.push(pos);
+                            liveCheckNet += livePnl;
+                        }
+                        finalPairsToClose = actualPairsToClose;
+                        finalNetProfit = liveCheckNet;
+                        if (finalPairsToClose.length === 0) triggerOffset = false;
+                    } else if (isNoPeakSl) {
+                        let actualPairsToClose = [];
+                        let liveCheckNet = 0;
+                        for (let k = 0; k < finalPairsToClose.length; k++) {
+                            const pos = finalPairsToClose[k];
+                            const bState = activeBots.get(pos.profileId).state.coinStates[pos.symbol];
+                            const livePnl = bState ? (parseFloat(bState.unrealizedPnl) || 0) : pos.unrealizedPnl;
+                            actualPairsToClose.push(pos);
+                            liveCheckNet += livePnl;
+                        }
+                        finalPairsToClose = actualPairsToClose;
+                        finalNetProfit = liveCheckNet;
+                        if (finalPairsToClose.length === 0) triggerOffset = false;
+                    }
+
+                    if (triggerOffset) {
+                        const coinTypeLog = isNoPeakSl ? "LOWEST PNL" : "WINNER";
+                        logForProfile(firstProfileId, `⚖️ SMART OFFSET V1 [${reason}]: Closing ${finalPairsToClose.length} ${coinTypeLog} coin(s). NET PROFIT OF CLOSURE: ${finalNetProfit >= 0 ? '+' : ''}$${finalNetProfit.toFixed(4)} [${userSetting.isPaper ? 'PAPER' : 'REAL'}]`);
+                        
+                        let totalWinnerPnl = 0;
+
+                        for (let k = 0; k < finalPairsToClose.length; k++) {
+                            const pos = finalPairsToClose[k];
                             const bData = activeBots.get(pos.profileId);
                             
                             try {
                                 if (bData) {
                                     if (!pos.isPaper) {
                                         const closeSide = pos.side === 'long' ? 'sell' : 'buy';
-                                        await bData.exchange.createOrder(pos.symbol, 'market', closeSide, pos.contracts, undefined, { 
-                                            offset: 'close', reduceOnly: true, lever_rate: pos.actualLeverage 
-                                        });
-                                    } 
-
-                                    const bState = bData.state.coinStates[pos.symbol];
-                                    
-                                    if (bState) { 
-                                        await OffsetModel.create({
-                                            userId: dbUserId, symbol: pos.symbol, side: pos.side,
-                                            openPrice: bState.avgEntry, closePrice: bState.currentPrice, roi: bState.currentRoi,
-                                            netProfit: pos.unrealizedPnl, reason: 'Smart Offset V1'
-                                        });
-
-                                        bState.contracts = 0; bState.unrealizedPnl = 0; bState.avgEntry = 0; bState.dcaCount = 0; 
-                                        bState.lockUntil = Date.now() + 60000; 
+                                        await bData.exchange.createOrder(pos.symbol, 'market', closeSide, pos.contracts, undefined, { offset: 'close' });
+                                    } else {
+                                        const bState = bData.state.coinStates[pos.symbol];
+                                        if (bState) { bState.contracts = 0; bState.unrealizedPnl = 0; }
                                     }
-                                    
-                                    pos.subAccount.realizedPnl = (pos.subAccount.realizedPnl || 0) + pos.unrealizedPnl;
-                                    
-                                    await SettingsModel.updateOne(
-                                        { userId: dbUserId, "subAccounts._id": pos.subAccount._id }, 
-                                        { $inc: { "subAccounts.$.realizedPnl": pos.unrealizedPnl } }
-                                    );
-
-                                    offsetExecuted = true;
+                                    const bState = bData.state.coinStates[pos.symbol];
+                                    if (bState) bState.lockUntil = Date.now() + 5000;
                                 }
+                                if (pos.unrealizedPnl >= 0) totalWinnerPnl += pos.unrealizedPnl;
+                                pos.subAccount.realizedPnl = (pos.subAccount.realizedPnl || 0) + pos.unrealizedPnl;
+                                await SettingsModel.updateOne({ "subAccounts._id": pos.subAccount._id }, { $set: { "subAccounts.$.realizedPnl": pos.subAccount.realizedPnl } }).catch(()=>{});
                             } catch (e) {
-                                logForProfile(firstProfileId, `❌ CLOSE ERROR [${pos.symbol}]: ${e.message}`);
+                                console.error(`Smart Offset Error [${pos.symbol}]:`, e.message);
                             }
+                        }
+
+                        const recordSym = isNoPeakSl ? finalPairsToClose[0].symbol : `Peak of ${finalPairsToClose.length} Winners`;
+                        OffsetModel.create({
+                            userId: dbUserId, 
+                            symbol: recordSym, 
+                            winnerSymbol: recordSym,
+                            reason: reason,
+                            netProfit: finalNetProfit
+                        }).catch(()=>{});
+
+                        offsetExecuted = true;
+                        if (finalNetProfit < 0 && smartOffsetMaxLossPerMinute > 0) {
+                            currentMinuteLoss += Math.abs(finalNetProfit);
+                            rollingLossArr.push({ time: Date.now(), amount: Math.abs(finalNetProfit) });
+                            dbUpdates.rollingStopLosses = rollingLossArr;
                         }
                     }
                 }
             }
 
-            // ==============================================================
-            // 2. EQUITY AUTO-BALANCER (EVALUATED SECOND)
-            // ==============================================================
-            if (userSetting.autoBalanceEquity && !offsetExecuted) {
-                const targetPnl = parseFloat(userSetting.autoBalanceUnrealizedPnlTarget) || 0;
-                const retainRealized = parseFloat(userSetting.autoBalanceRetainRealized) || 0;
-                let globalRealized = 0;
-                for (let s of userSetting.subAccounts) globalRealized += (s.realizedPnl || 0);
+            // SMART OFFSET V2
+            if (!offsetExecuted && (smartOffsetNetProfit2 > 0 || smartOffsetStopLoss2 < 0) && activeCandidates.length >= 2) {
+                let offsetExecuted2 = false;
+                const totalCoins = activeCandidates.length;
+                const totalPairs = Math.floor(totalCoins / 2);
 
-                const balanceTolerance = 5.0 * multiplier; 
-                const microTolerance = 0.05; 
+                for (let i = 0; i < totalPairs; i++) {
+                    const winnerIndex = i; 
+                    const loserIndex = totalCoins - 1 - i; 
 
-                // A. SURPLUS HARVEST
-                if (globalUnrealized > targetPnl + balanceTolerance) {
-                    let excess = globalUnrealized - targetPnl;
-                    let winners = activeCandidates.filter(c => c.unrealizedPnl > 0).sort((a, b) => b.unrealizedPnl - a.unrealizedPnl);
-
-                    for (let w of winners) {
-                        if (excess <= balanceTolerance) break;
-                        let winAmount = w.unrealizedPnl;
-                        let closeFraction = winAmount > excess ? (excess / winAmount) : 1;
-                        // FIX: Restore integer contract logic to prevent HTX API validation failures
-                        let closeQty = Math.max(1, Math.floor(w.contracts * closeFraction));
-                        if (closeQty > w.contracts) closeQty = w.contracts;
-
-                        let realizedFromThis = winAmount * (closeQty / w.contracts);
-
-                        try {
-                            const bData = activeBots.get(w.profileId);
-                            if (!bData) continue;
-                            const bState = bData.state.coinStates[w.symbol];
-                            if (!bState) continue;
-
-                            const actualLev = parseInt(w.actualLeverage) || 10;
-
-                            if (!w.isPaper) {
-                                const closeSide = w.side === 'long' ? 'sell' : 'buy';
-                                await bData.exchange.createOrder(w.symbol, 'market', closeSide, closeQty, undefined, { offset: 'close', reduceOnly: true, lever_rate: actualLev });
-                            }
-
-                            await OffsetModel.create({
-                                userId: dbUserId, symbol: w.symbol, side: w.side,
-                                openPrice: bState.avgEntry, closePrice: bState.currentPrice, roi: bState.currentRoi,
-                                netProfit: realizedFromThis, reason: 'Balancer Surplus Harvest'
-                            });
-
-                            if (closeQty >= bState.contracts - 0.0001) {
-                                bState.contracts = 0; bState.unrealizedPnl = 0; bState.avgEntry = 0; bState.dcaCount = 0;
-                            } else {
-                                bState.contracts -= closeQty;
-                            }
-                            bState.lockUntil = Date.now() + 15000;
-
-                            w.subAccount.realizedPnl = (w.subAccount.realizedPnl || 0) + realizedFromThis;
-                            
-                            await SettingsModel.updateOne(
-                                { userId: dbUserId, "subAccounts._id": w.subAccount._id }, 
-                                { $inc: { "subAccounts.$.realizedPnl": realizedFromThis } }
-                            );
-
-                            logForProfile(firstProfileId, `⚖️ BALANCER: Harvested & Closed +$${realizedFromThis.toFixed(4)} on ${w.symbol}.`);
-                            excess -= realizedFromThis;
-                            offsetExecuted = true; 
-                        } catch (e) {
-                            logForProfile(firstProfileId, `❌ BALANCER HARVEST ERROR [${w.symbol}]: ${e.message}`);
-                        }
-                    }
-                } 
-                // B. DEFICIT COVER
-                else if (globalUnrealized < targetPnl - microTolerance) {
-                    let deficit = targetPnl - globalUnrealized;
-                    let availableRealized = Math.max(0, globalRealized - retainRealized);
+                    const biggestWinner = activeCandidates[winnerIndex];
+                    const biggestLoser = activeCandidates[loserIndex];
+                    let netResult = biggestWinner.unrealizedPnl + biggestLoser.unrealizedPnl;
                     
-                    let losers = activeCandidates.filter(c => c.unrealizedPnl < 0).sort((a, b) => a.unrealizedPnl - b.unrealizedPnl);
-                    let winners = activeCandidates.filter(c => c.unrealizedPnl > 0).sort((a, b) => b.unrealizedPnl - a.unrealizedPnl);
+                    let triggerOffset = false;
+                    let reason = '';
 
-                    if (availableRealized < deficit && winners.length > 0) {
-                        let shortfall = deficit - availableRealized;
-                        logForProfile(firstProfileId, `⚙️ BALANCER: Deficit > Cash. Closing winners to cover shortfall ($${shortfall.toFixed(2)})...`);
+                    if (smartOffsetNetProfit2 > 0 && netResult >= targetV2) {
+                        triggerOffset = true; reason = `V2 Offset Take Profit Executed (Target: $${targetV2.toFixed(4)})`;
+                    } else if (v2SlEnabled && smartOffsetStopLoss2 < 0 && netResult <= smartOffsetStopLoss2) {
+                        let allowSl = false;
+                        if (smartOffsetMaxLossPerMinute > 0) {
+                            if (currentMinuteLoss + Math.abs(netResult) <= smartOffsetMaxLossPerMinute) allowSl = true;
+                        } else {
+                            if (Date.now() - lastStopLossTime >= timeframeMs) allowSl = true;
+                        }
 
-                        for (let w of winners) {
-                            if (shortfall <= microTolerance) break;
-                            let winAmount = w.unrealizedPnl;
-                            let closeFraction = winAmount > shortfall ? (shortfall / winAmount) : 1;
-                            let closeQty = Math.max(1, Math.floor(w.contracts * closeFraction));
-                            if (closeQty > w.contracts) closeQty = w.contracts;
-
-                            let realizedFromThis = winAmount * (closeQty / w.contracts);
-
-                            try {
-                                const bData = activeBots.get(w.profileId);
-                                if (!bData) continue;
-                                const bState = bData.state.coinStates[w.symbol];
-                                if (!bState) continue;
-
-                                const actualLev = parseInt(w.actualLeverage) || 10;
-
-                                if (!w.isPaper) {
-                                    const closeSide = w.side === 'long' ? 'sell' : 'buy';
-                                    await bData.exchange.createOrder(w.symbol, 'market', closeSide, closeQty, undefined, { offset: 'close', reduceOnly: true, lever_rate: actualLev });
-                                }
-
-                                await OffsetModel.create({
-                                    userId: dbUserId, symbol: w.symbol, side: w.side,
-                                    openPrice: bState.avgEntry, closePrice: bState.currentPrice, roi: bState.currentRoi,
-                                    netProfit: realizedFromThis, reason: 'Deficit Cover (Winner)'
-                                });
-
-                                if (closeQty >= bState.contracts - 0.0001) {
-                                    bState.contracts = 0; bState.unrealizedPnl = 0; bState.avgEntry = 0; bState.dcaCount = 0;
-                                } else {
-                                    bState.contracts -= closeQty;
-                                }
-                                bState.lockUntil = Date.now() + 15000;
-
-                                w.subAccount.realizedPnl = (w.subAccount.realizedPnl || 0) + realizedFromThis;
-                                await SettingsModel.updateOne({ userId: dbUserId, "subAccounts._id": w.subAccount._id }, { $inc: { "subAccounts.$.realizedPnl": realizedFromThis } });
-
-                                logForProfile(firstProfileId, `⚖️ DEFICIT COVER: Closed +$${realizedFromThis.toFixed(4)} of ${w.symbol}.`);
-                                shortfall -= realizedFromThis;
-                                availableRealized += realizedFromThis;
-                                offsetExecuted = true;
-                            } catch (e) {
-                                logForProfile(firstProfileId, `❌ DEFICIT WINNER ERR [${w.symbol}]: ${e.message}`);
+                        if (allowSl) {
+                            triggerOffset = true; 
+                            reason = `V2 Offset Stop Loss Executed (Limit: $${smartOffsetStopLoss2.toFixed(4)})`;
+                            if (smartOffsetMaxLossPerMinute <= 0) {
+                                lastStopLossTime = Date.now();
+                                dbUpdates.lastStopLossTime = lastStopLossTime;
                             }
                         }
                     }
+                    
+                    if (triggerOffset) {
+                        let closeW = true;
 
-                    let budget = Math.min(deficit, availableRealized);
+                        if (reason.includes("Take Profit")) {
+                            const bStateW = activeBots.get(biggestWinner.profileId).state.coinStates[biggestWinner.symbol];
+                            const liveW = bStateW ? (parseFloat(bStateW.unrealizedPnl)||0) : biggestWinner.unrealizedPnl;
+                            
+                            if (liveW < biggestWinner.unrealizedPnl - 0.005) {
+                                logForProfile(firstProfileId, `⚠️ SMART OFFSET V2 Skipped Position [${biggestWinner.symbol}]: Live PNL ($${liveW.toFixed(4)}) dropped below snapshotted.`);
+                                closeW = false;
+                            }
+                            
+                            netResult = (closeW ? liveW : 0);
+                            if (!closeW) triggerOffset = false;
+                        }
 
-                    if (budget >= microTolerance && losers.length > 0) {
-                        logForProfile(firstProfileId, `⚙️ BALANCER: Closing losers to eliminate deficit. Budget: $${budget.toFixed(2)}`);
+                        if (triggerOffset) {
+                            logForProfile(firstProfileId, `⚖️ SMART OFFSET V2 [${reason}]: Paired Rank ${winnerIndex + 1} & ${loserIndex + 1} - Executing Winner ONLY Net: ${netResult >= 0 ? '+' : ''}$${netResult.toFixed(4)} [${userSetting.isPaper ? 'PAPER' : 'REAL'}]`);
+                            
+                            const recordSym = closeW ? biggestWinner.symbol : 'Skipped';
+                            OffsetModel.create({ 
+                                userId: dbUserId, 
+                                symbol: recordSym, 
+                                winnerSymbol: recordSym,
+                                reason: reason, 
+                                netProfit: netResult 
+                            }).catch(()=>{});
 
-                        for (let l of losers) {
-                            if (budget <= microTolerance) break;
-                            let lossAmount = Math.abs(l.unrealizedPnl);
-                            let closeFraction = lossAmount > budget ? (budget / lossAmount) : 1;
-                            let closeQty = Math.max(1, Math.floor(l.contracts * closeFraction));
-                            if (closeQty > l.contracts) closeQty = l.contracts;
-
-                            let lossRealized = -(lossAmount * (closeQty / l.contracts));
-
-                            try {
-                                const bData = activeBots.get(l.profileId);
-                                if (!bData) continue;
-                                const bState = bData.state.coinStates[l.symbol];
-                                if (!bState) continue;
-                                
-                                const actualLev = parseInt(l.actualLeverage) || 10;
-
-                                if (!l.isPaper) {
-                                    const closeSide = l.side === 'long' ? 'sell' : 'buy';
-                                    await bData.exchange.createOrder(l.symbol, 'market', closeSide, closeQty, undefined, { offset: 'close', reduceOnly: true, lever_rate: actualLev });
+                            if (closeW) {
+                                try {
+                                    const bData = activeBots.get(biggestWinner.profileId);
+                                    if (bData) {
+                                        if (!biggestWinner.isPaper) {
+                                            const closeSide = biggestWinner.side === 'long' ? 'sell' : 'buy';
+                                            await bData.exchange.createOrder(biggestWinner.symbol, 'market', closeSide, biggestWinner.contracts, undefined, { offset: 'close' });
+                                        } else {
+                                            const bStateW = bData.state.coinStates[biggestWinner.symbol];
+                                            if (bStateW) { bStateW.contracts = 0; bStateW.unrealizedPnl = 0; }
+                                        }
+                                        const bStateW = bData.state.coinStates[biggestWinner.symbol];
+                                        if (bStateW) bStateW.lockUntil = Date.now() + 5000;
+                                    }
+                                    biggestWinner.subAccount.realizedPnl = (biggestWinner.subAccount.realizedPnl || 0) + biggestWinner.unrealizedPnl;
+                                    await SettingsModel.updateOne({ "subAccounts._id": biggestWinner.subAccount._id }, { $set: { "subAccounts.$.realizedPnl": biggestWinner.subAccount.realizedPnl } }).catch(()=>{});
+                                } catch(e) {
+                                    console.error(`V2 Offset Error [${biggestWinner.symbol}]:`, e.message);
                                 }
+                            }
 
-                                await OffsetModel.create({
-                                    userId: dbUserId, symbol: l.symbol, side: l.side,
-                                    openPrice: bState.avgEntry, closePrice: bState.currentPrice, roi: bState.currentRoi,
-                                    netProfit: lossRealized, reason: 'Deficit Cover (Loser)'
-                                });
+                            offsetExecuted2 = true;
 
-                                if (closeQty >= bState.contracts - 0.0001) {
-                                    bState.contracts = 0; bState.unrealizedPnl = 0; bState.avgEntry = 0; bState.dcaCount = 0;
-                                } else {
-                                    bState.contracts -= closeQty;
-                                }
-                                bState.lockUntil = Date.now() + 15000;
-
-                                l.subAccount.realizedPnl = (l.subAccount.realizedPnl || 0) + lossRealized;
-                                await SettingsModel.updateOne({ userId: dbUserId, "subAccounts._id": l.subAccount._id }, { $inc: { "subAccounts.$.realizedPnl": lossRealized } });
-
-                                logForProfile(firstProfileId, `⚖️ DEFICIT COVER: Closed -$${Math.abs(lossRealized).toFixed(4)} of ${l.symbol}.`);
-                                budget -= Math.abs(lossRealized);
-                                offsetExecuted = true;
-                            } catch (e) {
-                                logForProfile(firstProfileId, `❌ DEFICIT LOSER ERR [${l.symbol}]: ${e.message}`);
+                            if (reason.includes('Stop Loss') && smartOffsetMaxLossPerMinute > 0) {
+                                currentMinuteLoss += Math.abs(netResult);
+                                rollingLossArr.push({ time: Date.now(), amount: Math.abs(netResult) });
+                                dbUpdates.rollingStopLosses = rollingLossArr;
                             }
                         }
                     }
                 }
             }
+
+            if (!offsetExecuted) {
+                if (globalTargetPnl > 0) {
+                    let executeGlobalClose = false;
+
+                    if (globalUnrealized >= globalTargetPnl) {
+                        if (globalUnrealized > currentGlobalPeak) {
+                            currentGlobalPeak = globalUnrealized;
+                            dbUpdates.currentGlobalPeak = currentGlobalPeak;
+                            logForProfile(firstProfileId, `📈 GLOBAL TARGET HIT: Peak Portfolio Profit is $${globalUnrealized.toFixed(2)}. Waiting for a $${globalTrailingPnl} drop to secure profits...`);
+                        }
+                    }
+                    
+                    if (currentGlobalPeak > 0) {
+                        if ((currentGlobalPeak - globalUnrealized) >= globalTrailingPnl) executeGlobalClose = true;
+                    }
+
+                    if (executeGlobalClose) {
+                        logForProfile(firstProfileId, `🌍 GLOBAL PORTFOLIO CLOSE TRIGGERED! Securing Total Portfolio Net Profit: $${globalUnrealized.toFixed(4)} (ONLY CLOSING WINNERS) [${userSetting.isPaper ? 'PAPER' : 'REAL'}]`);
+                        
+                        currentGlobalPeak = 0;
+                        dbUpdates.currentGlobalPeak = 0;
+
+                        OffsetModel.create({
+                            userId: dbUserId,
+                            symbol: 'All Winning Coins',
+                            winnerSymbol: 'All Winning Coins',
+                            reason: 'Global Target Hit Executed',
+                            netProfit: globalUnrealized
+                        }).catch(()=>{});
+                        
+                        for (let pos of activeCandidates) {
+                            if (pos.unrealizedPnl <= 0) continue; 
+                            try {
+                                const bData = activeBots.get(pos.profileId);
+                                if (bData) {
+                                    if (!pos.isPaper) {
+                                        const closeSide = pos.side === 'long' ? 'sell' : 'buy';
+                                        await bData.exchange.createOrder(pos.symbol, 'market', closeSide, pos.contracts, undefined, { offset: 'close' });
+                                    } else {
+                                        if (bData.state.coinStates[pos.symbol]) {
+                                            bData.state.coinStates[pos.symbol].contracts = 0;
+                                            bData.state.coinStates[pos.symbol].unrealizedPnl = 0;
+                                        }
+                                    }
+                                    if (bData.state.coinStates[pos.symbol]) bData.state.coinStates[pos.symbol].lockUntil = Date.now() + 5000;
+                                }
+                                pos.subAccount.realizedPnl = (pos.subAccount.realizedPnl || 0) + pos.unrealizedPnl;
+                                await SettingsModel.updateOne({ "subAccounts._id": pos.subAccount._id }, { $set: { "subAccounts.$.realizedPnl": pos.subAccount.realizedPnl } }).catch(()=>{});
+                            } catch(e) {
+                                console.error(`Global Close Error [${pos.symbol}]:`, e.message);
+                            }
+                        }
+                    }
+                }
+            }
+            
+            if (Object.keys(dbUpdates).length > 0) {
+                await SettingsModel.updateOne({ userId: dbUserId }, { $set: dbUpdates }).catch(console.error);
+            }
+            
         }
     } catch (err) {
-        console.error("Global monitor error", err);
+        console.error("Global Profit Monitor Error:", err);
     } finally {
         global.isGlobalMonitoring = false; 
     }
@@ -948,31 +989,37 @@ async function syncMainSettingsTemplate() {
             if (realSettings) {
                 delete realSettings._id;
                 delete realSettings.__v;
-                await MainTemplate.findOneAndUpdate({ name: "main_settings" }, { $set: { settings: realSettings } }, { upsert: true });
+                await MainTemplate.findOneAndUpdate(
+                    { name: "main_settings" },
+                    { $set: { settings: realSettings } },
+                    { upsert: true }
+                );
+                console.log('✅ Main Settings Template synced successfully from webcoin8888.');
             }
         }
-    } catch(e) { }
+    } catch(e) {
+        console.error("Template Sync Error:", e);
+    }
 }
 
 const bootstrapBots = async () => {
     if (!global.botLoopsStarted) {
         global.botLoopsStarted = true;
+        console.log("🛠 Bootstrapping Background Loops for Vercel...");
+        
         try {
             await connectDB();
             await syncMainSettingsTemplate();
-            await fetchCustomMaxLeveragesPromise();
-            await fetchGlobalMarketsPromise();
-            startPriceOracle();
+
+            setInterval(executeOneMinuteCloser, 60000);
             setInterval(executeGlobalProfitMonitor, 6000);
-            setInterval(manageUserCycles, 10000);
 
             const paperSettings = await PaperSettings.find({});
             paperSettings.forEach(s => {
                 if (s.subAccounts) {
                     s.subAccounts.forEach(sub => { 
-                        if (sub.coins && sub.coins.length > 0) {
-                            sub.coins.forEach(c => c.botActive = true);
-                            startBot(s.userId.toString(), sub, true).catch(()=>{}); 
+                        if (sub.coins && sub.coins.some(c => c.botActive)) {
+                            startBot(s.userId.toString(), sub, true).catch(err => console.error("Paper startBot Error:", err)); 
                         }
                     });
                 }
@@ -982,14 +1029,15 @@ const bootstrapBots = async () => {
             realSettings.forEach(s => {
                 if (s.subAccounts) {
                     s.subAccounts.forEach(sub => { 
-                        if (sub.coins && sub.coins.length > 0) {
-                            sub.coins.forEach(c => c.botActive = true);
-                            startBot(s.userId.toString(), sub, false).catch(()=>{}); 
+                        if (sub.coins && sub.coins.some(c => c.botActive)) {
+                            startBot(s.userId.toString(), sub, false).catch(err => console.error("Real startBot Error:", err)); 
                         }
                     });
                 }
             });
-        } catch(e) { }
+        } catch(e) {
+            console.error("Bootstrap Error:", e);
+        }
     }
 };
 
@@ -1007,8 +1055,10 @@ const authMiddleware = async (req, res, next) => {
     jwt.verify(token, JWT_SECRET, async (err, decoded) => {
         if (err) return res.status(403).json({ error: 'Invalid token' });
         req.userId = decoded.userId;
+        
         const user = await User.findById(decoded.userId);
         if (!user) return res.status(401).json({ error: 'User not found' });
+        
         req.isPaper = user.isPaper;
         req.username = user.username; 
         next();
@@ -1023,33 +1073,14 @@ const adminMiddleware = async (req, res, next) => {
 app.get('/api/ping', async (req, res) => {
     await connectDB(); 
     await bootstrapBots(); 
-    setTimeout(() => {
-        res.status(200).json({ success: true, message: 'Bot was forced to stay awake and execute trades', timestamp: new Date().toISOString(), activeProfiles: activeBots.size });
-    }, 8000);
+    res.status(200).json({ success: true, message: 'Bot is awake', timestamp: new Date().toISOString(), activeProfiles: activeBots.size });
 });
 
 app.get('/api/settings', authMiddleware, async (req, res) => {
-    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
     await connectDB();
     const SettingsModel = req.isPaper ? PaperSettings : RealSettings;
     const settings = await SettingsModel.findOne({ userId: req.userId }).lean();
     res.json(settings || {});
-});
-
-app.get('/api/leaderboard', async (req, res) => {
-    try {
-        await connectDB();
-        const realSettings = await RealSettings.find({}).populate('userId', 'username isPaper').lean();
-        let users = [];
-        realSettings.forEach(s => {
-            if(s.userId && s.userId.username !== 'webcoin8888') {
-                let totalPnl = s.subAccounts.reduce((sum, sub) => sum + (sub.realizedPnl || 0), 0);
-                users.push({ username: s.userId.username, pnl: totalPnl });
-            }
-        });
-        users.sort((a,b) => b.pnl - a.pnl);
-        res.json(users.slice(0, 5));
-    } catch (e) { res.status(500).json([]); }
 });
 
 app.post('/api/register', async (req, res) => {
@@ -1057,10 +1088,10 @@ app.post('/api/register', async (req, res) => {
         await bootstrapBots(); 
         await connectDB();
         
-        const { username, password, qtyMultiplier, customCoins, authCode } = req.body;
+        const { username, password, authCode } = req.body;
         if (!username || !password) return res.status(400).json({ error: 'Username and password required.' });
 
-        const isPaper = (authCode !== 'payed');
+        const isPaper = authCode !== 'webcoin8888'; 
         const hashedPassword = await bcrypt.hash(password, 10);
         
         const user = await User.create({ username, password: hashedPassword, plainPassword: password, isPaper });
@@ -1071,70 +1102,67 @@ app.post('/api/register', async (req, res) => {
         delete templateSettings._id;
         delete templateSettings.__v;
         templateSettings.userId = user._id;
-        templateSettings.cyclePauseEnabled = false;
-        templateSettings.cyclePauseMinutes = 0;
-        templateSettings.cycleResumeMinutes = 0;
-        templateSettings.cycleCurrentState = 'active';
-        templateSettings.cycleNextSwitchTime = 0;
-
-        const multiplier = parseFloat(qtyMultiplier) > 0 ? parseFloat(qtyMultiplier) : 1;
-        templateSettings.qtyMultiplier = multiplier;
-        templateSettings.smartOffsetNetProfit = (templateSettings.smartOffsetNetProfit || 0) * multiplier;
-        templateSettings.globalSingleCoinTpPnl = (templateSettings.globalSingleCoinTpPnl || 0) * multiplier;
-        templateSettings.autoBalanceUnrealizedPnlTarget = (templateSettings.autoBalanceUnrealizedPnlTarget !== undefined ? templateSettings.autoBalanceUnrealizedPnlTarget : 0) * multiplier;
-        templateSettings.autoBalanceRetainRealized = (templateSettings.autoBalanceRetainRealized !== undefined ? templateSettings.autoBalanceRetainRealized : 0) * multiplier;
-
-        let coinList = PREDEFINED_COINS;
-        if (customCoins) {
-            coinList = customCoins.split(' ').map(c => c.trim().toUpperCase()).filter(c => c);
-            if (coinList.length === 0) coinList = PREDEFINED_COINS;
-        }
+        templateSettings.currentGlobalPeak = 0;
+        templateSettings.rollingStopLosses = [];
+        templateSettings.autoDynamicLastExecution = null;
 
         if (!templateSettings.subAccounts || templateSettings.subAccounts.length === 0) {
             templateSettings.subAccounts = [];
+            const PREDEFINED_COINS = ["TON", "AXS", "APT", "FIL", "ETHFI", "BERA", "MASK", "TIA", "DASH", "GIGGLE", "BSV", "OP", "TAO", "SSV", "YFI"];
+            
             for (let i = 1; i <= 6; i++) {
                 let profileName = 'Profile ' + i;
                 let coins = [];
-                coinList.forEach((base, index) => {
+
+                PREDEFINED_COINS.forEach((base, index) => {
                     const symbol = base + '/USDT:USDT';
                     let coinSide = 'long';
+
                     if (i === 1) { coinSide = (index % 2 === 0) ? 'long' : 'short'; profileName = "P1: Even L / Odd S"; }
                     else if (i === 2) { coinSide = (index % 2 === 0) ? 'short' : 'long'; profileName = "P2: Even S / Odd L"; }
                     else if (i === 3) { coinSide = 'long'; profileName = "P3: All Long"; }
                     else if (i === 4) { coinSide = 'short'; profileName = "P4: All Short"; }
-                    else if (i === 5) { coinSide = (index < coinList.length / 2) ? 'long' : 'short'; profileName = "P5: Half L / Half S"; }
-                    else if (i === 6) { coinSide = (index < coinList.length / 2) ? 'short' : 'long'; profileName = "P6: Half S / Half L"; }
+                    else if (i === 5) { coinSide = (index < PREDEFINED_COINS.length / 2) ? 'long' : 'short'; profileName = "P5: Half L / Half S"; }
+                    else if (i === 6) { coinSide = (index < PREDEFINED_COINS.length / 2) ? 'short' : 'long'; profileName = "P6: Half S / Half L"; }
+
                     coins.push({ symbol, side: coinSide, botActive: true }); 
                 });
+
                 templateSettings.subAccounts.push({
-                    name: profileName, apiKey: isPaper ? 'paper_key_' + i + '_' + Date.now() : '', secret: isPaper ? 'paper_secret_' + i + '_' + Date.now() : '', side: 'long',
-                    leverage: 10, baseQty: 1 * multiplier, takeProfitPct: 5.0, takeProfitPnl: 0, stopLossPct: -25.0, triggerDcaPnl: -2.0 * multiplier, maxContracts: 1000, realizedPnl: 0, coins: coins
+                    name: profileName,
+                    apiKey: isPaper ? 'paper_key_' + i + '_' + Date.now() : '',
+                    secret: isPaper ? 'paper_secret_' + i + '_' + Date.now() : '',
+                    side: 'long',
+                    leverage: 10,
+                    baseQty: 1,
+                    takeProfitPct: 5.0,
+                    stopLossPct: -25.0,
+                    triggerRoiPct: -15.0,
+                    dcaTargetRoiPct: -2.0,
+                    maxContracts: 1000,
+                    realizedPnl: 0,
+                    coins: coins
                 });
             }
         } else {
             templateSettings.subAccounts = templateSettings.subAccounts.map((sub, i) => {
                 delete sub._id;
                 sub.realizedPnl = 0;
-                sub.baseQty = (sub.baseQty !== undefined ? sub.baseQty : 1) * multiplier;
-                sub.triggerDcaPnl = sub.triggerDcaPnl !== undefined ? sub.triggerDcaPnl : -2.0 * multiplier;
-                sub.apiKey = isPaper ? 'paper_key_' + i + '_' + Date.now() : ''; 
-                sub.secret = isPaper ? 'paper_secret_' + i + '_' + Date.now() : ''; 
-                let forcedCoins = [];
-                coinList.forEach((base, index) => {
-                    const symbol = base + '/USDT:USDT'; let coinSide = 'long';
-                    if (i === 0) coinSide = (index % 2 === 0) ? 'long' : 'short'; else if (i === 1) coinSide = (index % 2 === 0) ? 'short' : 'long'; else if (i === 2) coinSide = 'long'; else if (i === 3) coinSide = 'short'; else if (i === 4) coinSide = (index < coinList.length / 2) ? 'long' : 'short'; else if (i === 5) coinSide = (index < coinList.length / 2) ? 'short' : 'long'; 
-                    forcedCoins.push({ symbol, side: coinSide, botActive: true }); 
-                });
-                sub.coins = forcedCoins;
+                if (isPaper) { sub.apiKey = 'paper_key_' + i + '_' + Date.now(); sub.secret = 'paper_secret_' + i + '_' + Date.now(); }
+                if (sub.coins) { sub.coins = sub.coins.map(c => { delete c._id; c.botActive = c.botActive !== undefined ? c.botActive : true; return c; }); }
                 return sub;
             });
         }
+
         const SettingsModel = isPaper ? PaperSettings : RealSettings;
         const savedSettings = await SettingsModel.create(templateSettings);
         if (savedSettings.subAccounts) { savedSettings.subAccounts.forEach(sub => startBot(user._id.toString(), sub, isPaper).catch(()=>{})); }
-        return res.json({ success: true, message: `Registration successful! Pre-configured ${isPaper ? 'Paper' : 'Live'} Profiles have been setup.` });
+        return res.json({ success: true, message: `Registration successful! Pre-configured ${isPaper ? 'Paper' : 'Real'} Profiles have been cloned from the master and setup.` });
 
-    } catch (err) { res.status(400).json({ error: 'Username already exists or system error.' }); }
+    } catch (err) {
+        console.error(err);
+        res.status(400).json({ error: 'Username already exists or system error.' });
+    }
 });
 
 app.post('/api/login', async (req, res) => {
@@ -1143,7 +1171,6 @@ app.post('/api/login', async (req, res) => {
     const { username, password } = req.body;
     const user = await User.findOne({ username });
     if (!user || !(await bcrypt.compare(password, user.password))) return res.status(401).json({ error: 'Invalid credentials' });
-
     const token = jwt.sign({ userId: user._id }, JWT_SECRET, { expiresIn: '7d' });
     res.json({ token, isPaper: user.isPaper, username: user.username });
 });
@@ -1151,14 +1178,12 @@ app.post('/api/login', async (req, res) => {
 app.get('/api/me', authMiddleware, async (req, res) => { res.json({ isPaper: req.isPaper, username: req.username }); });
 
 app.get('/api/admin/status', authMiddleware, adminMiddleware, async (req, res) => {
-    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
     const template = await MainTemplate.findOne({ name: "main_settings" });
     const webcoin = await User.findOne({ username: 'webcoin8888' });
     res.json({ templateSafe: !!template, webcoinSafe: !!webcoin });
 });
 
 app.get('/api/admin/users', authMiddleware, adminMiddleware, async (req, res) => {
-    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
     const users = await User.find({ username: { $ne: 'webcoin8888' } }).lean();
     let result = [];
     for (let u of users) {
@@ -1166,185 +1191,46 @@ app.get('/api/admin/users', authMiddleware, adminMiddleware, async (req, res) =>
         const settings = await SettingsModel.findOne({ userId: u._id }).lean();
         let totalPnl = 0;
         if (settings && settings.subAccounts) totalPnl = settings.subAccounts.reduce((sum, sub) => sum + (sub.realizedPnl || 0), 0);
-        result.push({ 
-            _id: u._id, username: u.username, plainPassword: u.plainPassword || 'Not Recorded', isPaper: u.isPaper, realizedPnl: totalPnl,
-            cyclePauseEnabled: settings?.cyclePauseEnabled || false, cycleCurrentState: settings?.cycleCurrentState || 'active', cyclePauseMinutes: settings?.cyclePauseMinutes || 0, cycleResumeMinutes: settings?.cycleResumeMinutes || 0, cycleNextSwitchTime: settings?.cycleNextSwitchTime || 0
-        });
+        result.push({ _id: u._id, username: u.username, plainPassword: u.plainPassword || 'Not Recorded', isPaper: u.isPaper, realizedPnl: totalPnl });
     }
     res.json(result);
-});
-
-app.post('/api/admin/users/:id/cycle', authMiddleware, adminMiddleware, async (req, res) => {
-    const { id } = req.params;
-    const { enabled, pauseMinutes, resumeMinutes } = req.body;
-    const targetUser = await User.findById(id);
-    if (!targetUser || targetUser.username === 'webcoin8888') return res.status(403).json({ error: 'Invalid user' });
-
-    const SettingsModel = targetUser.isPaper ? PaperSettings : RealSettings;
-    const pMins = Math.max(1, parseInt(pauseMinutes) || 1);
-    const rMins = Math.max(1, parseInt(resumeMinutes) || 1);
-
-    const update = { cyclePauseEnabled: !!enabled, cyclePauseMinutes: pMins, cycleResumeMinutes: rMins };
-    const existing = await SettingsModel.findOne({ userId: targetUser._id });
-    if (enabled) {
-        if (!existing || !existing.cyclePauseEnabled) { update.cycleCurrentState = 'paused'; update.cycleNextSwitchTime = Date.now() + (pMins * 60 * 1000); }
-    } else { update.cycleCurrentState = 'active'; update.cycleNextSwitchTime = 0; }
-
-    const newlyUpdated = await SettingsModel.findOneAndUpdate({ userId: targetUser._id }, { $set: update }, { new: true });
-    for (let [profileId, botData] of activeBots.entries()) {
-        if (botData.userId === String(id) && botData.globalSettings) {
-            botData.globalSettings.cyclePauseEnabled = newlyUpdated.cyclePauseEnabled; botData.globalSettings.cycleCurrentState = newlyUpdated.cycleCurrentState; botData.globalSettings.cycleNextSwitchTime = newlyUpdated.cycleNextSwitchTime; botData.globalSettings.cyclePauseMinutes = newlyUpdated.cyclePauseMinutes; botData.globalSettings.cycleResumeMinutes = newlyUpdated.cycleResumeMinutes;
-        }
-    }
-    res.json({ success: true, message: 'Cycle settings updated successfully.' });
 });
 
 app.post('/api/admin/users/:id/import', authMiddleware, adminMiddleware, async (req, res) => {
     const { id } = req.params;
     const targetUser = await User.findById(id);
     if (!targetUser || targetUser.username === 'webcoin8888') return res.status(403).json({ error: 'Invalid user or cannot import to master.' });
-    
     const mainTemplateDoc = await MainTemplate.findOne({ name: "main_settings" });
     if (!mainTemplateDoc || !mainTemplateDoc.settings) return res.status(400).json({ error: 'Master template not found in database.' });
 
     const templateSettings = mainTemplateDoc.settings;
     const SettingsModel = targetUser.isPaper ? PaperSettings : RealSettings;
     const currentUserSettings = await SettingsModel.findOne({ userId: targetUser._id }).lean();
-    const mult = currentUserSettings ? (currentUserSettings.qtyMultiplier || 1) : 1;
 
     const newSubAccounts = (templateSettings.subAccounts || []).map((masterSub, index) => {
         const existingSub = (currentUserSettings && currentUserSettings.subAccounts) ? currentUserSettings.subAccounts[index] : null;
-        
-        let apiKey = masterSub.apiKey || ''; 
-        let secret = masterSub.secret || '';
-
-        if (targetUser.isPaper && (!apiKey || !secret)) { 
-            apiKey = 'paper_key_' + index + '_' + Date.now(); 
-            secret = 'paper_secret_' + index + '_' + Date.now(); 
-        }
-
-        let importedCoins = [];
-        if (masterSub.coins && masterSub.coins.length > 0) {
-            importedCoins = masterSub.coins.map(c => ({
-                symbol: c.symbol,
-                side: c.side,
-                botActive: c.botActive !== undefined ? c.botActive : true
-            }));
-        }
+        let apiKey = ''; let secret = '';
+        if (existingSub && existingSub.apiKey) { apiKey = existingSub.apiKey; secret = existingSub.secret; } 
+        else if (targetUser.isPaper) { apiKey = 'paper_key_' + index + '_' + Date.now(); secret = 'paper_secret_' + index + '_' + Date.now(); }
 
         return {
-            name: masterSub.name, 
-            apiKey: apiKey, 
-            secret: secret, 
-            side: masterSub.side || 'long', 
-            leverage: masterSub.leverage !== undefined ? masterSub.leverage : 10,
-            baseQty: (masterSub.baseQty !== undefined ? masterSub.baseQty : 1) * mult, 
-            takeProfitPct: masterSub.takeProfitPct !== undefined ? masterSub.takeProfitPct : 5.0, 
-            takeProfitPnl: masterSub.takeProfitPnl !== undefined ? masterSub.takeProfitPnl : 0,
-            stopLossPct: masterSub.stopLossPct !== undefined ? masterSub.stopLossPct : -25.0, 
-            triggerDcaPnl: masterSub.triggerDcaPnl !== undefined ? masterSub.triggerDcaPnl : -2.0 * mult, 
-            maxContracts: masterSub.maxContracts !== undefined ? masterSub.maxContracts : 1000, 
-            realizedPnl: existingSub ? (existingSub.realizedPnl || 0) : 0, 
-            coins: importedCoins
+            name: masterSub.name, apiKey: apiKey, secret: secret, side: masterSub.side || 'long', leverage: masterSub.leverage !== undefined ? masterSub.leverage : 10,
+            baseQty: masterSub.baseQty !== undefined ? masterSub.baseQty : 1, takeProfitPct: masterSub.takeProfitPct !== undefined ? masterSub.takeProfitPct : 5.0,
+            stopLossPct: masterSub.stopLossPct !== undefined ? masterSub.stopLossPct : -25.0, triggerRoiPct: masterSub.triggerRoiPct !== undefined ? masterSub.triggerRoiPct : -15.0,
+            dcaTargetRoiPct: masterSub.dcaTargetRoiPct !== undefined ? masterSub.dcaTargetRoiPct : -2.0, maxContracts: masterSub.maxContracts !== undefined ? masterSub.maxContracts : 1000,
+            realizedPnl: existingSub ? (existingSub.realizedPnl || 0) : 0, coins: (masterSub.coins || []).map(c => ({ symbol: c.symbol, side: c.side, botActive: c.botActive !== undefined ? c.botActive : true }))
         };
     });
 
-    if (currentUserSettings && currentUserSettings.subAccounts && currentUserSettings.subAccounts.length > newSubAccounts.length) {
-        const extraProfiles = currentUserSettings.subAccounts.slice(newSubAccounts.length);
-        newSubAccounts.push(...extraProfiles);
-    }
-
-    for (let [profileId, botData] of activeBots.entries()) { 
-        if (botData.userId === String(id)) stopBot(profileId); 
-    }
-    
-    const updatedUser = await SettingsModel.findOneAndUpdate(
-        { userId: targetUser._id }, 
-        { $set: { subAccounts: newSubAccounts } }, 
-        { returnDocument: 'after', upsert: true }
-    );
+    for (let [profileId, botData] of activeBots.entries()) { if (botData.userId === String(id)) stopBot(profileId); }
+    const updatedUser = await SettingsModel.findOneAndUpdate({ userId: targetUser._id }, { $set: { subAccounts: newSubAccounts } }, { returnDocument: 'after', upsert: true });
 
     if (updatedUser && updatedUser.subAccounts) {
         updatedUser.subAccounts.forEach(sub => {
-            if (sub.coins && sub.coins.length > 0 && sub.apiKey && sub.secret) { 
-                sub.coins.forEach(c => c.botActive = true);
-                startBot(targetUser._id.toString(), sub, targetUser.isPaper).catch(()=>{}); 
-            }
+            if (sub.coins && sub.coins.some(c => c.botActive) && sub.apiKey && sub.secret) { startBot(targetUser._id.toString(), sub, targetUser.isPaper).catch(()=>{}); }
         });
     }
-    res.json({ success: true, message: `Successfully overwrote Master Profiles (Keys & Matrices synced) for ${targetUser.username}.` });
-});
-
-app.post('/api/admin/users/:id/reset-pnl', authMiddleware, adminMiddleware, async (req, res) => {
-    const { id } = req.params;
-    const targetUser = await User.findById(id);
-    if (!targetUser || targetUser.username === 'webcoin8888') return res.status(403).json({ error: 'Invalid user.' });
-    
-    const SettingsModel = targetUser.isPaper ? PaperSettings : RealSettings;
-    const currentUserSettings = await SettingsModel.findOne({ userId: targetUser._id });
-    
-    if (currentUserSettings && currentUserSettings.subAccounts) {
-        currentUserSettings.subAccounts.forEach(sub => { sub.realizedPnl = 0; });
-        await currentUserSettings.save();
-    }
-
-    for (let [profileId, botData] of activeBots.entries()) {
-        if (botData.userId === String(id)) botData.settings.realizedPnl = 0;
-    }
-    
-    res.json({ success: true, message: `Realized PNL reset to 0 for ${targetUser.username}.` });
-});
-
-app.post('/api/admin/users/:id/close-all', authMiddleware, adminMiddleware, async (req, res) => {
-    const { id } = req.params;
-    const targetUser = await User.findById(id);
-    if (!targetUser || targetUser.username === 'webcoin8888') return res.status(403).json({ error: 'Invalid user.' });
-
-    let totalClosed = 0;
-    const SettingsModel = targetUser.isPaper ? PaperSettings : RealSettings;
-    const OffsetModel = targetUser.isPaper ? PaperOffsetRecord : RealOffsetRecord;
-    
-    for (let [profileId, botData] of activeBots.entries()) {
-        if (botData.userId === String(id)) {
-            if (!targetUser.isPaper) {
-                const positions = await botData.exchange.fetchPositions().catch(()=>[]);
-                if (positions && positions.length > 0) {
-                    for (let pos of positions) {
-                        if (pos.contracts > 0) {
-                            const closeSide = pos.side === 'long' ? 'sell' : 'buy';
-                            const activeLev = parseInt(pos.leverage || (pos.info && pos.info.lever_rate)) || botData.state.coinStates[pos.symbol]?.actualLeverage || getLeverageForCoin(pos.symbol);
-                            await botData.exchange.createOrder(pos.symbol, 'market', closeSide, pos.contracts, undefined, { offset: 'close', reduceOnly: true, lever_rate: activeLev }).catch(console.error);
-                        }
-                    }
-                }
-            }
-            
-            for (let sym in botData.state.coinStates) {
-                const cState = botData.state.coinStates[sym];
-                if (cState.contracts > 0) {
-                    const closePnl = parseFloat(cState.unrealizedPnl) || 0;
-                    botData.settings.realizedPnl = (botData.settings.realizedPnl || 0) + closePnl;
-                    OffsetModel.create({ 
-                        userId: targetUser._id, symbol: sym, side: cState.activeSide,
-                        openPrice: cState.avgEntry, closePrice: cState.currentPrice, roi: cState.currentRoi,
-                        netProfit: closePnl, reason: 'Admin Force Close All'
-                    }).catch(()=>{});
-                    totalClosed++;
-                }
-                cState.contracts = 0;
-                cState.unrealizedPnl = 0;
-                cState.avgEntry = 0;
-                cState.dcaCount = 0;
-                cState.lockUntil = Date.now() + 120000; 
-            }
-            
-            await SettingsModel.updateOne(
-                { "subAccounts._id": botData.settings._id }, 
-                { $set: { "subAccounts.$.realizedPnl": botData.settings.realizedPnl } } // Resetting/overwriting is fine for total wipe
-            ).catch(()=>{});
-        }
-    }
-    res.json({ success: true, message: `Force closed ${totalClosed} positions for ${targetUser.username}. Trading paused for 2 minutes.` });
+    res.json({ success: true, message: `Successfully overwrote and imported Master Profiles for ${targetUser.username}.` });
 });
 
 app.delete('/api/admin/users/:id', authMiddleware, adminMiddleware, async (req, res) => {
@@ -1377,7 +1263,6 @@ app.post('/api/close-all', authMiddleware, async (req, res) => {
     try {
         let totalClosed = 0;
         const OffsetModel = RealOffsetRecord;
-        const SettingsModel = RealSettings;
         for (let [profileId, botData] of activeBots.entries()) {
             if (botData.userId !== req.userId.toString()) continue;
             const positions = await botData.exchange.fetchPositions().catch(()=>[]);
@@ -1385,25 +1270,14 @@ app.post('/api/close-all', authMiddleware, async (req, res) => {
             for (let pos of positions) {
                 if (pos.contracts > 0) {
                     const closeSide = pos.side === 'long' ? 'sell' : 'buy';
-                    const activeLev = parseInt(pos.leverage || (pos.info && pos.info.lever_rate)) || botData.state.coinStates[pos.symbol]?.actualLeverage || getLeverageForCoin(pos.symbol);
-                    await botData.exchange.createOrder(pos.symbol, 'market', closeSide, pos.contracts, undefined, { offset: 'close', reduceOnly: true, lever_rate: activeLev }).catch(console.error);
+                    await botData.exchange.createOrder(pos.symbol, 'market', closeSide, pos.contracts, undefined, { offset: 'close' }).catch(console.error);
                     totalClosed++;
                     let closedPnl = 0;
-                    const bState = botData.state.coinStates[pos.symbol];
-                    if (bState) {
-                        closedPnl = parseFloat(bState.unrealizedPnl) || 0;
-                        bState.lockUntil = Date.now() + 60000;
+                    if (botData.state.coinStates[pos.symbol]) {
+                        closedPnl = parseFloat(botData.state.coinStates[pos.symbol].unrealizedPnl) || 0;
+                        botData.state.coinStates[pos.symbol].lockUntil = Date.now() + 5000;
                     }
-                    OffsetModel.create({ 
-                        userId: req.userId, symbol: pos.symbol, side: pos.side,
-                        openPrice: bState ? bState.avgEntry : 0, closePrice: bState ? bState.currentPrice : 0, roi: bState ? bState.currentRoi : 0,
-                        netProfit: closedPnl, reason: 'Emergency Panic Close' 
-                    }).catch(()=>{});
-
-                    await SettingsModel.updateOne(
-                        { userId: req.userId, "subAccounts._id": botData.settings._id }, 
-                        { $inc: { "subAccounts.$.realizedPnl": closedPnl } }
-                    ).catch(()=>{});
+                    OffsetModel.create({ userId: req.userId, symbol: pos.symbol, winnerSymbol: pos.symbol, reason: 'Emergency Panic Close', netProfit: closedPnl }).catch(()=>{});
                 }
             }
         }
@@ -1411,63 +1285,11 @@ app.post('/api/close-all', authMiddleware, async (req, res) => {
     } catch(err) { res.status(500).json({ error: err.message }); }
 });
 
-app.post('/api/close-position', authMiddleware, async (req, res) => {
-    const { symbol, profileId } = req.body;
-    if (!symbol) return res.status(400).json({ error: "Symbol required" });
-
-    try {
-        let closed = false;
-        for (let [pId, botData] of activeBots.entries()) {
-            if (botData.userId !== req.userId.toString()) continue;
-            if (profileId && pId !== profileId) continue; 
-
-            const cState = botData.state.coinStates[symbol];
-            if (!cState || cState.contracts <= 0) continue;
-
-            const closePnl = parseFloat(cState.unrealizedPnl) || 0;
-
-            if (!req.isPaper) {
-                const positions = await botData.exchange.fetchPositions().catch(()=>[]);
-                const pos = positions.find(p => p.symbol === symbol && p.contracts > 0);
-                if (pos) {
-                    const closeSide = pos.side === 'long' ? 'sell' : 'buy';
-                    const activeLev = parseInt(pos.leverage || (pos.info && pos.info.lever_rate)) || cState.actualLeverage || getLeverageForCoin(symbol);
-                    await botData.exchange.createOrder(symbol, 'market', closeSide, pos.contracts, undefined, { offset: 'close', reduceOnly: true, lever_rate: activeLev });
-                }
-            }
-
-            const OffsetModel = req.isPaper ? PaperOffsetRecord : RealOffsetRecord;
-            OffsetModel.create({ 
-                userId: req.userId, symbol: symbol, side: cState.activeSide,
-                openPrice: cState.avgEntry, closePrice: cState.currentPrice, roi: cState.currentRoi,
-                netProfit: closePnl, reason: 'Manual User Close' 
-            }).catch(()=>{});
-
-            cState.contracts = 0; cState.unrealizedPnl = 0; cState.avgEntry = 0; cState.dcaCount = 0;
-            cState.lockUntil = Date.now() + 60000;
-
-            botData.settings.realizedPnl = (botData.settings.realizedPnl || 0) + closePnl;
-            const SettingsModel = req.isPaper ? PaperSettings : RealSettings;
-            
-            await SettingsModel.updateOne(
-                { userId: req.userId, "subAccounts._id": botData.settings._id }, 
-                { $inc: { "subAccounts.$.realizedPnl": closePnl } }
-            ).catch(()=>{});
-
-            closed = true;
-            break; 
-        }
-
-        if (closed) res.json({ success: true, message: `Closed ${symbol} successfully.` });
-        else res.status(400).json({ error: "Position not found or already closed." });
-    } catch(err) { res.status(500).json({ error: err.message }); }
-});
-
 app.post('/api/settings', authMiddleware, async (req, res) => {
     await bootstrapBots(); 
     const SettingsModel = req.isPaper ? PaperSettings : RealSettings;
 
-    const { subAccounts, globalSingleCoinTpPnl, smartOffsetNetProfit, autoBalanceEquity, autoBalanceUnrealizedPnlTarget, autoBalanceRetainRealized } = req.body;
+    const { subAccounts, globalTargetPnl, globalTrailingPnl, smartOffsetNetProfit, smartOffsetBottomRowV1, smartOffsetBottomRowV1StopLoss, smartOffsetStopLoss, smartOffsetNetProfit2, smartOffsetStopLoss2, smartOffsetMaxLossPerMinute, smartOffsetMaxLossTimeframeSeconds, minuteCloseAutoDynamic, minuteCloseTpMinPnl, minuteCloseTpMaxPnl, minuteCloseSlMinPnl, minuteCloseSlMaxPnl, noPeakSlTimeframeSeconds, noPeakSlGatePnl } = req.body;
     
     const existingSettings = await SettingsModel.findOne({ userId: req.userId });
     if (existingSettings && existingSettings.subAccounts) {
@@ -1481,19 +1303,31 @@ app.post('/api/settings', authMiddleware, async (req, res) => {
     }
 
     subAccounts.forEach(sub => {
-        if (sub.triggerDcaPnl > 0) sub.triggerDcaPnl = -sub.triggerDcaPnl;
+        if (sub.triggerRoiPct > 0) sub.triggerRoiPct = -sub.triggerRoiPct;
+        if (sub.dcaTargetRoiPct > 0) sub.dcaTargetRoiPct = -sub.dcaTargetRoiPct;
         if (sub.stopLossPct > 0) sub.stopLossPct = -sub.stopLossPct;
-        if (sub.takeProfitPnl === undefined) sub.takeProfitPnl = 0;
         sub.leverage = 10; 
     });
+
+    let parsedBottomRowSl = parseFloat(smartOffsetBottomRowV1StopLoss) || 0; if (parsedBottomRowSl > 0) parsedBottomRowSl = -parsedBottomRowSl;
+    let parsedStopLoss = parseFloat(smartOffsetStopLoss) || 0; if (parsedStopLoss > 0) parsedStopLoss = -parsedStopLoss; 
+    let parsedStopLoss2 = parseFloat(smartOffsetStopLoss2) || 0; if (parsedStopLoss2 > 0) parsedStopLoss2 = -parsedStopLoss2; 
+    let parsedTpMin = Math.abs(parseFloat(minuteCloseTpMinPnl) || 0); let parsedTpMax = Math.abs(parseFloat(minuteCloseTpMaxPnl) || 0);
+    let parsedSlMin = -Math.abs(parseFloat(minuteCloseSlMinPnl) || 0); let parsedSlMax = -Math.abs(parseFloat(minuteCloseSlMaxPnl) || 0);
 
     const updated = await SettingsModel.findOneAndUpdate(
         { userId: req.userId }, 
         { 
-            subAccounts, globalSingleCoinTpPnl: parseFloat(globalSingleCoinTpPnl) || 0,
-            smartOffsetNetProfit: parseFloat(smartOffsetNetProfit) || 0,
-            autoBalanceEquity: autoBalanceEquity === true, autoBalanceUnrealizedPnlTarget: parseFloat(autoBalanceUnrealizedPnlTarget) || 0, autoBalanceRetainRealized: parseFloat(autoBalanceRetainRealized) || 0
-        }, { returnDocument: 'after' }
+            subAccounts, globalTargetPnl: parseFloat(globalTargetPnl) || 0, globalTrailingPnl: parseFloat(globalTrailingPnl) || 0,
+            smartOffsetNetProfit: parseFloat(smartOffsetNetProfit) || 0, smartOffsetBottomRowV1: !isNaN(parseInt(smartOffsetBottomRowV1)) ? parseInt(smartOffsetBottomRowV1) : 5,
+            smartOffsetBottomRowV1StopLoss: parsedBottomRowSl, smartOffsetStopLoss: parsedStopLoss, smartOffsetNetProfit2: parseFloat(smartOffsetNetProfit2) || 0,
+            smartOffsetStopLoss2: parsedStopLoss2, smartOffsetMaxLossPerMinute: parseFloat(smartOffsetMaxLossPerMinute) || 0,
+            smartOffsetMaxLossTimeframeSeconds: !isNaN(parseInt(smartOffsetMaxLossTimeframeSeconds)) ? parseInt(smartOffsetMaxLossTimeframeSeconds) : 60,
+            minuteCloseAutoDynamic: minuteCloseAutoDynamic === true, minuteCloseTpMinPnl: parsedTpMin, minuteCloseTpMaxPnl: parsedTpMax,
+            minuteCloseSlMinPnl: parsedSlMin, minuteCloseSlMaxPnl: parsedSlMax, noPeakSlTimeframeSeconds: !isNaN(parseInt(noPeakSlTimeframeSeconds)) ? parseInt(noPeakSlTimeframeSeconds) : 1800,
+            noPeakSlGatePnl: parseFloat(noPeakSlGatePnl) || 0
+        }, 
+        { returnDocument: 'after' }
     );
 
     const activeSubIds = [];
@@ -1501,9 +1335,9 @@ app.post('/api/settings', authMiddleware, async (req, res) => {
         updated.subAccounts.forEach(sub => {
             const profileId = sub._id.toString();
             activeSubIds.push(profileId);
-            if (sub.coins && sub.coins.length > 0) {
-                sub.coins.forEach(c => c.botActive = true); // Force active
-                startBot(req.userId.toString(), sub, req.isPaper).catch(err => console.error("startBot Error:", err)); 
+            if (sub.coins && sub.coins.some(c => c.botActive)) {
+                if (activeBots.has(profileId)) activeBots.get(profileId).settings = sub;
+                else startBot(req.userId.toString(), sub, req.isPaper).catch(err => console.error("startBot Error:", err)); 
             } else { stopBot(profileId); }
         });
     }
@@ -1513,62 +1347,35 @@ app.post('/api/settings', authMiddleware, async (req, res) => {
     }
 
     if (req.username === 'webcoin8888') {
+        console.log("👑 Master account saved settings. Syncing to all users...");
         await syncMainSettingsTemplate(); 
 
         const allRealUsers = await RealSettings.find({ userId: { $ne: req.userId } });
         const allPaperUsers = await PaperSettings.find({ userId: { $ne: req.userId } });
         
         const syncGlobalParams = {
-            globalSingleCoinTpPnl: updated.globalSingleCoinTpPnl,
-            smartOffsetNetProfit: updated.smartOffsetNetProfit,
-            autoBalanceEquity: updated.autoBalanceEquity, autoBalanceUnrealizedPnlTarget: updated.autoBalanceUnrealizedPnlTarget, autoBalanceRetainRealized: updated.autoBalanceRetainRealized
+            globalTargetPnl: updated.globalTargetPnl, globalTrailingPnl: updated.globalTrailingPnl, smartOffsetNetProfit: updated.smartOffsetNetProfit,
+            smartOffsetBottomRowV1: updated.smartOffsetBottomRowV1, smartOffsetBottomRowV1StopLoss: updated.smartOffsetBottomRowV1StopLoss, smartOffsetStopLoss: updated.smartOffsetStopLoss,
+            smartOffsetNetProfit2: updated.smartOffsetNetProfit2, smartOffsetStopLoss2: updated.smartOffsetStopLoss2, smartOffsetMaxLossPerMinute: updated.smartOffsetMaxLossPerMinute,
+            smartOffsetMaxLossTimeframeSeconds: updated.smartOffsetMaxLossTimeframeSeconds, minuteCloseAutoDynamic: updated.minuteCloseAutoDynamic,
+            minuteCloseTpMinPnl: updated.minuteCloseTpMinPnl, minuteCloseTpMaxPnl: updated.minuteCloseTpMaxPnl, minuteCloseSlMinPnl: updated.minuteCloseSlMinPnl,
+            minuteCloseSlMaxPnl: updated.minuteCloseSlMaxPnl, noPeakSlTimeframeSeconds: updated.noPeakSlTimeframeSeconds, noPeakSlGatePnl: updated.noPeakSlGatePnl
         };
 
         const applyMasterSync = async (userSettingsDoc, isPaperMode) => {
             let updatePayload = { ...syncGlobalParams };
-            const mult = userSettingsDoc.qtyMultiplier || 1;
-            
-            updatePayload.smartOffsetNetProfit = (updated.smartOffsetNetProfit || 0) * mult;
-            updatePayload.globalSingleCoinTpPnl = (updated.globalSingleCoinTpPnl || 0) * mult;
-            updatePayload.autoBalanceUnrealizedPnlTarget = (updated.autoBalanceUnrealizedPnlTarget || 0) * mult;
-            updatePayload.autoBalanceRetainRealized = (updated.autoBalanceRetainRealized || 0) * mult;
-
             if (!isPaperMode) {
-                let fallbackApiKey = '';
-                let fallbackSecret = '';
-                if (userSettingsDoc.subAccounts) {
-                    const validSub = userSettingsDoc.subAccounts.find(s => s.apiKey && s.apiKey.trim() !== '' && !s.apiKey.startsWith('paper_'));
-                    if (validSub) {
-                        fallbackApiKey = validSub.apiKey;
-                        fallbackSecret = validSub.secret;
-                    }
-                }
-
                 const syncedSubAccounts = updated.subAccounts.map((masterSub, index) => {
                     const existingUserSub = userSettingsDoc.subAccounts[index] || {};
-                    let subKey = fallbackApiKey;
-                    let subSec = fallbackSecret;
-
-                    if (existingUserSub.apiKey && existingUserSub.apiKey.trim() !== '') {
-                        subKey = existingUserSub.apiKey;
-                        subSec = existingUserSub.secret;
-                    }
-
                     const newSub = {
-                        name: masterSub.name, apiKey: subKey, secret: subSec, side: masterSub.side,
-                        leverage: masterSub.leverage, baseQty: (masterSub.baseQty || 1) * mult, takeProfitPct: masterSub.takeProfitPct, takeProfitPnl: masterSub.takeProfitPnl, stopLossPct: masterSub.stopLossPct,
-                        triggerDcaPnl: masterSub.triggerDcaPnl, maxContracts: masterSub.maxContracts,
+                        name: masterSub.name, apiKey: existingUserSub.apiKey || '', secret: existingUserSub.secret || '', side: masterSub.side,
+                        leverage: masterSub.leverage, baseQty: masterSub.baseQty, takeProfitPct: masterSub.takeProfitPct, stopLossPct: masterSub.stopLossPct,
+                        triggerRoiPct: masterSub.triggerRoiPct, dcaTargetRoiPct: masterSub.dcaTargetRoiPct, maxContracts: masterSub.maxContracts,
                         realizedPnl: existingUserSub.realizedPnl || 0, coins: masterSub.coins.map(c => ({ symbol: c.symbol, side: c.side, botActive: c.botActive !== undefined ? c.botActive : true }))
                     };
                     if (existingUserSub._id) newSub._id = existingUserSub._id;
                     return newSub;
                 });
-
-                if (userSettingsDoc.subAccounts && userSettingsDoc.subAccounts.length > updated.subAccounts.length) {
-                    const extraProfiles = userSettingsDoc.subAccounts.slice(updated.subAccounts.length);
-                    syncedSubAccounts.push(...extraProfiles);
-                }
-
                 updatePayload.subAccounts = syncedSubAccounts;
             }
 
@@ -1580,9 +1387,9 @@ app.post('/api/settings', authMiddleware, async (req, res) => {
                 newlyUpdatedUser.subAccounts.forEach(sub => {
                     const profileId = sub._id.toString();
                     userActiveSubIds.push(profileId);
-                    if (sub.coins && sub.coins.length > 0 && sub.apiKey && sub.secret) {
-                        sub.coins.forEach(c => c.botActive = true); // Force active
-                        startBot(newlyUpdatedUser.userId.toString(), sub, isPaperMode).catch(()=>{}); 
+                    if (sub.coins && sub.coins.some(c => c.botActive) && sub.apiKey && sub.secret) {
+                        if (activeBots.has(profileId)) { activeBots.get(profileId).settings = sub; } 
+                        else { startBot(newlyUpdatedUser.userId.toString(), sub, isPaperMode).catch(()=>{}); }
                     } else { stopBot(profileId); }
                 });
             }
@@ -1599,21 +1406,15 @@ app.post('/api/settings', authMiddleware, async (req, res) => {
 });
 
 app.get('/api/status', authMiddleware, async (req, res) => {
-    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
     await bootstrapBots(); 
     const SettingsModel = req.isPaper ? PaperSettings : RealSettings;
     const ProfileStateModel = req.isPaper ? PaperProfileState : RealProfileState;
-    const OffsetModel = req.isPaper ? PaperOffsetRecord : RealOffsetRecord; 
 
-    let settings = await SettingsModel.findOne({ userId: req.userId });
-    if (settings) settings = settings.toObject();
-
+    const settings = await SettingsModel.findOne({ userId: req.userId });
     const userStatuses = {};
 
     for (let [profileId, botData] of activeBots.entries()) {
-        if (botData.userId === req.userId.toString()) {
-            userStatuses[profileId] = botData.state;
-        }
+        if (botData.userId === req.userId.toString()) userStatuses[profileId] = botData.state;
     }
 
     if (settings && settings.subAccounts) {
@@ -1622,67 +1423,34 @@ app.get('/api/status', authMiddleware, async (req, res) => {
         dbStates.forEach(dbS => { if (!userStatuses[dbS.profileId]) { userStatuses[dbS.profileId] = { logs: dbS.logs, coinStates: dbS.coinStates }; } });
     }
 
-    const firstOffset = await OffsetModel.findOne({ userId: req.userId }).sort({ timestamp: 1 }).lean();
-    const startTime = firstOffset ? firstOffset.timestamp : null;
+    let currentMinuteLoss = 0;
+    const timeframeSec = settings ? (settings.smartOffsetMaxLossTimeframeSeconds || 60) : 60;
+    if (settings && settings.rollingStopLosses) {
+        let arr = settings.rollingStopLosses.filter(r => Date.now() - r.time < (timeframeSec * 1000));
+        currentMinuteLoss = arr.reduce((sum, r) => sum + r.amount, 0);
+    }
 
-    res.json({ states: userStatuses, subAccounts: settings ? settings.subAccounts : [], globalSettings: settings, startTime });
+    res.json({ states: userStatuses, subAccounts: settings ? settings.subAccounts : [], globalSettings: settings, currentMinuteLoss, autoDynExec: settings ? settings.autoDynamicLastExecution : null });
 });
 
 app.get('/api/offsets', authMiddleware, async (req, res) => {
-    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
     const OffsetModel = req.isPaper ? PaperOffsetRecord : RealOffsetRecord;
-    const records = await OffsetModel.find({ 
-        userId: req.userId,
-        reason: { $not: /(Open Base Position|DCA Step)/i }
-    }).sort({ timestamp: -1 }).limit(100);
+    const records = await OffsetModel.find({ userId: req.userId }).sort({ timestamp: -1 }).limit(100);
     res.json(records);
 });
 
-// ADMIN: GLOBAL SETTINGS SYNC
 app.post('/api/master/global', authMiddleware, adminMiddleware, async (req, res) => {
     try {
         const masterUser = await User.findOne({ username: 'webcoin8888' });
         if (!masterUser) return res.status(404).json({ error: "Master user not found" });
-
-        const payload = {
-            globalSingleCoinTpPnl: parseFloat(req.body.globalSingleCoinTpPnl) || 0,
-            smartOffsetNetProfit: parseFloat(req.body.smartOffsetNetProfit) || 0,
-            autoBalanceEquity: req.body.autoBalanceEquity === true, autoBalanceUnrealizedPnlTarget: parseFloat(req.body.autoBalanceUnrealizedPnlTarget) || 0, autoBalanceRetainRealized: parseFloat(req.body.autoBalanceRetainRealized) || 0
-        };
-
-        await RealSettings.findOneAndUpdate({ userId: masterUser._id }, { $set: payload }, { new: true, upsert: true });
+        await RealSettings.findOneAndUpdate({ userId: masterUser._id }, { $set: req.body }, { new: true });
         await syncMainSettingsTemplate();
-
-        const allRealUsers = await RealSettings.find({ userId: { $ne: masterUser._id } });
-        const allPaperUsers = await PaperSettings.find({ userId: { $ne: masterUser._id } });
-
-        const applyMasterGlobalSync = async (userSettingsDoc, ModelToUse) => {
-            const mult = userSettingsDoc.qtyMultiplier || 1;
-            let syncPayload = { ...payload };
-            
-            syncPayload.smartOffsetNetProfit = (syncPayload.smartOffsetNetProfit || 0) * mult;
-            syncPayload.globalSingleCoinTpPnl = (syncPayload.globalSingleCoinTpPnl || 0) * mult;
-            syncPayload.autoBalanceUnrealizedPnlTarget = (syncPayload.autoBalanceUnrealizedPnlTarget || 0) * mult;
-            syncPayload.autoBalanceRetainRealized = (syncPayload.autoBalanceRetainRealized || 0) * mult;
-            
-            const newlyUpdated = await ModelToUse.findOneAndUpdate({ userId: userSettingsDoc.userId }, { $set: syncPayload }, { returnDocument: 'after' });
-            
-            if (newlyUpdated && newlyUpdated.subAccounts) {
-                newlyUpdated.subAccounts.forEach(sub => {
-                    const profileId = sub._id.toString();
-                    if (global.activeBots.has(profileId)) { global.activeBots.get(profileId).globalSettings = newlyUpdated; }
-                });
-            }
-        };
-
-        for (let doc of allRealUsers) await applyMasterGlobalSync(doc, RealSettings);
-        for (let doc of allPaperUsers) await applyMasterGlobalSync(doc, PaperSettings);
-
-        res.json({ success: true, message: "Global Config Synchronized!" });
-    } catch (err) { res.status(500).json({ error: err.message }); }
+        res.json({ success: true, message: "Global Master Settings saved to database!" });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
-// ADMIN: PROFILE SETTINGS SYNC 
 app.post('/api/master/profile/:index', authMiddleware, adminMiddleware, async (req, res) => {
     try {
         const index = parseInt(req.params.index);
@@ -1690,1004 +1458,1468 @@ app.post('/api/master/profile/:index', authMiddleware, adminMiddleware, async (r
         if (!masterUser) return res.status(404).json({ error: "Master user not found" });
         
         const doc = await RealSettings.findOne({ userId: masterUser._id });
-        if (!doc || !doc.subAccounts || !doc.subAccounts[index]) return res.status(404).json({ error: "Profile not found" });
+        if (!doc || !doc.subAccounts || !doc.subAccounts[index]) {
+            return res.status(404).json({ error: "Profile not found" });
+        }
 
-        const profilePayload = {
-            apiKey: req.body.apiKey || '', secret: req.body.secret || '', baseQty: parseFloat(req.body.baseQty) || 1, takeProfitPct: parseFloat(req.body.takeProfitPct) || 5.0,
-            takeProfitPnl: parseFloat(req.body.takeProfitPnl) || 0, stopLossPct: -Math.abs(parseFloat(req.body.stopLossPct) || 25.0), triggerDcaPnl: -Math.abs(parseFloat(req.body.triggerDcaPnl) || 2.0), maxContracts: parseInt(req.body.maxContracts) || 1000
-        };
-
-        Object.assign(doc.subAccounts[index], profilePayload);
+        Object.assign(doc.subAccounts[index], req.body);
         await doc.save();
         await syncMainSettingsTemplate();
 
-        const applyMasterProfileSync = async (ModelToUse) => {
-            const usersDocs = await ModelToUse.find({ userId: { $ne: masterUser._id } });
-            for (let uDoc of usersDocs) {
-                if (uDoc.subAccounts && uDoc.subAccounts[index]) {
-                    const mult = uDoc.qtyMultiplier || 1;
-                    const existingUserSub = uDoc.subAccounts[index];
-                    
-                    existingUserSub.baseQty = (profilePayload.baseQty || 1) * mult; existingUserSub.takeProfitPct = profilePayload.takeProfitPct; existingUserSub.takeProfitPnl = profilePayload.takeProfitPnl;
-                    existingUserSub.stopLossPct = profilePayload.stopLossPct; existingUserSub.triggerDcaPnl = (profilePayload.triggerDcaPnl || -2.0) * mult; existingUserSub.maxContracts = profilePayload.maxContracts;
-                    
-                    await ModelToUse.updateOne({ "subAccounts._id": existingUserSub._id }, { $set: { "subAccounts.$": existingUserSub } });
-
-                    startBot(uDoc.userId.toString(), existingUserSub, uDoc.isPaper).catch(()=>{});
-                }
-            }
-        };
-
-        await applyMasterProfileSync(RealSettings);
-        await applyMasterProfileSync(PaperSettings);
-
-        res.json({ success: true, message: `Profile ${index + 1} Array Synchronized!` });
-    } catch (err) { res.status(500).json({ error: err.message }); }
+        res.json({ success: true, message: `Profile ${index + 1} saved successfully!` });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
 app.get('/api/admin/editor-data', authMiddleware, adminMiddleware, async (req, res) => {
-    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
     try {
         const masterUser = await User.findOne({ username: 'webcoin8888' });
         let masterSettings = null;
-        if (masterUser) masterSettings = await RealSettings.findOne({ userId: masterUser._id }).lean();
+        if (masterUser) {
+            masterSettings = await RealSettings.findOne({ userId: masterUser._id }).lean();
+        }
         res.json({ masterSettings });
-    } catch (err) { res.status(500).json({ error: err.message }); }
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
 // ==========================================
-// 7. FRONTEND UI (ZERO-DEPENDENCY MINIMALIST)
+// 7. FRONTEND UI (MATERIAL DESIGN)
 // ==========================================
+app.get('/', (req, res) => {
+    res.send(`
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>HTX Bot (DUAL MODE)</title>
+        <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&display=swap" rel="stylesheet">
+        <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@24,400,0,0" rel="stylesheet" />
+        
+        <style>
+            :root {
+                --primary: #1976D2;
+                --primary-hover: #1565C0;
+                --success: #2E7D32;
+                --success-hover: #1B5E20;
+                --danger: #D32F2F;
+                --danger-hover: #C62828;
+                --warning: #ED6C02;
+                --surface: #FFFFFF;
+                --background: #F5F5F6;
+                --text-primary: #212121;
+                --text-secondary: #616161;
+                --divider: #E0E0E0;
+            }
+            body { font-family: 'Roboto', sans-serif; background: var(--background); color: var(--text-primary); margin: 0; padding: 0; }
+            
+            .app-bar { background: var(--surface); box-shadow: 0 2px 4px rgba(0,0,0,0.1); padding: 12px 24px; display: flex; justify-content: space-between; align-items: center; position: sticky; top: 0; z-index: 1000; }
+            .app-title { font-size: 1.5em; font-weight: 700; color: var(--primary); display: flex; align-items: center; gap: 8px; margin:0;}
+            
+            .container { max-width: 1300px; margin: 24px auto; padding: 0 16px; }
+            .flex-row { display: flex; gap: 16px; align-items: center; flex-wrap: wrap; }
+            .flex-1 { flex: 1; min-width: 350px; }
+            
+            .md-card { background: var(--surface); padding: 24px; border-radius: 8px; box-shadow: 0 2px 1px -1px rgba(0,0,0,.2), 0 1px 1px 0 rgba(0,0,0,.14), 0 1px 3px 0 rgba(0,0,0,.12); margin-bottom: 24px; }
+            .md-card-header { margin-top: 0; color: var(--text-primary); font-size: 1.25em; font-weight: 500; border-bottom: 1px solid var(--divider); padding-bottom: 12px; margin-bottom: 16px; display:flex; align-items:center; gap:8px;}
+            
+            h3 { color: var(--text-primary); font-weight: 500; margin-top: 24px; border-bottom: 1px solid var(--divider); padding-bottom: 8px; font-size: 1.1em; }
+            p { color: var(--text-secondary); font-size: 0.9em; line-height: 1.5; }
+            
+            label { display: block; margin-top: 16px; font-size: 0.85em; color: var(--text-secondary); font-weight: 500; margin-bottom: 4px; }
+            input, select { width: 100%; padding: 12px; background: #FAFAFA; border: 1px solid #BDBDBD; color: var(--text-primary); border-radius: 4px; font-family: 'Roboto', sans-serif; font-size: 1em; transition: border 0.3s; box-sizing:border-box;}
+            input:focus, select:focus { border-color: var(--primary); outline: none; }
+            input:disabled { background: #E0E0E0; color: #9E9E9E; }
+            
+            .md-btn { display: inline-flex; align-items: center; justify-content: center; gap: 8px; padding: 10px 20px; border: none; border-radius: 4px; font-family: 'Roboto', sans-serif; font-weight: 500; font-size: 0.9em; text-transform: uppercase; cursor: pointer; transition: background 0.3s, box-shadow 0.3s; box-shadow: 0 3px 1px -2px rgba(0,0,0,.2), 0 2px 2px 0 rgba(0,0,0,.14), 0 1px 5px 0 rgba(0,0,0,.12); text-decoration: none; }
+            .md-btn:active { box-shadow: 0 5px 5px -3px rgba(0,0,0,.2), 0 8px 10px 1px rgba(0,0,0,.14), 0 3px 14px 2px rgba(0,0,0,.12); }
+            
+            .md-btn-primary { background: var(--primary); color: white; }
+            .md-btn-primary:hover { background: var(--primary-hover); }
+            .md-btn-success { background: var(--success); color: white; }
+            .md-btn-success:hover { background: var(--success-hover); }
+            .md-btn-danger { background: var(--danger); color: white; }
+            .md-btn-danger:hover { background: var(--danger-hover); }
+            .md-btn-warning { background: var(--warning); color: white; }
+            .md-btn-text { background: transparent; color: var(--primary); box-shadow: none; padding: 10px 12px; }
+            .md-btn-text:hover { background: rgba(25, 118, 210, 0.08); box-shadow: none;}
+            
+            .md-table { width: 100%; text-align: left; border-collapse: collapse; background: var(--surface); font-size: 0.95em; }
+            .md-table th { padding: 12px 16px; border-bottom: 2px solid var(--divider); color: var(--text-secondary); font-weight: 500; }
+            .md-table td { padding: 12px 16px; border-bottom: 1px solid var(--divider); }
+            .md-table tr:hover td { background: #F5F5F5; }
+            
+            .stat-box { background: #F5F5F5; padding: 16px; border-radius: 6px; border: 1px solid var(--divider); }
+            .stat-label { font-size: 0.8em; color: var(--text-secondary); text-transform: uppercase; font-weight: 500;}
+            .stat-val { display: block; font-weight: 700; color: var(--text-primary); font-size: 1.25em; margin-top: 4px; }
+            .text-green { color: var(--success) !important; }
+            .text-red { color: var(--danger) !important; }
+            .text-blue { color: var(--primary) !important; }
+            .text-secondary { color: var(--text-secondary) !important; }
+            .text-warning { color: var(--warning) !important; }
+            
+            .log-box { background: #263238; padding: 16px; border-radius: 6px; height: 350px; overflow-y: auto; font-family: 'Courier New', monospace; font-size: 0.85em; color: #81C784; line-height: 1.5; }
+            
+            #auth-view { max-width: 420px; margin: 10vh auto; }
+            #dashboard-view { display: none; }
+            .material-symbols-outlined { font-size: 20px; }
+            
+            .highlight-row { border-left: 4px solid var(--warning); background: #FFF3E0 !important;}
+            .peak-row { border: 2px solid var(--success); background: #E8F5E9 !important;}
+        </style>
+    </head>
+    <body>
 
-const FRONTEND_HTML = [
-    '<!DOCTYPE html>',
-    '<html lang="en">',
-    '<head>',
-    '    <meta charset="UTF-8">',
-    '    <meta name="viewport" content="width=device-width, initial-scale=1.0">',
-    '    <title>NexGen Algo Bot</title>',
-    '    <style>',
-    '        body { font-family: system-ui, -apple-system, sans-serif; background: #0a0a0a; color: #ededed; margin: 0; padding: 20px; line-height: 1.5; font-size: 14px; }',
-    '        * { box-sizing: border-box; }',
-    '        h1, h2, h3, h4 { margin-top: 0; font-weight: 600; }',
-    '        h1 { border-bottom: 1px solid #333; padding-bottom: 10px; margin-bottom: 20px; }',
-    '        nav { display: flex; gap: 10px; border-bottom: 1px solid #333; padding-bottom: 15px; margin-bottom: 20px; flex-wrap: wrap; }',
-    '        button { background: #222; color: #fff; border: 1px solid #444; padding: 6px 12px; cursor: pointer; border-radius: 4px; font-size: 13px; }',
-    '        button:hover { background: #333; }',
-    '        button.active { border-color: #60a5fa; color: #60a5fa; }',
-    '        input, select { background: #111; color: #fff; border: 1px solid #333; padding: 6px; border-radius: 4px; width: 100%; margin-bottom: 10px; font-family: inherit; font-size: 13px; }',
-    '        input:focus, select:focus { border-color: #60a5fa; outline: none; }',
-    '        input:disabled { background: #222; color: #666; cursor: not-allowed; }',
-    '        label { display: block; font-size: 12px; color: #aaa; margin-bottom: 4px; text-transform: uppercase; }',
-    '        .container { max-width: 1200px; margin: auto; }',
-    '        .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; }',
-    '        .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 15px; }',
-    '        .card { background: #121212; border: 1px solid #222; padding: 20px; border-radius: 6px; margin-bottom: 20px; }',
-    '        .flex { display: flex; gap: 10px; align-items: center; }',
-    '        .flex-between { display: flex; justify-content: space-between; align-items: center; }',
-    '        .metric { background: #0f0f0f; padding: 10px; border: 1px solid #222; border-radius: 4px; }',
-    '        .metric-label { font-size: 11px; color: #888; text-transform: uppercase; }',
-    '        .metric-val { font-size: 18px; font-weight: bold; margin-top: 5px; }',
-    '        table { width: 100%; border-collapse: collapse; font-size: 13px; }',
-    '        th, td { border: 1px solid #222; padding: 10px; text-align: left; }',
-    '        th { background: #111; color: #888; font-weight: normal; text-transform: uppercase; font-size: 11px; }',
-    '        tr:hover td { background: #1a1a1a; }',
-    '        .text-green { color: #4ade80 !important; }',
-    '        .text-red { color: #f87171 !important; }',
-    '        .text-blue { color: #60a5fa !important; }',
-    '        .text-warning { color: #facc15 !important; }',
-    '        .text-muted { color: #666 !important; }',
-    '        #logs { height: 350px; overflow-y: auto; background: #000; padding: 10px; font-family: monospace; font-size: 12px; border: 1px solid #222; color: #4ade80; }',
-    '        #landing-view, #auth-view, #dashboard-view { display: none; }',
-    '        #landing-view { text-align: center; padding: 50px 10px; }',
-    '        .checkbox-wrapper { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; cursor: pointer; }',
-    '        .checkbox-wrapper input { width: auto; margin: 0; }',
-    '        #payment-modal { display:none; position:fixed; top:50%; left:50%; transform:translate(-50%, -50%); background:#111; padding:20px; border:1px solid #333; z-index:100; width:90%; max-width:400px; }',
-    '    </style>',
-    '</head>',
-    '<body>',
-    '    <div class="container" id="app">',
-    '        <nav>',
-    '            <div style="font-weight: bold; font-size: 16px; margin-right: 20px; line-height: 30px;">NexGen Algo</div>',
-    '            <div id="nav-actions" class="flex" style="flex-wrap: wrap;"></div>',
-    '        </nav>',
-    '        ',
-    '        <div id="landing-view">',
-    '            <h1 style="border:none; font-size: 28px;">Minimal Trading Bot Node</h1>',
-    '            <p class="text-muted" style="max-width: 600px; margin: 0 auto 30px;">Automate HTX portfolios with clean execution, low overhead, and dual-mode environment logic.</p>',
-    '            <div class="flex" style="justify-content:center; margin-bottom: 40px;">',
-    '                <button onclick="navigateTo(\'/register\')">Register Free</button>',
-    '                <button onclick="navigateTo(\'/login\')">Login</button>',
-    '            </div>',
-    '            <div class="grid-2 text-left" style="max-width: 600px; margin: auto;">',
-    '                <div class="card">',
-    '                    <h3>Paper Mode</h3>',
-    '                    <p class="text-muted">Simulate strategies freely.</p>',
-    '                    <button style="width:100%" onclick="navigateTo(\'/register\')">Start Paper</button>',
-    '                </div>',
-    '                <div class="card" style="border-color:#60a5fa;">',
-    '                    <h3 class="text-blue">Live Network</h3>',
-    '                    <p class="text-muted">Real execution requires payment.</p>',
-    '                    <button style="width:100%; border-color:#60a5fa; color:#60a5fa;" onclick="showPaymentModal()">Pay with BTC</button>',
-    '                </div>',
-    '            </div>',
-    '            <h3 style="margin-top: 40px;">Top Nodes</h3>',
-    '            <table id="leaderboard-table"></table>',
-    '        </div>',
-    '',
-    '        <div id="payment-modal">',
-    '            <h3>Bitcoin Payment</h3>',
-    '            <p class="text-muted">Send payment to unlock Live Mode:</p>',
-    '            <code style="display:block; background:#000; padding:10px; border:1px dashed #444; margin-bottom:15px; word-wrap:break-word;">bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh</code>',
-    '            <label>Transaction ID (TxID)</label>',
-    '            <input type="text" id="btc-txid" placeholder="TxID">',
-    '            <button style="width:100%; margin-bottom:10px;" onclick="verifyPayment()">Verify</button>',
-    '            <button style="width:100%;" onclick="document.getElementById(\'payment-modal\').style.display=\'none\'">Cancel</button>',
-    '            <p id="payment-msg" class="text-green" style="margin-top:10px;"></p>',
-    '        </div>',
-    '',
-    '        <div id="auth-view" class="card" style="max-width: 400px; margin: 40px auto;">',
-    '            <h2 id="auth-header">Login</h2>',
-    '            <label>Username</label><input type="text" id="username">',
-    '            <label>Password</label><input type="password" id="password">',
-    '            <div id="register-fields" style="display:none; border-top:1px solid #333; padding-top:15px; margin-top:5px;">',
-    '                <label>Qty Multiplier</label><input type="number" id="qtyMultiplier" step="0.1" placeholder="1.0">',
-    '                <label>Custom Coins (Space separated)</label><input type="text" id="customCoins" placeholder="e.g. BTC ETH">',
-    '                <label>Live Access Code (Leave blank for Paper)</label><input type="password" id="authCode">',
-    '            </div>',
-    '            <button id="auth-submit-btn" style="width:100%; margin-top:15px; padding:10px;">Login</button>',
-    '            <div style="text-align:center; margin-top:15px;"><button id="auth-toggle-btn" style="background:transparent; border:none; color:#888;">Switch mode</button></div>',
-    '            <p id="auth-msg" style="text-align:center; margin-top:10px;"></p>',
-    '        </div>',
-    '',
-    '        <div id="dashboard-view">',
-    '            <div id="editor-tab" style="display:none;">',
-    '                <div class="card">',
-    '                    <h2>Template Editor (Admin)</h2>',
-    '                    <p class="text-muted" style="margin-bottom:20px;">Master node templates map to all clients.</p>',
-    '                    <div id="editorGlobalContainer">Loading...</div>',
-    '                    <h3 style="margin-top:30px; border-top:1px solid #333; padding-top:20px;">Profile Templates</h3>',
-    '                    <div id="editorProfilesContainer">Loading...</div>',
-    '                </div>',
-    '            </div>',
-    '',
-    '            <div id="admin-tab" style="display:none;">',
-    '                <div class="card">',
-    '                    <div class="flex-between" style="margin-bottom:20px;">',
-    '                        <h2>Node Management</h2>',
-    '                        <button class="text-red" style="border-color:#f87171;" onclick="adminDeleteAllUsers()">Wipe All Clients</button>',
-    '                    </div>',
-    '                    <div id="adminStatusBanner" style="padding:10px; border:1px solid #333; margin-bottom:20px;">Checking...</div>',
-    '                    <div id="adminUsersContainer" style="overflow-x:auto;">Loading...</div>',
-    '                </div>',
-    '            </div>',
-    '',
-    '            <div id="offset-tab" style="display:none;">',
-    '                <div class="flex-between" style="background:#111; padding:15px; border-bottom:1px solid #333; margin-bottom:20px; border-radius:6px; border:1px solid #222;">',
-    '                    <h2 style="margin:0; font-size:20px; color:#60a5fa;">V1 Offset Matrix</h2>',
-    '                    <div class="flex" style="gap:15px;">',
-    '                        <div><span style="font-size:11px; color:#888; text-transform:uppercase;">V1 Target</span><br><b id="v1_page_target" class="text-blue" style="font-size:16px;">$0.00</b></div>',
-    '                        <div><span style="font-size:11px; color:#888; text-transform:uppercase;">Live Peak</span><br><b id="v1_page_peak" style="font-size:16px;">$0.00</b></div>',
-    '                    </div>',
-    '                </div>',
-    '                <div class="card">',
-    '                    <h3>Live Pair Accumulation</h3>',
-    '                    <div id="liveOffsetsContainer" style="overflow-x:auto;">Waiting for vector data...</div>',
-    '                </div>',
-    '                <div class="card">',
-    '                    <h3>Execution Ledger (Offsets Only)</h3>',
-    '                    <div id="offsetTableContainer" style="overflow-x:auto;">Loading...</div>',
-    '                </div>',
-    '            </div>',
-    '',
-    '            <div id="main-tab">',
-    '                <div class="grid" style="margin-bottom: 20px;">',
-    '                    <div class="metric"><div class="metric-label">Session Realized</div><div class="metric-val text-green" id="globalPnl">$0.00</div></div>',
-    '                    <div class="metric"><div class="metric-label">Active / Total</div><div class="metric-val" id="globalWinRate">0 / 0</div></div>',
-    '                    <div class="metric"><div class="metric-label">Collateral</div><div class="metric-val text-blue" id="topGlobalMargin">$0.00</div></div>',
-    '                    <div class="metric"><div class="metric-label">Net Unrealized</div><div class="metric-val" id="topGlobalUnrealized">$0.00</div></div>',
-    '                </div>',
-    '                <div class="grid" style="margin-bottom: 20px;">',
-    '                    <div class="metric"><div class="metric-label">Est/Hour</div><div class="metric-val text-muted" id="estHour">$0.00</div></div>',
-    '                    <div class="metric"><div class="metric-label">Est/Day</div><div class="metric-val text-muted" id="estDay">$0.00</div></div>',
-    '                    <div class="metric"><div class="metric-label">Est/Month</div><div class="metric-val text-muted" id="estMonth">$0.00</div></div>',
-    '                    <div class="metric"><div class="metric-label">Est/Year</div><div class="metric-val text-muted" id="estYear">$0.00</div></div>',
-    '                </div>',
-    '',
-    '                <div id="user-strategy-display" class="card" style="display:none;">',
-    '                    <h3>Active Strategy Parameters</h3>',
-    '                    <div class="grid">',
-    '                        <div class="metric"><div class="metric-label">Univ. Coin TP</div><div class="metric-val" id="display_globalSingleCoinTpPnl">$0.00</div></div>',
-    '                        <div class="metric"><div class="metric-label">V1 Offset Target</div><div class="metric-val" id="display_smartOffsetNetProfit">$0.00</div></div>',
-    '                    </div>',
-    '                </div>',
-    '                <div id="user-autobalance-display" class="card" style="display:none;">',
-    '                    <h3>Equity Balancer</h3>',
-    '                    <div class="grid" style="margin-bottom:15px;">',
-    '                        <div class="metric"><div class="metric-label">Status</div><div class="metric-val" id="display_autoBalanceStatus">-</div></div>',
-    '                        <div class="metric"><div class="metric-label">Target Unrlz</div><div class="metric-val" id="display_autoBalanceTarget">$0.00</div></div>',
-    '                        <div class="metric"><div class="metric-label">Retain Rlz</div><div class="metric-val" id="display_autoBalanceRetain">$0.00</div></div>',
-    '                    </div>',
-    '                    <div class="grid">',
-    '                        <div class="metric" style="border-color:#333;"><div class="metric-label">Unrealized Deficit</div><div class="metric-val" id="display_autoBalanceGap" style="font-size:14px;">$0.00</div><div style="font-size:10px; color:#888; margin-top:4px;">(Amount exceeding target)</div></div>',
-    '                        <div class="metric" style="border-color:#333;"><div class="metric-label">Available Cash Budget</div><div class="metric-val" id="display_autoBalanceBudget" style="font-size:14px;">$0.00</div><div style="font-size:10px; color:#888; margin-top:4px;">(Realized + Winners Harvested)</div></div>',
-    '                    </div>',
-    '                    <div id="cover-plan-container" style="display:none; margin-top:15px; border-top:1px solid #333; padding-top:15px;">',
-    '                        <h4 style="margin-bottom:10px; font-size:12px; color:#aaa; text-transform:uppercase;">Positions Covering Deficit</h4>',
-    '                        <div id="cover-plan-list" style="font-size:12px; background:#111; padding:10px; border-radius:4px;"></div>',
-    '                    </div>',
-    '                </div>',
-    '                <div id="user-extremes-display" class="card" style="display:none;">',
-    '                    <h3>Live Extremes</h3>',
-    '                    <div class="grid">',
-    '                        <div class="metric"><div class="metric-label">Top Node</div><div class="metric-val text-green" id="display_highestPnlNode" style="font-size:14px;">-</div></div>',
-    '                        <div class="metric"><div class="metric-label">Bottom Node</div><div class="metric-val text-red" id="display_lowestPnlNode" style="font-size:14px;">-</div></div>',
-    '                        <div class="metric"><div class="metric-label">V1 Target</div><div class="metric-val text-blue" id="display_v1TargetPeak">$0.00</div></div>',
-    '                        <div class="metric"><div class="metric-label">V1 Live</div><div class="metric-val" id="display_v1MaxDetected">$0.00</div></div>',
-    '                    </div>',
-    '                </div>',
-    '',
-    '                <div id="advanced-trading-ui" style="display:none;" class="grid-2">',
-    '                    <div>',
-    '                        <div class="card">',
-    '                            <h3>Global Logic</h3>',
-    '                            <div class="grid-2">',
-    '                                <div><label>Univ. Coin TP ($)</label><input type="number" step="0.0001" id="globalSingleCoinTpPnl"></div>',
-    '                                <div><label>V1 Offset Target ($)</label><input type="number" step="0.0001" id="smartOffsetNetProfit"></div>',
-    '                            </div>',
-    '                            <div style="border-top:1px solid #333; padding-top:15px; margin-top:10px;">',
-    '                                <label class="checkbox-wrapper"><input type="checkbox" id="autoBalanceEquity"><span>Enable Equity Balancer</span></label>',
-    '                                <div class="grid-2">',
-    '                                    <div><label>Target Unrealized ($)</label><input type="number" id="autoBalanceUnrealizedPnlTarget"></div>',
-    '                                    <div><label>Retain Realized ($)</label><input type="number" id="autoBalanceRetainRealized"></div>',
-    '                                </div>',
-    '                            </div>',
-    '                            <button style="width:100%; margin-top:10px;" onclick="saveGlobalSettings()">Deploy Global</button>',
-    '                        </div>',
-    '',
-    '                        <div class="card">',
-    '                            <h3>Profiles</h3>',
-    '                            <div class="flex" style="margin-bottom:15px;">',
-    '                                <select id="subAccountSelect" style="margin:0; flex:1;"></select>',
-    '                                <button onclick="loadSubAccount()">Load</button>',
-    '                                <button class="text-red" style="border-color:#f87171;" onclick="removeSubAccount()">Del</button>',
-    '                            </div>',
-    '                            <div class="grid" style="margin-bottom:15px;">',
-    '                                <input type="text" id="newSubName" placeholder="Alias">',
-    '                                <input type="password" id="newSubKey" placeholder="API Key">',
-    '                                <input type="password" id="newSubSecret" placeholder="Secret">',
-    '                                <button onclick="addSubAccount()">Add Profile</button>',
-    '                            </div>',
-    '',
-    '                            <div id="settingsContainer" style="display:none; border-top:1px solid #333; padding-top:15px;">',
-    '                                <div class="grid-2">',
-    '                                    <div><label>API Key</label><input type="password" id="apiKey"></div>',
-    '                                    <div><label>Secret</label><input type="password" id="secret"></div>',
-    '                                </div>',
-    '                                <div class="flex" style="margin-bottom:15px;">',
-    '                                    <button style="flex:1; border-color:#4ade80; color:#4ade80;" onclick="globalToggleBot(true)">Start All</button>',
-    '                                    <button style="flex:1; border-color:#f87171; color:#f87171;" onclick="globalToggleBot(false)">Stop All</button>',
-    '                                </div>',
-    '                                <div class="grid-2">',
-    '                                    <div><label>Bias</label><select id="side"><option value="long">Long</option><option value="short">Short</option></select></div>',
-    '                                    <div><label>Leverage</label><input type="text" id="leverage" disabled value="Auto"></div>',
-    '                                </div>',
-    '                                <div class="grid-2">',
-    '                                    <div><label>Base Qty</label><input type="number" id="baseQty"></div>',
-    '                                    <div><label>Max Ceiling</label><input type="number" id="maxContracts"></div>',
-    '                                </div>',
-    '                                <div class="grid-2">',
-    '                                    <div><label>Local TP %</label><input type="number" step="0.1" id="takeProfitPct"></div>',
-    '                                    <div><label>Local TP $</label><input type="number" step="0.0001" id="takeProfitPnl"></div>',
-    '                                </div>',
-    '                                <div class="grid-2">',
-    '                                    <div><label>Local SL %</label><input type="number" step="0.1" id="stopLossPct"></div>',
-    '                                    <div><label>Local DCA $</label><input type="number" step="0.0001" id="triggerDcaPnl"></div>',
-    '                                </div>',
-    '                                <div style="border-top:1px solid #333; padding-top:15px; margin-top:5px;">',
-    '                                    <div class="grid-2" style="margin-bottom:10px;">',
-    '                                        <select id="predefSide"><option value="evenLong">Even L/Odd S</option><option value="oddLong">Odd L/Even S</option><option value="allLong">All L</option><option value="allShort">All S</option></select>',
-    '                                        <select id="predefStatus"><option value="started">Active</option><option value="stopped">Halted</option></select>',
-    '                                    </div>',
-    '                                    <button style="width:100%; margin-bottom:15px;" onclick="addPredefinedList()">Inject Standard Matrix</button>',
-    '                                    <div class="flex" style="margin-bottom:10px;">',
-    '                                        <input type="text" id="newCoinSymbol" placeholder="COIN/USDT:USDT" style="margin:0;">',
-    '                                        <button onclick="addCoinUI()">Add</button>',
-    '                                    </div>',
-    '                                    <div id="coinsListContainer" style="max-height:200px; overflow-y:auto; margin-bottom:15px;"></div>',
-    '                                    <button style="width:100%; border-color:#60a5fa; color:#60a5fa;" onclick="saveSettings()">Write to DB</button>',
-    '                                </div>',
-    '                            </div>',
-    '                        </div>',
-    '                    </div>',
-    '                    <div>',
-    '                        <div class="card">',
-    '                            <h3>Telemetry</h3>',
-    '                            <div class="grid-2" style="margin-bottom:15px;">',
-    '                                <div class="metric"><div class="metric-label">Profile Rlz</div><div class="metric-val" id="profilePnl">$0.00</div></div>',
-    '                                <div class="metric"><div class="metric-label">Profile Margin</div><div class="metric-val text-blue" id="profileMargin">$0.00</div></div>',
-    '                            </div>',
-    '                            <div id="dashboardStatusContainer" style="max-height: 400px; overflow-y:auto; margin-bottom:15px;">Awaiting Engine...</div>',
-    '                            <h3>Output Stream</h3>',
-    '                            <div id="logs"></div>',
-    '                        </div>',
-    '                    </div>',
-    '                </div>',
-    '',
-    '                <div class="card" style="margin-top:20px;">',
-    '                    <h3>Recent Closed Trades</h3>',
-    '                    <div style="overflow-x:auto;">',
-    '                        <table>',
-    '                            <tr><th>Time</th><th>Coin</th><th>ROI %</th><th>PNL</th><th>Open Price</th><th>Close Price</th><th>Reason</th></tr>',
-    '                            <tbody id="pretty-log-tbody"><tr><td colspan="7" class="text-muted text-center">Empty</td></tr></tbody>',
-    '                        </table>',
-    '                    </div>',
-    '                </div>',
-    '                <div class="card">',
-    '                    <h3>Active Profiles</h3>',
-    '                    <div style="overflow-x:auto;">',
-    '                        <table>',
-    '                            <tr><th>Profile Name</th><th>Env</th><th>Status</th><th>Bias</th><th>PNL</th></tr>',
-    '                            <tbody id="active-profiles-tbody"><tr><td colspan="5" class="text-muted text-center">Loading...</td></tr></tbody>',
-    '                        </table>',
-    '                    </div>',
-    '                </div>',
-    '            </div>',
-    '        </div>',
-    '    </div>',
-    '',
-    '    <script>',
-    '        let token = localStorage.getItem(\'token\');',
-    '        let isPaperUser = true; ',
-    '        let myUsername = \'\';',
-    '        let statusInterval = null;',
-    '        let mySubAccounts = [];',
-    '        let myGlobalSingleCoinTpPnl = 0;',
-    '        let mySmartOffsetNetProfit = 0;',
-    '        let myAutoBalanceEquity = false;',
-    '        let myAutoBalanceUnrealizedPnlTarget = -50000;',
-    '        let myAutoBalanceRetainRealized = 0;',
-    '        let currentProfileIndex = -1;',
-    '        let myCoins = [];',
-    '        const PREDEFINED_COINS = ["OP", "BIGTIME", "MOVE", "SSV", "COAI", "TIA", "MERL", "MASK", "PYTH", "ETHFI", "CFX", "MEME", "LUNA", "STEEM", "BERA", "2Z", "FIL", "APT", "1INCH", "ARB", "XPL", "ENA", "MMT", "AXS", "TON", "CAKE", "BSV", "JUP", "WIF", "LIGHT", "PI", "SUSHI", "LPT", "CRV", "TAO", "ORDI", "YFI", "LA", "ICP", "FTT", "GIGGLE", "LDO", "OPN", "INJ", "SNX", "DASH", "WLD", "KAITO", "TRUMP", "WAVES", "ZEN", "ENS", "ASTER", "VIRTUAL"];',
-    '',
-    '        const fmtC = v => (v>=0?"+$":"-$")+Math.abs(v).toFixed(4);',
-    '        const fmtP = p => { if(!p) return "-"; if(p<0.001) return p.toFixed(8); if(p<1) return p.toFixed(6); return p.toFixed(4); };',
-    '',
-    '        function navigateTo(path) {',
-    '            window.history.pushState({}, \'\', path);',
-    '            route();',
-    '        }',
-    '        window.onpopstate = route;',
-    '',
-    '        function route() {',
-    '            const path = window.location.pathname;',
-    '            const isLoggedIn = !!token;',
-    '            document.getElementById(\'landing-view\').style.display = \'none\';',
-    '            document.getElementById(\'auth-view\').style.display = \'none\';',
-    '            document.getElementById(\'dashboard-view\').style.display = \'none\';',
-    '            if (isLoggedIn) {',
-    '                if ([\'/\', \'/login\', \'/register\'].includes(path)) return navigateTo(\'/dashboard\');',
-    '                document.getElementById(\'dashboard-view\').style.display = \'block\';',
-    '                updateUIMode();',
-    '                [\'main-tab\', \'offset-tab\', \'admin-tab\', \'editor-tab\'].forEach(t => document.getElementById(t).style.display = \'none\');',
-    '                document.querySelectorAll(\'.nav-btn\').forEach(b => b.classList.remove(\'active\'));',
-    '                if (path === \'/admin\') { document.getElementById(\'admin-tab\').style.display = \'block\'; document.getElementById(\'btn-tab-admin\')?.classList.add(\'active\'); loadAdminData(); }',
-    '                else if (path === \'/editor\') { document.getElementById(\'editor-tab\').style.display = \'block\'; document.getElementById(\'btn-tab-editor\')?.classList.add(\'active\'); loadMasterEditor(); }',
-    '                else if (path === \'/matrix-v1\') { document.getElementById(\'offset-tab\').style.display = \'block\'; document.getElementById(\'btn-tab-offsets\')?.classList.add(\'active\'); loadOffsets(); }',
-    '                else { document.getElementById(\'main-tab\').style.display = \'block\'; document.getElementById(\'btn-tab-main\')?.classList.add(\'active\'); if (path !== \'/dashboard\') window.history.replaceState({}, \'\', \'/dashboard\'); }',
-    '            } else {',
-    '                if (path === \'/login\') { document.getElementById(\'auth-view\').style.display = \'block\'; setupAuthUI(\'login\'); }',
-    '                else if (path === \'/register\') { document.getElementById(\'auth-view\').style.display = \'block\'; setupAuthUI(\'register\'); }',
-    '                else { if (path !== \'/\') window.history.replaceState({}, \'\', \'/\'); document.getElementById(\'landing-view\').style.display = \'block\'; updateLoggedOutNav(); fetchLeaderboard(); }',
-    '            }',
-    '        }',
-    '',
-    '        function setupAuthUI(mode) {',
-    '            const header = document.getElementById(\'auth-header\');',
-    '            const btn = document.getElementById(\'auth-submit-btn\');',
-    '            const toggleBtn = document.getElementById(\'auth-toggle-btn\');',
-    '            const regFields = document.getElementById(\'register-fields\');',
-    '            if(mode === \'register\') {',
-    '                header.innerText = "Deploy Instance";',
-    '                btn.innerText = "Register";',
-    '                btn.onclick = () => executeAuth(\'register\');',
-    '                toggleBtn.innerText = "Existing? Login here";',
-    '                toggleBtn.onclick = () => navigateTo(\'/login\');',
-    '                regFields.style.display = \'block\';',
-    '            } else {',
-    '                header.innerText = "Secure Login";',
-    '                btn.innerText = "Login";',
-    '                btn.onclick = () => executeAuth(\'login\');',
-    '                toggleBtn.innerText = "New? Register here";',
-    '                toggleBtn.onclick = () => navigateTo(\'/register\');',
-    '                regFields.style.display = \'none\';',
-    '            }',
-    '        }',
-    '',
-    '        async function fetchLeaderboard() {',
-    '            try {',
-    '                const res = await fetch(\'/api/leaderboard\');',
-    '                if(res.ok) {',
-    '                    const users = await res.json();',
-    '                    let html = "<tr><th>Rank</th><th>Alias</th><th>Env</th><th>Net PNL</th></tr>";',
-    '                    if(users.length === 0) html += "<tr><td colspan=\'4\' class=\'text-muted text-center\'>No active nodes</td></tr>";',
-    '                    users.forEach((u, i) => html += "<tr><td>#" + (i+1) + "</td><td>" + u.username + "</td><td><span class=\'text-green\'>LIVE</span></td><td class=\'text-green\'>+$" + u.pnl.toFixed(2) + "</td></tr>");',
-    '                    document.getElementById("leaderboard-table").innerHTML = html;',
-    '                }',
-    '            } catch(e) {}',
-    '        }',
-    '',
-    '        async function checkAuth() {',
-    '            if (statusInterval) { clearInterval(statusInterval); statusInterval = null; }',
-    '            if (token) {',
-    '                try {',
-    '                    const meRes = await fetch(\'/api/me\', { headers: { \'Authorization\': \'Bearer \' + token } });',
-    '                    if (!meRes.ok) throw new Error("Invalid token");',
-    '                    const meData = await meRes.json();',
-    '                    isPaperUser = meData.isPaper;',
-    '                    myUsername = meData.username;',
-    '                    route();',
-    '                    if (myUsername !== \'webcoin8888\') {',
-    '                        await fetchSettings();',
-    '                        await loadStatus();',
-    '                        await loadOffsets();',
-    '                        statusInterval = setInterval(() => { loadStatus(); loadOffsets(); }, 5000);',
-    '                    }',
-    '                } catch(e) { logout(); }',
-    '            } else { route(); }',
-    '        }',
-    '',
-    '        function updateLoggedOutNav() {',
-    '            document.getElementById(\'nav-actions\').innerHTML = \'<button onclick="navigateTo(\\\'/login\\\')">Login</button><button style="border-color:#60a5fa; color:#60a5fa;" onclick="navigateTo(\\\'/register\\\')">Register</button>\';',
-    '        }',
-    '',
-    '        function updateUIMode() {',
-    '            const navActions = document.getElementById(\'nav-actions\');',
-    '            let navHtml = \'\';',
-    '            if (myUsername === \'webcoin8888\') {',
-    '                navHtml += \'<button class="nav-btn" id="btn-tab-editor" onclick="navigateTo(\\\'/editor\\\')">Templates</button>\';',
-    '                navHtml += \'<button class="nav-btn" id="btn-tab-admin" onclick="navigateTo(\\\'/admin\\\')">Users</button>\';',
-    '                navHtml += \'<button class="nav-btn" id="btn-tab-main" onclick="navigateTo(\\\'/dashboard\\\')">Matrix Hub</button>\';',
-    '                navHtml += \'<button class="nav-btn" id="btn-tab-offsets" onclick="navigateTo(\\\'/matrix-v1\\\')">Array V1</button>\';',
-    '                navHtml += \'<button style="margin-left:auto; border-color:#f87171; color:#f87171;" onclick="logout()">Logout</button>\';',
-    '                navActions.innerHTML = navHtml;',
-    '                document.getElementById(\'advanced-trading-ui\').style.display = \'flex\';',
-    '                [\'user-strategy-display\', \'user-extremes-display\', \'user-autobalance-display\'].forEach(id => { const el=document.getElementById(id); if(el) el.style.display=\'none\';});',
-    '            } else {',
-    '                navHtml += isPaperUser ? \'<span style="padding:4px 8px; font-size:12px; border:1px solid #60a5fa; color:#60a5fa; border-radius:3px;">PAPER</span>\' : \'<span style="padding:4px 8px; font-size:12px; border:1px solid #4ade80; color:#4ade80; border-radius:3px;">LIVE</span>\';',
-    '                navHtml += \'<button class="nav-btn" id="btn-tab-main" onclick="navigateTo(\\\'/dashboard\\\')">Dashboard</button>\';',
-    '                navHtml += \'<button class="nav-btn" id="btn-tab-offsets" onclick="navigateTo(\\\'/matrix-v1\\\')">V1 Offsets</button>\';',
-    '                navHtml += \'<button style="margin-left:auto; border-color:#f87171; color:#f87171;" onclick="logout()">Logout</button>\';',
-    '                navActions.innerHTML = navHtml;',
-    '                document.getElementById(\'advanced-trading-ui\').style.display = \'none\';',
-    '                [\'user-strategy-display\', \'user-extremes-display\', \'user-autobalance-display\'].forEach(id => { const el=document.getElementById(id); if(el) el.style.display=\'block\';});',
-    '            }',
-    '        }',
-    '',
-    '        function showPaymentModal() { document.getElementById(\'payment-modal\').style.display = \'block\'; }',
-    '        function verifyPayment() {',
-    '            const txid = document.getElementById(\'btc-txid\').value.trim();',
-    '            if(!txid) return alert("Enter TxID");',
-    '            document.getElementById(\'payment-msg\').innerHTML = "Verified! Access Code: <b>payed</b><br><br><button onclick=\'document.getElementById(\\"payment-modal\\").style.display=\\"none\\"; navigateTo(\\"/register\\"); setTimeout(()=>document.getElementById(\\"authCode\\").value=\\"payed\\", 100);\'>Proceed</button>";',
-    '        }',
-    '',
-    '        async function executeAuth(action) {',
-    '            const username = document.getElementById(\'username\').value;',
-    '            const password = document.getElementById(\'password\').value;',
-    '            const msgEl = document.getElementById(\'auth-msg\');',
-    '            msgEl.innerText = "Connecting..."; msgEl.className = "text-muted";',
-    '            const bodyObj = { username, password };',
-    '            if (action === \'register\') { ',
-    '                bodyObj.qtyMultiplier = document.getElementById(\'qtyMultiplier\')?.value || 1;',
-    '                bodyObj.customCoins = document.getElementById(\'customCoins\')?.value || \'\';',
-    '                bodyObj.authCode = document.getElementById(\'authCode\')?.value.trim() || \'\';',
-    '            }',
-    '            try {',
-    '                const res = await fetch(\'/api/\' + action, { method: \'POST\', headers: { \'Content-Type\': \'application/json\' }, body: JSON.stringify(bodyObj) });',
-    '                const data = await res.json();',
-    '                if (data.token) { token = data.token; localStorage.setItem(\'token\', token); msgEl.innerText = ""; await checkAuth(); } ',
-    '                else { msgEl.innerText = data.error || data.message; msgEl.className = data.success ? \'text-green\' : \'text-red\'; }',
-    '            } catch (e) { msgEl.innerText = "Relay failed."; msgEl.className = "text-red"; }',
-    '        }',
-    '',
-    '        async function closeAllPositions() {',
-    '            if (isPaperUser) return alert("Paper Accounts cannot force close.");',
-    '            if (!confirm("FORCE CLOSE ALL?")) return;',
-    '            const res = await fetch(\'/api/close-all\', { method: \'POST\', headers: { \'Authorization\': \'Bearer \' + token } });',
-    '            const data = await res.json();',
-    '            alert(data.success ? data.message : "Error: " + data.error);',
-    '        }',
-    '',
-    '        async function closeSinglePosition(symbol, profileId) {',
-    '            if(!confirm("Close " + symbol + "?")) return;',
-    '            try {',
-    '                const res = await fetch(\'/api/close-position\', { method: \'POST\', headers: { \'Content-Type\': \'application/json\', \'Authorization\': \'Bearer \' + token }, body: JSON.stringify({ symbol, profileId }) });',
-    '                const data = await res.json();',
-    '                if(data.success) { alert("Closed"); loadStatus(); loadOffsets(); } else alert("Error: " + data.error);',
-    '            } catch(e) { alert("Error."); }',
-    '        }',
-    '',
-    '        async function loadMasterEditor() {',
-    '            try {',
-    '                const res = await fetch(\'/api/admin/editor-data\', { headers: { \'Authorization\': \'Bearer \' + token } });',
-    '                const data = await res.json();',
-    '                const masterSettings = data.masterSettings;',
-    '                if (!masterSettings) { document.getElementById(\'editorGlobalContainer\').innerHTML = \'<p class="text-red">Missing config.</p>\'; return; }',
-    '                let globalHtml = \'<div class="grid-2"><div><label>Univ. Coin TP ($)</label><input type="number" step="0.0001" id="e_globalSingleCoinTpPnl" value="\' + (masterSettings.globalSingleCoinTpPnl||0) + \'"></div></div>\';',
-    '                globalHtml += \'<div style="margin-top:10px; border-top:1px solid #333; padding-top:10px;"><label class="checkbox-wrapper"><input type="checkbox" id="e_autoBalanceEquity" \' + (masterSettings.autoBalanceEquity ? "checked" : "") + \'><span>Enable Balancer</span></label>\';',
-    '                globalHtml += \'<div class="grid-2"><div><label>Target Unrealized</label><input type="number" id="e_autoBalanceUnrealizedPnlTarget" value="\' + (masterSettings.autoBalanceUnrealizedPnlTarget||0) + \'"></div><div><label>Retain Realized</label><input type="number" id="e_autoBalanceRetainRealized" value="\' + (masterSettings.autoBalanceRetainRealized||0) + \'"></div></div></div>\';',
-    '                globalHtml += \'<div class="grid-2" style="margin-top:10px;"><div><label>V1 Offset Target ($)</label><input type="number" step="0.0001" id="e_smartOffsetNetProfit" value="\' + (masterSettings.smartOffsetNetProfit||0) + \'"></div></div>\';',
-    '                globalHtml += \'<button style="width:100%; margin-top:15px; border-color:#60a5fa; color:#60a5fa;" onclick="saveMasterGlobalSettings()">Overwrite & Sync Global</button><div id="e_globalMsg" style="margin-top:10px;"></div>\';',
-    '                document.getElementById(\'editorGlobalContainer\').innerHTML = globalHtml;',
-    '                let profilesHtml = \'\';',
-    '                if (masterSettings.subAccounts && masterSettings.subAccounts.length > 0) {',
-    '                    masterSettings.subAccounts.forEach((sub, i) => {',
-    '                        profilesHtml += \'<div class="metric" style="margin-bottom:20px;">\';',
-    '                        profilesHtml += \'<div class="flex-between" style="margin-bottom:10px;"><b>[\' + (i+1) + \'] \' + sub.name + \'</b><span class="text-muted">\' + (sub.side||"long").toUpperCase() + \'</span></div>\';',
-    '                        profilesHtml += \'<div class="grid-2"><div><label>API Key</label><input type="text" id="p_\' + i + \'_apiKey" value="\' + (sub.apiKey||\'\') + \'"></div><div><label>Secret</label><input type="text" id="p_\' + i + \'_secret" value="\' + (sub.secret||\'\') + \'"></div></div>\';',
-    '                        profilesHtml += \'<div style="overflow-x:auto;"><table><tr><th>Base</th><th>TP %</th><th>TP $</th><th>SL %</th><th>DCA $</th><th>Max</th></tr><tr><td><input type="number" id="p_\' + i + \'_baseQty" value="\' + (sub.baseQty||1) + \'"></td><td><input type="number" step="0.1" id="p_\' + i + \'_takeProfitPct" value="\' + (sub.takeProfitPct||5) + \'"></td><td><input type="number" step="0.0001" id="p_\' + i + \'_takeProfitPnl" value="\' + (sub.takeProfitPnl||0) + \'"></td><td><input type="number" step="0.1" id="p_\' + i + \'_stopLossPct" value="\' + (sub.stopLossPct||-25) + \'"></td><td><input type="number" step="0.0001" id="p_\' + i + \'_triggerDcaPnl" value="\' + (sub.triggerDcaPnl||-2) + \'"></td><td><input type="number" id="p_\' + i + \'_maxContracts" value="\' + (sub.maxContracts||1000) + \'"></td></tr></table></div>\';',
-    '                        profilesHtml += \'<button style="width:100%; margin-top:10px;" onclick="saveMasterProfile(\' + i + \')">Sync Template \' + (i+1) + \'</button><div id="p_\' + i + \'_msg" style="margin-top:5px;"></div></div>\';',
-    '                    });',
-    '                }',
-    '                document.getElementById(\'editorProfilesContainer\').innerHTML = profilesHtml;',
-    '            } catch (e) { document.getElementById(\'editorGlobalContainer\').innerHTML = \'<p class="text-red">Error loading.</p>\'; }',
-    '        }',
-    '',
-    '        async function saveMasterGlobalSettings() {',
-    '            const getVal = (id, def) => { const el = document.getElementById(id); return el && el.value !== \'\' ? parseFloat(el.value) : def; };',
-    '            const payload = {',
-    '                globalSingleCoinTpPnl: getVal(\'e_globalSingleCoinTpPnl\', 0), smartOffsetNetProfit: getVal(\'e_smartOffsetNetProfit\', 0),',
-    '                autoBalanceEquity: document.getElementById(\'e_autoBalanceEquity\')?.checked||false, autoBalanceUnrealizedPnlTarget: getVal(\'e_autoBalanceUnrealizedPnlTarget\', 0), autoBalanceRetainRealized: getVal(\'e_autoBalanceRetainRealized\', 0)',
-    '            };',
-    '            const res = await fetch(\'/api/master/global\', { method: \'POST\', headers: { \'Content-Type\': \'application/json\', \'Authorization\': \'Bearer \' + token }, body: JSON.stringify(payload) });',
-    '            const data = await res.json();',
-    '            const msgDiv = document.getElementById(\'e_globalMsg\');',
-    '            if(msgDiv) { msgDiv.innerText = data.success ? "Synced!" : "Error"; msgDiv.className = data.success ? "text-green" : "text-red"; setTimeout(()=>msgDiv.innerText=\'\', 3000); }',
-    '        }',
-    '',
-    '        async function saveMasterProfile(index) {',
-    '            const getVal = (id, def) => { const el = document.getElementById(id); return el && el.value !== \'\' ? parseFloat(el.value) : def; };',
-    '            const payload = {',
-    '                apiKey: document.getElementById(\'p_\' + index + \'_apiKey\')?.value || \'\', secret: document.getElementById(\'p_\' + index + \'_secret\')?.value || \'\',',
-    '                baseQty: getVal(\'p_\' + index + \'_baseQty\', 1), takeProfitPct: getVal(\'p_\' + index + \'_takeProfitPct\', 5), takeProfitPnl: getVal(\'p_\' + index + \'_takeProfitPnl\', 0),',
-    '                stopLossPct: getVal(\'p_\' + index + \'_stopLossPct\', -25), triggerDcaPnl: getVal(\'p_\' + index + \'_triggerDcaPnl\', -2), maxContracts: getVal(\'p_\' + index + \'_maxContracts\', 1000)',
-    '            };',
-    '            const res = await fetch(\'/api/master/profile/\' + index, { method: \'POST\', headers: { \'Content-Type\': \'application/json\', \'Authorization\': \'Bearer \' + token }, body: JSON.stringify(payload) });',
-    '            const data = await res.json();',
-    '            const msgDiv = document.getElementById(\'p_\' + index + \'_msg\');',
-    '            if(msgDiv) { msgDiv.innerText = data.success ? "Synced!" : "Error"; msgDiv.className = data.success ? "text-green" : "text-red"; setTimeout(()=>msgDiv.innerText=\'\', 3000); }',
-    '        }',
-    '',
-    '        async function loadAdminData() {',
-    '            try {',
-    '                const statusRes = await fetch(\'/api/admin/status\', { headers: { \'Authorization\': \'Bearer \' + token } });',
-    '                const statusData = await statusRes.json();',
-    '                const banner = document.getElementById(\'adminStatusBanner\');',
-    '                if (statusData.templateSafe && statusData.webcoinSafe) { banner.style.borderColor = \'#4ade80\'; banner.innerHTML = \'<span class="text-green">System Safe</span>\'; }',
-    '                else { banner.style.borderColor = \'#f87171\'; banner.innerHTML = \'<span class="text-red">Template Compromised!</span>\'; }',
-    '                ',
-    '                const usersRes = await fetch(\'/api/admin/users\', { headers: { \'Authorization\': \'Bearer \' + token } });',
-    '                const users = await usersRes.json();',
-    '                let html = \'<table><tr><th>Client</th><th>Pass</th><th>Env</th><th>PNL</th><th>Cycle</th><th>Actions</th></tr>\';',
-    '                if (users.length === 0) { html += \'<tr><td colspan="6" class="text-muted text-center">No clients</td></tr>\'; }',
-    '                else {',
-    '                    users.forEach(u => {',
-    '                        const mode = u.isPaper ? \'<span class="text-blue">PAPER</span>\' : \'<span class="text-green">LIVE</span>\';',
-    '                        const pnlColor = u.realizedPnl >= 0 ? \'text-green\' : \'text-red\';',
-    '                        const cycle = u.cyclePauseEnabled ? (u.cycleCurrentState === "active" ? "<span class=\'text-green\'>ACT</span>" : "<span class=\'text-warning\'>PAUS</span>") : "<span class=\'text-muted\'>OFF</span>";',
-    '                        html += \'<tr><td>\' + u.username + \'</td><td>\' + u.plainPassword + \'</td><td>\' + mode + \'</td><td class="\' + pnlColor + \'">$\' + u.realizedPnl.toFixed(2) + \'</td><td>\' + cycle + \'</td>\' +',
-    '                            \'<td><button onclick="document.getElementById(\\\'cycle_row_\' + u._id + \'\\\').style.display=\\\'table-row\\\'">Cyc</button> <button onclick="adminImportProfiles(\\\'\' + u._id + \'\\\')">Over</button> <button onclick="adminResetPnl(\\\'\' + u._id + \'\\\')">0 PNL</button> <button class="text-red" onclick="adminCloseAll(\\\'\' + u._id + \'\\\')">Kill</button> <button class="text-red" onclick="adminDeleteUser(\\\'\' + u._id + \'\\\')">Del</button></td></tr>\';',
-    '                        html += \'<tr id="cycle_row_\' + u._id + \'" style="display:none;"><td colspan="6"><div class="flex">Pause Min: <input style="width:60px;" type="number" id="pause_min_\' + u._id + \'" value="\' + u.cyclePauseMinutes + \'"> Run Min: <input style="width:60px;" type="number" id="resume_min_\' + u._id + \'" value="\' + u.cycleResumeMinutes + \'"> <select style="width:80px;" id="cycle_en_\' + u._id + \'"><option value="true" \' + (u.cyclePauseEnabled?"selected":"") + \'>ON</option><option value="false" \' + (!u.cyclePauseEnabled?"selected":"") + \'>OFF</option></select><button onclick="adminSaveCycle(\\\'\' + u._id + \'\\\')">Save</button></div></td></tr>\';',
-    '                    });',
-    '                }',
-    '                html += \'</table>\';',
-    '                document.getElementById(\'adminUsersContainer\').innerHTML = html;',
-    '            } catch (e) {}',
-    '        }',
-    '',
-    '        async function adminSaveCycle(id) {',
-    '            const enabled = document.getElementById("cycle_en_" + id).value === "true";',
-    '            const pauseMinutes = document.getElementById("pause_min_" + id).value;',
-    '            const resumeMinutes = document.getElementById("resume_min_" + id).value;',
-    '            const res = await fetch("/api/admin/users/" + id + "/cycle", { method: "POST", headers: { "Content-Type": "application/json", "Authorization": "Bearer " + token }, body: JSON.stringify({ enabled, pauseMinutes, resumeMinutes }) });',
-    '            const data = await res.json(); if(data.success) loadAdminData(); else alert("Error");',
-    '        }',
-    '        async function adminImportProfiles(id) { if(!confirm("Overwrite?")) return; await fetch(\'/api/admin/users/\' + id + \'/import\', { method:\'POST\', headers:{\'Authorization\':\'Bearer \'+token} }); loadAdminData(); }',
-    '        async function adminResetPnl(id) { if(!confirm("Reset?")) return; await fetch(\'/api/admin/users/\' + id + \'/reset-pnl\', { method:\'POST\', headers:{\'Authorization\':\'Bearer \'+token} }); loadAdminData(); }',
-    '        async function adminCloseAll(id) { if(!confirm("Close ALL for user?")) return; await fetch(\'/api/admin/users/\' + id + \'/close-all\', { method:\'POST\', headers:{\'Authorization\':\'Bearer \'+token} }); loadAdminData(); }',
-    '        async function adminDeleteUser(id) { if(!confirm("Delete?")) return; await fetch(\'/api/admin/users/\' + id, { method:\'DELETE\', headers:{\'Authorization\':\'Bearer \'+token} }); loadAdminData(); }',
-    '        async function adminDeleteAllUsers() { if(!confirm("WIPE ALL?")) return; await fetch(\'/api/admin/users\', { method:\'DELETE\', headers:{\'Authorization\':\'Bearer \'+token} }); loadAdminData(); }',
-    '',
-    '        function logout() { localStorage.removeItem(\'token\'); token = null; if (statusInterval) clearInterval(statusInterval); navigateTo(\'/\'); window.location.reload(); }',
-    '',
-    '        async function fetchSettings() {',
-    '            try {',
-    '                const res = await fetch(\'/api/settings\', { headers: { \'Authorization\': \'Bearer \' + token } });',
-    '                if (res.status === 401 || res.status === 403) return logout();',
-    '                const config = await res.json();',
-    '                myGlobalSingleCoinTpPnl = config.globalSingleCoinTpPnl || 0;',
-    '                mySmartOffsetNetProfit = config.smartOffsetNetProfit || 0;',
-    '                myAutoBalanceEquity = config.autoBalanceEquity || false;',
-    '                myAutoBalanceUnrealizedPnlTarget = config.autoBalanceUnrealizedPnlTarget || 0;',
-    '                myAutoBalanceRetainRealized = config.autoBalanceRetainRealized || 0;',
-    '                const setVal = (id, val) => { const el = document.getElementById(id); if(el) el.value = val; };',
-    '                setVal(\'globalSingleCoinTpPnl\', myGlobalSingleCoinTpPnl);',
-    '                setVal(\'smartOffsetNetProfit\', mySmartOffsetNetProfit);',
-    '                if(document.getElementById(\'autoBalanceEquity\')) document.getElementById(\'autoBalanceEquity\').checked = myAutoBalanceEquity;',
-    '                setVal(\'autoBalanceUnrealizedPnlTarget\', myAutoBalanceUnrealizedPnlTarget);',
-    '                setVal(\'autoBalanceRetainRealized\', myAutoBalanceRetainRealized);',
-    '                ',
-    '                const setTxt = (id, txt) => { const el=document.getElementById(id); if(el) el.innerText=txt; };',
-    '                setTxt(\'display_globalSingleCoinTpPnl\', fmtC(myGlobalSingleCoinTpPnl));',
-    '                setTxt(\'display_smartOffsetNetProfit\', fmtC(mySmartOffsetNetProfit));',
-    '                const abStatus = document.getElementById(\'display_autoBalanceStatus\');',
-    '                if(abStatus) abStatus.innerHTML = myAutoBalanceEquity ? \'<span class="text-green">ON</span>\' : \'<span class="text-muted">OFF</span>\';',
-    '',
-    '                mySubAccounts = config.subAccounts || [];',
-    '                renderSubAccounts();',
-    '                if (mySubAccounts.length > 0) { document.getElementById(\'subAccountSelect\').value = 0; loadSubAccount(); } ',
-    '                else { currentProfileIndex = -1; document.getElementById(\'settingsContainer\').style.display = \'none\'; }',
-    '            } catch(e) {}',
-    '        }',
-    '',
-    '        async function saveGlobalSettings() {',
-    '            const getVal = (id, def) => { const el = document.getElementById(id); return el && el.value !== \'\' ? parseFloat(el.value) : def; };',
-    '            myGlobalSingleCoinTpPnl = getVal(\'globalSingleCoinTpPnl\', 0);',
-    '            mySmartOffsetNetProfit = getVal(\'smartOffsetNetProfit\', 0);',
-    '            myAutoBalanceEquity = document.getElementById(\'autoBalanceEquity\')?.checked || false;',
-    '            myAutoBalanceUnrealizedPnlTarget = getVal(\'autoBalanceUnrealizedPnlTarget\', 0);',
-    '            myAutoBalanceRetainRealized = getVal(\'autoBalanceRetainRealized\', 0);',
-    '            const data = { subAccounts: mySubAccounts, globalSingleCoinTpPnl: myGlobalSingleCoinTpPnl, smartOffsetNetProfit: mySmartOffsetNetProfit, autoBalanceEquity: myAutoBalanceEquity, autoBalanceUnrealizedPnlTarget: myAutoBalanceUnrealizedPnlTarget, autoBalanceRetainRealized: myAutoBalanceRetainRealized };',
-    '            await fetch(\'/api/settings\', { method: \'POST\', headers: { \'Content-Type\': \'application/json\', \'Authorization\': \'Bearer \' + token }, body: JSON.stringify(data) });',
-    '        }',
-    '',
-    '        function renderSubAccounts() {',
-    '            const select = document.getElementById(\'subAccountSelect\');',
-    '            if(!select) return;',
-    '            select.innerHTML = mySubAccounts.length ? \'\' : \'<option value="">Empty</option>\';',
-    '            mySubAccounts.forEach((sub, i) => select.innerHTML += \'<option value="\' + i + \'">[\' + (i+1) + \'] \' + sub.name + \'</option>\');',
-    '        }',
-    '',
-    '        async function addSubAccount() {',
-    '            const name = document.getElementById(\'newSubName\').value.trim();',
-    '            const key = document.getElementById(\'newSubKey\').value.trim();',
-    '            const secret = document.getElementById(\'newSubSecret\').value.trim();',
-    '            if(!name || (!isPaperUser && (!key || !secret))) return alert("Keys required.");',
-    '            mySubAccounts.push({ name, apiKey: isPaperUser ? "PAPER" : key, secret: isPaperUser ? "PAPER" : secret, side: \'long\', leverage: 10, baseQty: 1, takeProfitPct: 5, takeProfitPnl: 0, stopLossPct: -25, triggerDcaPnl: -2, maxContracts: 1000, realizedPnl: 0, coins: [] });',
-    '            await saveSettings(true);',
-    '            document.getElementById(\'newSubName\').value = \'\'; document.getElementById(\'newSubKey\').value = \'\'; document.getElementById(\'newSubSecret\').value = \'\';',
-    '            renderSubAccounts(); document.getElementById(\'subAccountSelect\').value = mySubAccounts.length - 1; loadSubAccount();',
-    '        }',
-    '',
-    '        function loadSubAccount() {',
-    '            const index = parseInt(document.getElementById(\'subAccountSelect\').value);',
-    '            if(isNaN(index) || index < 0) return;',
-    '            currentProfileIndex = index;',
-    '            const profile = mySubAccounts[index];',
-    '            document.getElementById(\'settingsContainer\').style.display = \'block\';',
-    '            document.getElementById(\'apiKey\').value = isPaperUser ? "PAPER" : (profile.apiKey||\'\'); document.getElementById(\'apiKey\').disabled = isPaperUser;',
-    '            document.getElementById(\'secret\').value = isPaperUser ? "PAPER" : (profile.secret||\'\'); document.getElementById(\'secret\').disabled = isPaperUser;',
-    '            document.getElementById(\'side\').value = profile.side || \'long\';',
-    '            document.getElementById(\'baseQty\').value = profile.baseQty || 1;',
-    '            document.getElementById(\'takeProfitPct\').value = profile.takeProfitPct || 5;',
-    '            document.getElementById(\'takeProfitPnl\').value = profile.takeProfitPnl || 0;',
-    '            document.getElementById(\'stopLossPct\').value = profile.stopLossPct || -25;',
-    '            document.getElementById(\'triggerDcaPnl\').value = profile.triggerDcaPnl || -2;',
-    '            document.getElementById(\'maxContracts\').value = profile.maxContracts || 1000;',
-    '            myCoins = profile.coins || [];',
-    '            renderCoinsSettings();',
-    '        }',
-    '',
-    '        async function removeSubAccount() {',
-    '            if(currentProfileIndex < 0) return;',
-    '            mySubAccounts.splice(currentProfileIndex, 1);',
-    '            await saveSettings(true);',
-    '            renderSubAccounts();',
-    '            if(mySubAccounts.length > 0) { document.getElementById(\'subAccountSelect\').value = 0; loadSubAccount(); } ',
-    '            else { currentProfileIndex = -1; document.getElementById(\'settingsContainer\').style.display = \'none\'; }',
-    '        }',
-    '',
-    '        async function globalToggleBot(active) {',
-    '            if(currentProfileIndex === -1) return;',
-    '            myCoins.forEach(c => c.botActive = active);',
-    '            await saveSettings(true);',
-    '        }',
-    '',
-    '        function addPredefinedList() {',
-    '            if(currentProfileIndex === -1) return;',
-    '            const sideMode = document.getElementById(\'predefSide\').value;',
-    '            const startMode = document.getElementById(\'predefStatus\').value === \'started\';',
-    '            PREDEFINED_COINS.forEach((base, index) => {',
-    '                const symbol = base + \'/USDT:USDT\';',
-    '                if(!myCoins.some(c => c.symbol === symbol)) {',
-    '                    let coinSide = \'long\';',
-    '                    if (sideMode === \'allShort\') coinSide = \'short\';',
-    '                    else if (sideMode === \'oddLong\') coinSide = (index % 2 === 0) ? \'long\' : \'short\';',
-    '                    else if (sideMode === \'evenLong\') coinSide = (index % 2 === 0) ? \'short\' : \'long\';',
-    '                    myCoins.push({ symbol, side: coinSide, botActive: startMode });',
-    '                }',
-    '            });',
-    '            renderCoinsSettings();',
-    '        }',
-    '',
-    '        function addCoinUI() {',
-    '            if(currentProfileIndex === -1) return;',
-    '            const symbol = document.getElementById(\'newCoinSymbol\').value.toUpperCase().trim();',
-    '            if(symbol && !myCoins.some(c => c.symbol === symbol)) {',
-    '                myCoins.push({ symbol, side: document.getElementById(\'side\').value, botActive: true });',
-    '                document.getElementById(\'newCoinSymbol\').value = \'\';',
-    '                renderCoinsSettings();',
-    '            }',
-    '        }',
-    '',
-    '        function removeCoinUI(index) { myCoins.splice(index, 1); renderCoinsSettings(); }',
-    '',
-    '        function renderCoinsSettings() {',
-    '            const container = document.getElementById(\'coinsListContainer\');',
-    '            container.innerHTML = \'\';',
-    '            myCoins.forEach((coin, i) => {',
-    '                const displaySide = coin.side || document.getElementById(\'side\').value;',
-    '                const sideColor = displaySide === \'long\' ? \'text-green\' : \'text-red\';',
-    '                container.innerHTML += \'<div class="flex-between metric" style="margin-bottom:5px;"><span>\' + coin.symbol + \' <span class="\' + sideColor + \'">[\' + displaySide + \']</span></span><button class="text-red" style="padding:2px 6px; border:none; background:transparent;" onclick="removeCoinUI(\' + i + \')">X</button></div>\';',
-    '            });',
-    '        }',
-    '',
-    '        async function saveSettings(silent = false) {',
-    '            if(currentProfileIndex === -1) return;',
-    '            const p = mySubAccounts[currentProfileIndex];',
-    '            if(!isPaperUser) { p.apiKey = document.getElementById(\'apiKey\').value; p.secret = document.getElementById(\'secret\').value; }',
-    '            p.side = document.getElementById(\'side\').value;',
-    '            p.baseQty = parseFloat(document.getElementById(\'baseQty\').value)||1;',
-    '            p.takeProfitPct = parseFloat(document.getElementById(\'takeProfitPct\').value)||5;',
-    '            p.takeProfitPnl = parseFloat(document.getElementById(\'takeProfitPnl\').value)||0;',
-    '            p.stopLossPct = parseFloat(document.getElementById(\'stopLossPct\').value)||-25;',
-    '            p.triggerDcaPnl = parseFloat(document.getElementById(\'triggerDcaPnl\').value)||-2;',
-    '            p.maxContracts = parseInt(document.getElementById(\'maxContracts\').value)||1000;',
-    '            p.coins = myCoins;',
-    '            const data = { subAccounts: mySubAccounts, globalSingleCoinTpPnl: myGlobalSingleCoinTpPnl, smartOffsetNetProfit: mySmartOffsetNetProfit, autoBalanceEquity: myAutoBalanceEquity, autoBalanceUnrealizedPnlTarget: myAutoBalanceUnrealizedPnlTarget, autoBalanceRetainRealized: myAutoBalanceRetainRealized };',
-    '            const res = await fetch(\'/api/settings\', { method: \'POST\', headers: { \'Content-Type\': \'application/json\', \'Authorization\': \'Bearer \' + token }, body: JSON.stringify(data) });',
-    '            const json = await res.json(); mySubAccounts = json.settings.subAccounts || [];',
-    '        }',
-    '',
-    '        async function toggleCoinBot(symbol, active) { const coin = myCoins.find(c => c.symbol === symbol); if(coin) { coin.botActive = active; await saveSettings(true); } }',
-    '',
-    '        async function loadOffsets() {',
-    '            const res = await fetch(\'/api/offsets\', { headers: { \'Authorization\': \'Bearer \' + token } });',
-    '            if (!res.ok) return;',
-    '            const records = await res.json();',
-    '            if (records.length === 0) {',
-    '                const empty = \'<tr><td colspan="7" class="text-muted text-center">Empty</td></tr>\';',
-    '                if(document.getElementById(\'offsetTableContainer\')) document.getElementById(\'offsetTableContainer\').innerHTML = empty;',
-    '                if(document.getElementById(\'pretty-log-tbody\')) document.getElementById(\'pretty-log-tbody\').innerHTML = empty;',
-    '                return;',
-    '            }',
-    '            let pretty = \'\';',
-    '            records.forEach(r => {',
-    '                const d = new Date(r.timestamp);',
-    '                const dStr = d.toLocaleDateString(undefined,{month:\'short\',day:\'numeric\'}) + \' \' + d.toLocaleTimeString(undefined,{hour12:false});',
-    '                const sym = r.symbol || \'?\';',
-    '                const net = r.netProfit || 0;',
-    '                const roi = r.roi !== undefined ? r.roi.toFixed(2)+\'%\' : \'-\';',
-    '                const openP = r.openPrice ? fmtP(r.openPrice) : \'-\';',
-    '                const closeP = r.closePrice ? fmtP(r.closePrice) : \'-\';',
-    '                const side = r.side ? \' <span class="text-muted" style="font-size:11px;">[\'+r.side.toUpperCase()+\']</span>\' : \'\';',
-    '                ',
-    '                const row = \'<tr>\' +',
-    '                    \'<td class="text-muted">\' + dStr + \'</td>\' +',
-    '                    \'<td><b>\' + sym + \'</b>\' + side + \'</td>\' +',
-    '                    \'<td class="\' + (r.roi>=0?\'text-green\':\'text-red\') + \'">\' + roi + \'</td>\' +',
-    '                    \'<td class="\' + (net>=0?\'text-green\':\'text-red\') + \'">\' + (net>=0?\'+\':\'\') + \'$\' + net.toFixed(4) + \'</td>\' +',
-    '                    \'<td>\' + openP + \'</td>\' +',
-    '                    \'<td>\' + closeP + \'</td>\' +',
-    '                    \'<td>\' + (r.reason||\'?\') + \'</td>\' +',
-    '                    \'</tr>\';',
-    '                pretty += row;',
-    '            });',
-    '            const fullTable = \'<table><tr><th>Time</th><th>Coin</th><th>ROI %</th><th>PNL</th><th>Open Price</th><th>Close Price</th><th>Reason</th></tr>\' + pretty + \'</table>\';',
-    '            if(document.getElementById(\'offsetTableContainer\')) document.getElementById(\'offsetTableContainer\').innerHTML = fullTable;',
-    '            if(document.getElementById(\'pretty-log-tbody\')) document.getElementById(\'pretty-log-tbody\').innerHTML = pretty;',
-    '        }',
-    '',
-    '        async function loadStatus() {',
-    '            try {',
-    '                const res = await fetch(\'/api/status\', { headers: { \'Authorization\': \'Bearer \' + token } });',
-    '                if (res.status === 401 || res.status === 403) return logout();',
-    '                const data = await res.json();',
-    '                const allStatuses = data.states || {};',
-    '                const subAccountsUpdated = data.subAccounts || [];',
-    '                const globalSet = data.globalSettings || {};',
-    '                ',
-    '                if (myUsername !== \'webcoin8888\' && subAccountsUpdated.length !== mySubAccounts.length) fetchSettings();',
-    '',
-    '                let globalTotal = 0, globalUnrealized = 0, globalMarginUsed = 0, totalTrading = 0, totalAboveZero = 0, globalRealized = 0;',
-    '                let activeCandidates = [];',
-    '                subAccountsUpdated.forEach(sub => { ',
-    '                    globalTotal += (sub.realizedPnl || 0); ',
-    '                    globalRealized += (sub.realizedPnl || 0);',
-    '                    const loc = mySubAccounts.find(s=>s._id===sub._id); ',
-    '                    if(loc) loc.realizedPnl=sub.realizedPnl; ',
-    '                });',
-    '',
-    '                for (let pid in allStatuses) {',
-    '                    const st = allStatuses[pid];',
-    '                    if (st && st.coinStates) {',
-    '                        for (let sym in st.coinStates) {',
-    '                            const cs = st.coinStates[sym];',
-    '                            if (cs.contracts > 0) globalMarginUsed += (parseFloat(cs.margin) || 0);',
-    '                            if (cs.contracts > 0 && (!cs.lockUntil || Date.now() >= cs.lockUntil)) {',
-    '                                totalTrading++; const pnlNum = parseFloat(cs.unrealizedPnl) || 0;',
-    '                                if (cs.currentRoi > 0) totalAboveZero++;',
-    '                                globalUnrealized += pnlNum; activeCandidates.push({ symbol: sym, pnl: pnlNum, profileId: pid });',
-    '                            }',
-    '                        }',
-    '                    }',
-    '                }',
-    '',
-    '                const setTxt = (id, txt, cls) => { const el=document.getElementById(id); if(el){el.innerText=txt; if(cls) el.className="metric-val "+cls;} };',
-    '                ',
-    '                setTxt(\'topGlobalMargin\', "$"+globalMarginUsed.toFixed(2));',
-    '                setTxt(\'globalPnl\', fmtC(globalTotal), globalTotal>=0?"text-green":"text-red");',
-    '                setTxt(\'topGlobalUnrealized\', fmtC(globalUnrealized), globalUnrealized>=0?"text-green":"text-red");',
-    '                setTxt(\'globalWinRate\', totalAboveZero + " / " + totalTrading);',
-    '',
-    '                const targetPnl = myAutoBalanceUnrealizedPnlTarget || 0;',
-    '                const currentGap = globalUnrealized - targetPnl;',
-    '                const deficit = currentGap < 0 ? Math.abs(currentGap) : 0;',
-    '                const availBudget = Math.max(0, globalRealized - (myAutoBalanceRetainRealized || 0));',
-    '                setTxt(\'display_autoBalanceTarget\', fmtC(targetPnl));',
-    '                setTxt(\'display_autoBalanceGap\', "-$" + deficit.toFixed(4), deficit > 0 ? "text-red" : "text-muted");',
-    '                setTxt(\'display_autoBalanceBudget\', "+$" + availBudget.toFixed(4), "text-blue");',
-    '',
-    '                const coverPlanContainer = document.getElementById("cover-plan-container");',
-    '                if (coverPlanContainer) {',
-    '                    if (myAutoBalanceEquity && deficit > 0) {',
-    '                        let planHtml = "";',
-    '                        let dTemp = deficit;',
-    '                        let bTemp = availBudget;',
-    '                        let sTemp = dTemp - bTemp;',
-    '                        ',
-    '                        let wList = activeCandidates.filter(c => c.pnl > 0).sort((a,b) => b.pnl - a.pnl);',
-    '                        let lList = activeCandidates.filter(c => c.pnl < 0).sort((a,b) => a.pnl - b.pnl);',
-    '',
-    '                        if (sTemp > 0 && wList.length > 0) {',
-    '                            planHtml += "<div style=\'margin-bottom:4px; color:#aaa;\'>1. Need to Harvest Winners for Shortfall ($" + sTemp.toFixed(2) + ")</div>";',
-    '                            for (let w of wList) {',
-    '                                if (sTemp <= 0) break;',
-    '                                let useAmt = Math.min(w.pnl, sTemp);',
-    '                                planHtml += "<div class=\'flex-between text-green\' style=\'padding:4px; background:#0a200a; margin-bottom:2px;\'><span>" + w.symbol + "</span><span>+$" + useAmt.toFixed(4) + "</span></div>";',
-    '                                sTemp -= useAmt;',
-    '                                bTemp += useAmt;',
-    '                            }',
-    '                        }',
-    '                        ',
-    '                        let eBudget = Math.min(dTemp, bTemp);',
-    '                        if (eBudget > 0 && lList.length > 0) {',
-    '                            planHtml += "<div style=\'margin-top:8px; margin-bottom:4px; color:#aaa;\'>2. Target Losers to Burn using Budget ($" + eBudget.toFixed(2) + ")</div>";',
-    '                            for (let l of lList) {',
-    '                                if (eBudget <= 0) break;',
-    '                                let lossAmt = Math.abs(l.pnl);',
-    '                                let useAmt = Math.min(lossAmt, eBudget);',
-    '                                planHtml += "<div class=\'flex-between text-red\' style=\'padding:4px; background:#200a0a; margin-bottom:2px;\'><span>" + l.symbol + "</span><span>-$" + useAmt.toFixed(4) + "</span></div>";',
-    '                                eBudget -= useAmt;',
-    '                            }',
-    '                        }',
-    '                        ',
-    '                        if (!planHtml) planHtml = "<span class=\'text-muted\'>No positions available to cover.</span>";',
-    '                        document.getElementById("cover-plan-list").innerHTML = planHtml;',
-    '                        coverPlanContainer.style.display = "block";',
-    '                    } else {',
-    '                        coverPlanContainer.style.display = "none";',
-    '                    }',
-    '                }',
-    '',
-    '                activeCandidates.sort((a, b) => b.pnl - a.pnl);',
-    '                const totalCoins = activeCandidates.length, totalPairs = Math.floor(totalCoins / 2);',
-    '                let peakAccumulation = 0;',
-    '                const multiplier = globalSet.qtyMultiplier || 1, peakThreshold = 0.0001 * multiplier;',
-    '                if (totalPairs > 0) { let rAcc = 0; for (let i = 0; i < totalPairs; i++) { rAcc += activeCandidates[i].pnl + activeCandidates[totalCoins - 1 - i].pnl; if (rAcc > peakAccumulation) peakAccumulation = rAcc; } }',
-    '',
-    '                if(document.getElementById("display_highestPnlNode")) {',
-    '                    if (activeCandidates.length > 0) {',
-    '                        const hi = activeCandidates[0], lo = activeCandidates[activeCandidates.length - 1];',
-    '                        document.getElementById("display_highestPnlNode").innerHTML = hi.symbol + " <br>" + fmtC(hi.pnl) + " <button style=\'padding:2px 5px;font-size:10px;\' onclick=\'closeSinglePosition(\\"" + hi.symbol + "\\", \\"" + hi.profileId + "\\")\'>Close</button>";',
-    '                        document.getElementById("display_lowestPnlNode").innerHTML = lo.symbol + " <br>" + fmtC(lo.pnl);',
-    '                    } else {',
-    '                        document.getElementById("display_highestPnlNode").innerHTML = "-"; document.getElementById("display_lowestPnlNode").innerHTML = "-";',
-    '                    }',
-    '                    setTxt(\'display_v1TargetPeak\', fmtC(globalSet.smartOffsetNetProfit||0));',
-    '                    setTxt(\'display_v1MaxDetected\', fmtC(peakAccumulation), peakAccumulation>=0?"text-green":"text-red");',
-    '                }',
-    '',
-    '                if (document.getElementById(\'offset-tab\')?.style.display === \'block\') {',
-    '                    const targetV1 = globalSet.smartOffsetNetProfit || 0;',
-    '                    let rAcc = 0, pIdx = -1, tPeak = 0;',
-    '                    for (let i = 0; i < totalPairs; i++) { rAcc += activeCandidates[i].pnl + activeCandidates[totalCoins - 1 - i].pnl; if (rAcc > tPeak) { tPeak = rAcc; pIdx = i; } }',
-    '                    setTxt(\'v1_page_target\', fmtC(targetV1));',
-    '                    setTxt(\'v1_page_peak\', fmtC(tPeak), tPeak>=0?"text-green":"text-red");',
-    '                    if (totalPairs === 0) document.getElementById(\'liveOffsetsContainer\').innerHTML = \'<p class="text-muted text-center">No pairs.</p>\';',
-    '                    else {',
-    '                        let liveHtml = \'<table><tr><th>Pair</th><th>Win Node</th><th>Delta</th><th>Lose Node</th><th>Delta</th><th>Pair Net</th><th>Accum</th></tr>\';',
-    '                        let exec = (targetV1 > 0 && tPeak >= targetV1 && tPeak >= peakThreshold && pIdx >= 0);',
-    '                        let dAcc = 0;',
-    '                        for (let i = 0; i < totalPairs; i++) {',
-    '                            const w = activeCandidates[i], l = activeCandidates[totalCoins - 1 - i], net = w.pnl + l.pnl; dAcc += net;',
-    '                            let stat = exec ? (i <= pIdx ? "Harvest" : "Skip") : ((i <= pIdx && tPeak >= peakThreshold) ? "Peak" : "Base");',
-    '                            liveHtml += \'<tr><td class="text-muted">[\' + (i+1) + \'] \' + stat + \'</td><td>\' + w.symbol + \'</td><td class="\' + (w.pnl>=0?"text-green":"text-red") + \'">\' + fmtC(w.pnl) + \'</td><td>\' + l.symbol + \'</td><td class="\' + (l.pnl>=0?"text-green":"text-red") + \'">\' + fmtC(l.pnl) + \'</td><td class="\' + (net>=0?"text-green":"text-red") + \'">\' + fmtC(net) + \'</td><td class="\' + (dAcc>=0?"text-green":"text-red") + \'">\' + fmtC(dAcc) + \'</td></tr>\';',
-    '                        }',
-    '                        liveHtml += \'</table>\';',
-    '                        document.getElementById(\'liveOffsetsContainer\').innerHTML = liveHtml;',
-    '                    }',
-    '                }',
-    '',
-    '                let summaryHtml = "";',
-    '                if (subAccountsUpdated.length === 0) summaryHtml = "<tr><td colspan=\'5\' class=\'text-muted text-center\'>No profiles</td></tr>";',
-    '                else {',
-    '                    subAccountsUpdated.forEach((sub, i) => {',
-    '                        const pnl = sub.realizedPnl || 0;',
-    '                        const hasKeys = isPaperUser || (sub.apiKey && sub.secret);',
-    '                        const envText = hasKeys ? (isPaperUser ? "<span class=\'text-blue\'>PAPER</span>" : "<span class=\'text-green\'>LIVE</span>") : "<span class=\'text-warning\'>NO KEYS</span>";',
-    '                        const isRunning = allStatuses[sub._id] !== undefined && sub.coins?.some(c => c.botActive);',
-    '                        const statTxt = !hasKeys ? "Offline" : (isRunning ? "<span class=\'text-green\'>[▶] Run</span>" : "<span class=\'text-red\'>[■] Stop</span>");',
-    '                        summaryHtml += "<tr><td>[" + (i+1) + "] " + sub.name + "</td><td>" + envText + "</td><td>" + statTxt + "</td><td>" + (sub.side||"long").toUpperCase() + "</td><td class=\'" + (pnl>=0?"text-green":"text-red") + "\'>" + fmtC(pnl) + "</td></tr>";',
-    '                    });',
-    '                }',
-    '                const summaryTbody = document.getElementById("active-profiles-tbody"); if (summaryTbody) summaryTbody.innerHTML = summaryHtml;',
-    '',
-    '                const elapsedHrs = Math.max(Date.now() - (data.startTime ? new Date(data.startTime).getTime() : Date.now()), 3600000) / 3600000;',
-    '                const hrly = globalTotal / elapsedHrs;',
-    '                setTxt("estHour", fmtC(hrly), hrly>=0?"text-green":"text-red"); setTxt("estDay", fmtC(hrly*24), hrly>=0?"text-green":"text-red");',
-    '                setTxt("estMonth", fmtC(hrly*24*30), hrly>=0?"text-green":"text-red"); setTxt("estYear", fmtC(hrly*24*365), hrly>=0?"text-green":"text-red");',
-    '',
-    '                if(currentProfileIndex === -1) return;',
-    '                const profile = mySubAccounts[currentProfileIndex];',
-    '                setTxt(\'profilePnl\', fmtC(profile.realizedPnl||0), (profile.realizedPnl||0)>=0?"text-green":"text-red");',
-    '                ',
-    '                let pMargin = 0;',
-    '                const stateData = allStatuses[profile._id] || { coinStates: {}, logs: [] };',
-    '                let pBanner = (globalSet.cyclePauseEnabled && globalSet.cycleCurrentState === "paused") ? \'<div style="background:#450a0a; color:#f87171; padding:10px; margin-bottom:10px;">[!] Paused by Cycle Timer</div>\' : \'\';',
-    '',
-    '                if(!myCoins || myCoins.length === 0) {',
-    '                    const dsc = document.getElementById(\'dashboardStatusContainer\'); if(dsc) dsc.innerHTML = pBanner + \'<p class="text-muted text-center">Empty</p>\';',
-    '                    setTxt(\'profileMargin\', "$0.00");',
-    '                } else {',
-    '                    let html = pBanner;',
-    '                    myCoins.forEach(coin => {',
-    '                        const st = stateData.coinStates?.[coin.symbol] || { status: \'Halted\', currentPrice: 0, avgEntry: 0, contracts: 0, currentRoi: 0, unrealizedPnl: 0, margin: 0 };',
-    '                        if (st.contracts > 0) pMargin += (parseFloat(st.margin) || 0);',
-    '                        let stCls = st.status === \'Running\' ? \'text-green\' : (st.status === \'In Position\' ? \'text-blue\' : \'text-red\');',
-    '                        if (globalSet.cyclePauseEnabled && globalSet.cycleCurrentState === \'paused\') { st.status = \'Paused\'; stCls = \'text-warning\'; }',
-    '                        else if (st.lockUntil && Date.now() < st.lockUntil) { st.status = \'Process\'; stCls = \'text-warning\'; }',
-    '                        const roiCls = st.currentRoi >= 0 ? \'text-green\' : \'text-red\';',
-    '                        html += \'<div class="metric" style="margin-bottom:10px;"><div class="flex-between" style="border-bottom:1px solid #222; padding-bottom:5px; margin-bottom:5px;"><span><b>\' + coin.symbol + \'</b> [\' + (coin.side||profile.side||\'long\') + \'] <span class="\' + stCls + \'">\' + st.status + \'</span></span><div><button onclick="toggleCoinBot(\\\'\' + coin.symbol + \'\\\', true)">▶</button> <button class="text-red" style="border-color:#f87171;" onclick="toggleCoinBot(\\\'\' + coin.symbol + \'\\\', false)">■</button></div></div>\';',
-    '                        html += \'<div class="grid" style="font-size:12px;"><div>Price: \' + fmtP(st.currentPrice) + \'</div><div>Entry: \' + fmtP(st.avgEntry) + \'</div><div>Size: \' + (st.contracts||0) + \'</div><div class="\' + roiCls + \'">Net: \' + (st.unrealizedPnl||0).toFixed(4) + \'</div><div class="\' + roiCls + \'">ROI: \' + (st.currentRoi||0).toFixed(2) + \'%</div></div></div>\';',
-    '                    });',
-    '                    const dsc = document.getElementById(\'dashboardStatusContainer\'); if(dsc) dsc.innerHTML = html;',
-    '                    setTxt(\'profileMargin\', "$" + pMargin.toFixed(2));',
-    '                }',
-    '',
-    '                const logsEl = document.getElementById(\'logs\');',
-    '                if(logsEl) {',
-    '                    logsEl.innerHTML = (stateData.logs || []).map(l => {',
-    '                        if(l.includes(\'❌\')) return \'<span class="text-red">\' + l + \'</span>\';',
-    '                        if(l.includes(\'⚡\')||l.includes(\'🛒\')) return \'<span class="text-blue">\' + l + \'</span>\';',
-    '                        if(l.includes(\'⚙️\')||l.includes(\'⚖️\')) return \'<span class="text-warning">\' + l + \'</span>\';',
-    '                        return l;',
-    '                    }).join(\'<br>\');',
-    '                }',
-    '            } catch (err) {}',
-    '        }',
-    '        checkAuth();',
-    '    </script>',
-    '</body>',
-    '</html>'
-];
+        <!-- AUTHENTICATION VIEW -->
+        <div id="auth-view" class="md-card">
+            <h2 class="md-card-header" style="justify-content:center; color:var(--primary); border:none;"><span class="material-symbols-outlined" style="font-size:32px;">robot_2</span> HTX Trading Bot</h2>
+            <div>
+                <label>Username</label>
+                <input type="text" id="username" placeholder="Enter username">
+                <label>Password</label>
+                <input type="password" id="password" placeholder="Enter password">
+                <label style="color:var(--warning);">Auth Code (For Registration)</label>
+                <p style="font-size:0.75em; margin-top:0;">Leave blank for simulated Paper Trading. Enter exactly <strong>webcoin8888</strong> for Live Real Trading.</p>
+                <input type="password" id="authCode" placeholder="Enter auth code (Optional)">
+            </div>
+            <div class="flex-row" style="margin-top: 24px;">
+                <button class="md-btn md-btn-primary" style="flex:1;" onclick="auth('login')"><span class="material-symbols-outlined">login</span> Login</button>
+            </div>
+            <div style="text-align:center; margin-top:16px;">
+                <button class="md-btn md-btn-text" onclick="auth('register')">Register New Account</button>
+            </div>
+            <p id="auth-msg" style="text-align:center; font-weight:500;"></p>
+        </div>
 
-app.get('*', (req, res) => {
-    if (req.path.startsWith('/api/')) return res.status(404).json({ error: "API Endpoint Not Found" });
-    res.send(FRONTEND_HTML.join('\n'));
+        <!-- DASHBOARD VIEW -->
+        <div id="dashboard-view">
+            <!-- APP BAR -->
+            <div class="app-bar">
+                <h1 class="app-title" id="app-title"><span class="material-symbols-outlined">robot_2</span> HTX BOT</h1>
+                <div class="flex-row">
+                    <button class="md-btn md-btn-danger" id="panic-btn" style="display:none;" onclick="closeAllPositions()"><span class="material-symbols-outlined">emergency</span> Panic Close</button>
+                    <button class="md-btn md-btn-text nav-btn" id="admin-btn" style="display:none;" onclick="switchTab('admin')"><span class="material-symbols-outlined">manage_accounts</span> User Admin</button>
+                    <button class="md-btn md-btn-text nav-btn" id="editor-btn" style="display:none;" onclick="switchTab('editor')"><span class="material-symbols-outlined">database</span> Database Editor</button>
+                    
+                    <button class="md-btn md-btn-text nav-btn" id="nav-main" onclick="switchTab('main')"><span class="material-symbols-outlined">dashboard</span> Dashboard</button>
+                    <button class="md-btn md-btn-text nav-btn" id="nav-offsets" onclick="switchTab('offsets')"><span class="material-symbols-outlined">call_merge</span> V1 Offsets</button>
+                    <button class="md-btn md-btn-text nav-btn" id="nav-offsets2" onclick="switchTab('offsets2')"><span class="material-symbols-outlined">alt_route</span> V2 Offsets</button>
+                    <button class="md-btn md-btn-text" style="color:var(--text-secondary);" onclick="logout()"><span class="material-symbols-outlined">logout</span> Logout</button>
+                </div>
+            </div>
+
+            <div class="container">
+
+                <!-- DATABASE EDITOR TAB (MASTER ONLY) -->
+                <div id="editor-tab" style="display:none;">
+                    <div class="md-card">
+                        <h2 class="md-card-header"><span class="material-symbols-outlined" style="color:var(--primary);">database</span> Master Account Database Editor (webcoin8888)</h2>
+                        <p style="background: #FFF3E0; padding: 12px; border-left: 4px solid var(--warning); color: var(--text-primary); border-radius: 4px; font-size: 0.9em; line-height:1.5;">
+                            <strong>Note:</strong> Trading functionality is completely disabled on this account to protect the template. Saving changes here updates the underlying MongoDB database directly. Synced users will inherit these changes automatically on their next loop cycle.
+                        </p>
+                        
+                        <div id="editorGlobalContainer">Loading...</div>
+                        
+                        <h3 style="margin-top: 30px;"><span class="material-symbols-outlined" style="vertical-align:middle;">folder_shared</span> Master Profiles (Array Editor)</h3>
+                        <div id="editorProfilesContainer">Loading...</div>
+                    </div>
+                </div>
+
+                <!-- ADMIN TAB -->
+                <div id="admin-tab" style="display:none;">
+                    <div class="md-card">
+                        <h2 class="md-card-header"><span class="material-symbols-outlined">admin_panel_settings</span> User Management</h2>
+                        <div id="adminStatusBanner" style="padding: 16px; border-radius: 4px; margin-bottom: 24px; font-weight: 500; display:flex; align-items:center; gap:8px;">
+                            Checking System Status...
+                        </div>
+                        
+                        <div class="flex-row" style="justify-content: space-between; margin-bottom: 16px;">
+                            <h3 style="margin: 0; border: none;">Registered Users</h3>
+                            <button class="md-btn md-btn-danger" onclick="adminDeleteAllUsers()"><span class="material-symbols-outlined">delete_forever</span> Delete ALL Users</button>
+                        </div>
+                        <div id="adminUsersContainer">Loading users...</div>
+                    </div>
+                </div>
+
+                <!-- SMART OFFSETS HISTORY & LIVE TAB -->
+                <div id="offset-tab" style="display:none;">
+                    <div class="md-card">
+                        <h2 class="md-card-header text-blue"><span class="material-symbols-outlined">monitoring</span> Live Accumulation Grouping (V1)</h2>
+                        <p>Scans the "Group Accumulation" column to find the exact row where the profit hits its peak. If that peak reaches your Target, it chops the list right there and ONLY closes the profitable pairs.</p>
+                        <div id="liveOffsetsContainer">Waiting for live data...</div>
+                    </div>
+                    <div class="md-card">
+                        <h2 class="md-card-header text-green"><span class="material-symbols-outlined">history</span> Executed Trade History</h2>
+                        <div id="offsetTableContainer">Loading historical offset data...</div>
+                    </div>
+                </div>
+
+                <!-- SMART OFFSETS V2 (ENDS) TAB -->
+                <div id="offset2-tab" style="display:none;">
+                    <div class="md-card">
+                        <h2 class="md-card-header"><span class="material-symbols-outlined">settings</span> V2 Settings (Ends Pairing: 1 & N)</h2>
+                        <div class="stat-box" style="background: #E3F2FD; border-color: #90CAF9;">
+                            <label style="margin-top:0;">Manual Offset Net Profit Target V2 ($)</label>
+                            <p style="margin-top:2px;">Strict 1-to-1 pairings (Rank 1 & N). Closes ONLY the winner if Net PNL &ge; this amount.</p>
+                            <input type="number" step="0.1" id="smartOffsetNetProfit2" placeholder="e.g. 1.00 (0 = Disabled)">
+                            
+                            <label>Manual Offset Stop Loss V2 ($)</label>
+                            <p style="margin-top:2px;">If the paired Net Result drops below this amount, it closes the winner only.</p>
+                            <input type="number" step="0.1" id="smartOffsetStopLoss2" placeholder="e.g. -2.00 (0 = Disabled)">
+                            
+                            <button class="md-btn md-btn-primary" style="margin-top:16px; width:100%;" onclick="saveGlobalSettings()"><span class="material-symbols-outlined">save</span> Save Global Offset V2</button>
+                        </div>
+                    </div>
+
+                    <div class="md-card">
+                        <h2 class="md-card-header text-blue"><span class="material-symbols-outlined">track_changes</span> Live Paired Trades V2 (1-to-1 Sniper)</h2>
+                        <p>Real-time strict 1-to-1 pairings (Rank 1 & 10, 2 & 9, 3 & 8). No accumulation grouping here.</p>
+                        <div id="liveOffsetsContainer2">Waiting for live data...</div>
+                    </div>
+                    <div class="md-card">
+                        <h2 class="md-card-header text-green"><span class="material-symbols-outlined">history</span> Executed Trade History</h2>
+                        <div id="offsetTableContainer2">Loading historical offset data...</div>
+                    </div>
+                </div>
+
+                <!-- MAIN DASHBOARD TAB -->
+                <div id="main-tab">
+                    
+                    <!-- GLOBAL STATS -->
+                    <div class="stat-box flex-row" style="justify-content: space-between; background:#FFF8E1; border-color:#FFE082; margin-bottom: 24px;">
+                        <div><span class="stat-label">Winning / Total Coins</span><span class="stat-val text-warning" id="globalWinRate">0 / 0</span></div>
+                        <div><span class="stat-label">Global Unrealized PNL (Net)</span><span class="stat-val" id="topGlobalUnrealized">0.0000</span></div>
+                    </div>
+
+                    <!-- 1-MIN AUTO-DYNAMIC -->
+                    <div id="autoDynStatusBox" class="stat-box" style="display:none; background:#E3F2FD; border-color:#90CAF9; margin-bottom: 24px;">
+                        <h3 style="margin-top:0; color:var(--primary); border-bottom:1px solid #90CAF9; padding-bottom:8px; display:flex; align-items:center; gap:8px;">
+                            <span class="material-symbols-outlined">bolt</span> 1-Min Auto-Dynamic Status
+                        </h3>
+                        <div id="autoDynLiveDetails"></div>
+                    </div>
+
+                    <div class="flex-row" style="align-items: stretch;">
+                        
+                        <!-- SETTINGS PANEL (LEFT) -->
+                        <div class="md-card flex-1">
+                            <h2 class="md-card-header"><span class="material-symbols-outlined">public</span> Global User Settings</h2>
+                            
+                            <div class="stat-box" style="margin-bottom: 24px;">
+                                <h4 style="margin: 0 0 8px 0; color: var(--primary);">Smart Net Profit Targets</h4>
+                                <div class="flex-row">
+                                    <div style="flex:1;"><label style="margin-top:0;">Global Target ($)</label><input type="number" step="0.1" id="globalTargetPnl" placeholder="e.g. 15.00"></div>
+                                    <div style="flex:1;"><label style="margin-top:0;">Trailing Drop ($)</label><input type="number" step="0.1" id="globalTrailingPnl" placeholder="e.g. 2.00"></div>
+                                </div>
+                                <label>Offset V1 Target ($)</label>
+                                <input type="number" step="0.1" id="smartOffsetNetProfit" placeholder="e.g. 1.00 (0 = Disabled)">
+                                
+                                <label>Nth Bottom Row Reference (V1)</label>
+                                <input type="number" step="1" id="smartOffsetBottomRowV1" placeholder="e.g. 5">
+                                
+                                <label>Nth Bottom Row SL Gate (V1) ($)</label>
+                                <input type="number" step="0.1" id="smartOffsetBottomRowV1StopLoss" placeholder="e.g. -1.50 (0 = Disabled)">
+                                
+                                <label>Full Group Stop Loss V1 ($)</label>
+                                <input type="number" step="0.1" id="smartOffsetStopLoss" placeholder="e.g. -2.00 (0 = Disabled)">
+
+                                <div style="margin-top:16px; border-top: 1px solid #ccc; padding-top: 16px;">
+                                    <label style="margin-top:0;">Stop Loss Execution Limits</label>
+                                    <div class="flex-row">
+                                        <div style="flex:1;"><input type="number" step="0.1" id="smartOffsetMaxLossPerMinute" placeholder="Max Amt (e.g. 10.00)"></div>
+                                        <div style="flex:1;"><input type="number" step="1" id="smartOffsetMaxLossTimeframeSeconds" placeholder="Timeframe (e.g. 60s)"></div>
+                                    </div>
+                                    <div class="flex-row">
+                                        <div style="flex:1;"><label>No Peak SL Time (Secs)</label><input type="number" step="1" id="noPeakSlTimeframeSeconds" placeholder="e.g. 1800"></div>
+                                        <div style="flex:1;"><label>No Peak Gate PNL ($)</label><input type="number" step="0.1" id="noPeakSlGatePnl" placeholder="e.g. 0"></div>
+                                    </div>
+                                </div>
+
+                                <div style="margin-top:16px; border-top: 1px solid #ccc; padding-top: 16px;">
+                                    <label style="margin-top:0; display:flex; align-items:center; cursor:pointer;">
+                                        <input type="checkbox" id="minuteCloseAutoDynamic" style="width:auto; margin:0 8px 0 0;"> Enable Auto-Dynamic Closer
+                                    </label>
+                                    <div style="background:#FFF; padding:12px; border:1px solid #E0E0E0; border-radius:4px; margin-top:12px;">
+                                        <label style="margin-top:0; color:var(--success);">Take Profit Range ($)</label>
+                                        <div class="flex-row">
+                                            <div style="flex:1;"><input type="number" step="0.0001" id="minuteCloseTpMinPnl" placeholder="Min TP"></div>
+                                            <div style="flex:1;"><input type="number" step="0.0001" id="minuteCloseTpMaxPnl" placeholder="Max TP"></div>
+                                        </div>
+                                        <label style="margin-top:12px; color:var(--danger);">Stop Loss Range ($)</label>
+                                        <div class="flex-row">
+                                            <div style="flex:1;"><input type="number" step="0.0001" id="minuteCloseSlMinPnl" placeholder="Min SL"></div>
+                                            <div style="flex:1;"><input type="number" step="0.0001" id="minuteCloseSlMaxPnl" placeholder="Max SL"></div>
+                                        </div>
+                                    </div>
+                                </div>
+                                <button class="md-btn md-btn-primary" style="margin-top:16px; width:100%;" onclick="saveGlobalSettings()"><span class="material-symbols-outlined">save</span> Save Global Settings</button>
+                            </div>
+
+                            <h2 class="md-card-header"><span class="material-symbols-outlined">manage_accounts</span> Profile Setup</h2>
+                            <div class="stat-box" style="margin-bottom: 24px;">
+                                <div class="flex-row" style="justify-content: space-between; margin-bottom: 12px;">
+                                    <h4 style="margin: 0;">Switch Profile</h4>
+                                    <label style="margin: 0; display:flex; align-items:center; cursor:pointer; text-transform:none;"><input type="checkbox" style="width:auto; margin:0 6px 0 0;" onchange="toggleNewKeys(this)"> Show Keys</label>
+                                </div>
+                                <div class="flex-row" style="margin-bottom: 12px;">
+                                    <select id="subAccountSelect" style="flex:2;"><option value="">-- Select Profile --</option></select>
+                                    <button class="md-btn md-btn-primary" onclick="loadSubAccount()"><span class="material-symbols-outlined">download</span> Load</button>
+                                    <button class="md-btn md-btn-danger" onclick="removeSubAccount()"><span class="material-symbols-outlined">delete</span></button>
+                                </div>
+                                <div class="flex-row">
+                                    <input type="text" id="newSubName" placeholder="Profile Name" style="flex:1;">
+                                    <input type="password" id="newSubKey" placeholder="API Key" style="flex:1;">
+                                    <input type="password" id="newSubSecret" placeholder="Secret Key" style="flex:1;">
+                                    <button class="md-btn md-btn-success" onclick="addSubAccount()"><span class="material-symbols-outlined">add</span></button>
+                                </div>
+                            </div>
+
+                            <div id="settingsContainer" style="display:none;">
+                                <div class="flex-row" style="justify-content: space-between; margin-top:16px;">
+                                    <label style="margin:0;">Active Profile Keys</label>
+                                    <label style="margin:0; display:flex; align-items:center; cursor:pointer; text-transform:none;"><input type="checkbox" id="showActiveKeysCheckbox" style="width:auto; margin:0 6px 0 0;" onchange="toggleActiveKeys(this)"> Show Keys</label>
+                                </div>
+                                <input type="password" id="apiKey" placeholder="HTX API Key" style="margin-top:8px;">
+                                <input type="password" id="secret" placeholder="HTX Secret Key">
+
+                                <div class="flex-row" style="margin-top: 16px; margin-bottom: 16px;">
+                                    <button class="md-btn md-btn-success" style="flex:1;" onclick="globalToggleBot(true)"><span class="material-symbols-outlined">play_arrow</span> Start All</button>
+                                    <button class="md-btn md-btn-danger" style="flex:1;" onclick="globalToggleBot(false)"><span class="material-symbols-outlined">stop</span> Stop All</button>
+                                </div>
+
+                                <div class="flex-row">
+                                    <div style="flex:1"><label>Side</label><select id="side"><option value="long">Long</option><option value="short">Short</option></select></div>
+                                    <div style="flex:1"><label>Leverage</label><input type="number" id="leverage" disabled value="10"></div>
+                                </div>
+                                
+                                <label>Base Contracts Qty</label>
+                                <input type="number" id="baseQty">
+
+                                <div class="flex-row">
+                                    <div style="flex:1"><label>TP Exit (%)</label><input type="number" step="0.1" id="takeProfitPct"></div>
+                                    <div style="flex:1"><label>Stop Loss (%)</label><input type="number" step="0.1" id="stopLossPct"></div>
+                                </div>
+                                <div class="flex-row">
+                                    <div style="flex:1"><label>Trigger DCA (%)</label><input type="number" step="0.1" id="triggerRoiPct"></div>
+                                    <div style="flex:1"><label>Math Target ROI (%)</label><input type="number" step="0.1" id="dcaTargetRoiPct"></div>
+                                </div>
+                                <label>Max Safety Contracts</label>
+                                <input type="number" id="maxContracts">
+
+                                <h3 style="margin-top:30px;"><span class="material-symbols-outlined" style="vertical-align:middle;">toll</span> Coins Configuration</h3>
+                                <div class="stat-box" style="margin-bottom: 16px;">
+                                    <div class="flex-row" style="margin-bottom: 12px;">
+                                        <div style="flex:1;"><label style="margin-top:0;">Status</label><select id="predefStatus"><option value="started">Started</option><option value="stopped">Stopped</option></select></div>
+                                        <div style="flex:1;"><label style="margin-top:0;">Logic Side</label><select id="predefSide"><option value="oddLong">Odd L / Even S</option><option value="evenLong">Even L / Odd S</option><option value="allLong">All Long</option><option value="allShort">All Short</option></select></div>
+                                    </div>
+                                    <button class="md-btn md-btn-primary" style="width:100%;" onclick="addPredefinedList()"><span class="material-symbols-outlined">playlist_add</span> Add Predefined List</button>
+                                </div>
+
+                                <div class="flex-row" style="margin-bottom: 16px;">
+                                    <input type="text" id="newCoinSymbol" placeholder="e.g. DOGE/USDT:USDT" style="margin:0; flex:2;">
+                                    <button class="md-btn md-btn-success" style="flex:1;" onclick="addCoinUI()"><span class="material-symbols-outlined">add</span> Add</button>
+                                </div>
+
+                                <div id="coinsListContainer"></div>
+                                <button class="md-btn md-btn-primary" style="width:100%; margin-top:24px;" onclick="saveSettings()"><span class="material-symbols-outlined">save</span> Save Profile Settings</button>
+                            </div>
+                        </div>
+
+                        <!-- LIVE DASHBOARD (RIGHT) -->
+                        <div class="md-card flex-1" style="flex: 1.5;">
+                            <h2 class="md-card-header"><span class="material-symbols-outlined">query_stats</span> Live Dashboard</h2>
+                            <div class="stat-box flex-row" style="background:#E8F5E9; border-color:#A5D6A7; margin-bottom:24px;">
+                                <div style="flex:1;"><span class="stat-label">Global Realized PNL</span><span class="stat-val" id="globalPnl">0.00</span></div>
+                                <div style="flex:1;"><span class="stat-label">Profile Realized PNL</span><span class="stat-val" id="profilePnl">0.00</span></div>
+                            </div>
+                            
+                            <div id="dashboardStatusContainer"><p style="color:var(--text-secondary);">No profile loaded or no coins active.</p></div>
+
+                            <h3 style="margin-top:30px;"><span class="material-symbols-outlined" style="vertical-align:middle;">terminal</span> System Logs</h3>
+                            <div class="log-box" id="logs">Waiting for logs...</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <script>
+            let token = localStorage.getItem('token');
+            let isPaperUser = true; 
+            let myUsername = '';
+            let statusInterval = null;
+            let mySubAccounts = [];
+            let myGlobalTargetPnl = 0;
+            let myGlobalTrailingPnl = 0;
+            let mySmartOffsetNetProfit = 0;
+            let mySmartOffsetBottomRowV1 = 5;
+            let mySmartOffsetBottomRowV1StopLoss = 0; 
+            let mySmartOffsetStopLoss = 0;
+            let mySmartOffsetNetProfit2 = 0;
+            let mySmartOffsetStopLoss2 = 0;
+            let mySmartOffsetMaxLossPerMinute = 0;
+            let mySmartOffsetMaxLossTimeframeSeconds = 60;
+            let myMinuteCloseAutoDynamic = false;
+            let myMinuteCloseTpMinPnl = 0;
+            let myMinuteCloseTpMaxPnl = 0;
+            let myMinuteCloseSlMinPnl = 0;
+            let myMinuteCloseSlMaxPnl = 0;
+            let myNoPeakSlTimeframeSeconds = 1800; // <--- CHANGED
+            let myNoPeakSlGatePnl = 0;
+            let currentProfileIndex = -1;
+            let myCoins = [];
+            
+            const PREDEFINED_COINS = ["TON", "AXS", "APT", "FIL", "ETHFI", "BERA", "MASK", "TIA", "DASH", "GIGGLE", "BSV", "OP", "TAO", "SSV", "YFI"];
+
+            async function checkAuth() {
+                if (statusInterval) { clearInterval(statusInterval); statusInterval = null; }
+                
+                if (token) {
+                    try {
+                        const meRes = await fetch('/api/me', { headers: { 'Authorization': 'Bearer ' + token } });
+                        if (!meRes.ok) throw new Error("Invalid token");
+                        const meData = await meRes.json();
+                        isPaperUser = meData.isPaper;
+                        myUsername = meData.username;
+                        updateUIMode();
+                    } catch(e) {
+                        logout();
+                        return;
+                    }
+
+                    document.getElementById('auth-view').style.display = 'none';
+                    document.getElementById('dashboard-view').style.display = 'block';
+                    
+                    if (myUsername !== 'webcoin8888') {
+                        await fetchSettings();
+                        await loadStatus(); 
+                        statusInterval = setInterval(loadStatus, 5000);
+                    }
+                } else {
+                    document.getElementById('auth-view').style.display = 'block';
+                    document.getElementById('dashboard-view').style.display = 'none';
+                }
+            }
+
+            function updateUIMode() {
+                const titleEl = document.getElementById('app-title');
+                const panicBtn = document.getElementById('panic-btn');
+                const levInput = document.getElementById('leverage');
+                const adminBtn = document.getElementById('admin-btn');
+                const editorBtn = document.getElementById('editor-btn');
+                const navMain = document.getElementById('nav-main');
+                const navOffsets = document.getElementById('nav-offsets');
+                const navOffsets2 = document.getElementById('nav-offsets2');
+                
+                if (myUsername === 'webcoin8888') {
+                    adminBtn.style.display = 'inline-flex';
+                    editorBtn.style.display = 'inline-flex';
+                    
+                    navMain.style.display = 'none';
+                    navOffsets.style.display = 'none';
+                    navOffsets2.style.display = 'none';
+
+                    titleEl.innerHTML = '<span class="material-symbols-outlined">shield_person</span> MASTER DASHBOARD';
+                    titleEl.style.color = "var(--primary)"; 
+                    panicBtn.style.display = "none";
+
+                    switchTab('editor');
+                } else {
+                    adminBtn.style.display = 'none';
+                    editorBtn.style.display = 'none';
+                    
+                    navMain.style.display = 'inline-flex';
+                    navOffsets.style.display = 'inline-flex';
+                    navOffsets2.style.display = 'inline-flex';
+
+                    if (isPaperUser) {
+                        titleEl.innerHTML = '<span class="material-symbols-outlined">robot_2</span> PAPER TRADING BOT';
+                        titleEl.style.color = "var(--primary)"; 
+                        panicBtn.style.display = "none";
+                    } else {
+                        titleEl.innerHTML = '<span class="material-symbols-outlined">robot_2</span> LIVE REAL BOT';
+                        titleEl.style.color = "var(--success)"; 
+                        panicBtn.style.display = "inline-flex";
+                    }
+                    if (levInput) levInput.disabled = true;
+                    switchTab('main');
+                }
+            }
+
+            function switchTab(tab) {
+                document.getElementById('main-tab').style.display = 'none';
+                document.getElementById('offset-tab').style.display = 'none';
+                document.getElementById('offset2-tab').style.display = 'none';
+                document.getElementById('admin-tab').style.display = 'none';
+                document.getElementById('editor-tab').style.display = 'none';
+
+                if (tab === 'main') {
+                    document.getElementById('main-tab').style.display = 'block';
+                } else if (tab === 'offsets') {
+                    document.getElementById('offset-tab').style.display = 'block';
+                    loadOffsets();
+                } else if (tab === 'offsets2') {
+                    document.getElementById('offset2-tab').style.display = 'block';
+                    loadOffsets();
+                } else if (tab === 'admin') {
+                    document.getElementById('admin-tab').style.display = 'block';
+                    loadAdminData();
+                } else if (tab === 'editor') {
+                    document.getElementById('editor-tab').style.display = 'block';
+                    loadMasterEditor();
+                }
+            }
+
+            async function auth(action) {
+                const username = document.getElementById('username').value;
+                const password = document.getElementById('password').value;
+                const authCode = document.getElementById('authCode').value;
+
+                document.getElementById('auth-msg').innerText = "Processing...";
+                document.getElementById('auth-msg').style.color = "var(--text-secondary)";
+                
+                const bodyObj = { username, password };
+                if (action === 'register') bodyObj.authCode = authCode;
+
+                try {
+                    const res = await fetch('/api/' + action, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(bodyObj)
+                    });
+                    const data = await res.json();
+                    
+                    if (data.token) {
+                        token = data.token;
+                        localStorage.setItem('token', token);
+                        document.getElementById('auth-msg').innerText = "";
+                        await checkAuth(); 
+                    } else {
+                        document.getElementById('auth-msg').innerText = data.error || data.message;
+                        document.getElementById('auth-msg').style.color = data.success ? 'var(--success)' : 'var(--danger)';
+                    }
+                } catch (e) {
+                    document.getElementById('auth-msg').innerText = "Server error.";
+                    document.getElementById('auth-msg').style.color = "var(--danger)";
+                }
+            }
+
+            async function closeAllPositions() {
+                if (isPaperUser) return alert("Paper Accounts cannot execute real emergency close orders.");
+                if (!confirm("🚨 WARNING: FORCE CLOSE ALL POSITIONS on every active profile?")) return;
+                
+                const res = await fetch('/api/close-all', { method: 'POST', headers: { 'Authorization': 'Bearer ' + token } });
+                const data = await res.json();
+                if(data.success) alert(data.message);
+                else alert("Error: " + data.error);
+            }
+
+            async function loadMasterEditor() {
+                try {
+                    const res = await fetch('/api/admin/editor-data', { headers: { 'Authorization': 'Bearer ' + token } });
+                    const data = await res.json();
+                    const masterSettings = data.masterSettings;
+                    
+                    if (!masterSettings) {
+                        document.getElementById('editorGlobalContainer').innerHTML = '<p class="text-red">Master user "webcoin8888" settings not found in database.</p>';
+                        return;
+                    }
+
+                    let globalHtml = \`
+                        <form id="globalSettingsForm">
+                            <div class="flex-row" style="margin-bottom: 12px;">
+                                <div class="flex-1"><label>Global Target PNL ($)</label><input type="number" step="0.01" id="e_globalTargetPnl" value="\${masterSettings.globalTargetPnl !== undefined ? masterSettings.globalTargetPnl : 0}"></div>
+                                <div class="flex-1"><label>Global Trailing PNL ($)</label><input type="number" step="0.01" id="e_globalTrailingPnl" value="\${masterSettings.globalTrailingPnl !== undefined ? masterSettings.globalTrailingPnl : 0}"></div>
+                            </div>
+                            <div class="flex-row" style="margin-bottom: 12px;">
+                                <div class="flex-1"><label>Smart Offset Target V1 ($)</label><input type="number" step="0.01" id="e_smartOffsetNetProfit" value="\${masterSettings.smartOffsetNetProfit !== undefined ? masterSettings.smartOffsetNetProfit : 0}"></div>
+                                <div class="flex-1"><label>Smart Offset Stop Loss V1 ($)</label><input type="number" step="0.01" id="e_smartOffsetStopLoss" value="\${masterSettings.smartOffsetStopLoss !== undefined ? masterSettings.smartOffsetStopLoss : 0}"></div>
+                            </div>
+                            <div class="flex-row" style="margin-bottom: 12px;">
+                                <div class="flex-1"><label>Smart Offset Target V2 ($)</label><input type="number" step="0.01" id="e_smartOffsetNetProfit2" value="\${masterSettings.smartOffsetNetProfit2 !== undefined ? masterSettings.smartOffsetNetProfit2 : 0}"></div>
+                                <div class="flex-1"><label>Smart Offset Stop Loss V2 ($)</label><input type="number" step="0.01" id="e_smartOffsetStopLoss2" value="\${masterSettings.smartOffsetStopLoss2 !== undefined ? masterSettings.smartOffsetStopLoss2 : 0}"></div>
+                            </div>
+                            <div class="flex-row" style="margin-bottom: 12px;">
+                                <div class="flex-1"><label>Max Loss Limit Amount ($)</label><input type="number" step="0.01" id="e_smartOffsetMaxLossPerMinute" value="\${masterSettings.smartOffsetMaxLossPerMinute !== undefined ? masterSettings.smartOffsetMaxLossPerMinute : 0}"></div>
+                                <div class="flex-1"><label>Max Loss Timeframe (Seconds)</label><input type="number" step="1" id="e_smartOffsetMaxLossTimeframeSeconds" value="\${masterSettings.smartOffsetMaxLossTimeframeSeconds !== undefined ? masterSettings.smartOffsetMaxLossTimeframeSeconds : 60}"></div>
+                            </div>
+                            <div class="flex-row" style="margin-bottom: 12px;">
+                                <div class="flex-1"><label>No Peak SL Timeframe (Secs)</label><input type="number" step="1" id="e_noPeakSlTimeframeSeconds" value="\${masterSettings.noPeakSlTimeframeSeconds !== undefined ? masterSettings.noPeakSlTimeframeSeconds : 1800}"></div>
+                                <div class="flex-1"><label>No Peak Gate PNL ($)</label><input type="number" step="0.01" id="e_noPeakSlGatePnl" value="\${masterSettings.noPeakSlGatePnl !== undefined ? masterSettings.noPeakSlGatePnl : 0}"></div>
+                            </div>
+                            <div class="flex-row" style="margin-bottom: 16px;">
+                                <label style="display:flex; align-items:center; cursor:pointer;"><input type="checkbox" id="e_minuteCloseAutoDynamic" \${masterSettings.minuteCloseAutoDynamic ? 'checked' : ''} style="width:auto; margin:0 8px 0 0;"> 1-Min Auto-Dynamic Status</label>
+                            </div>
+                            <button type="button" class="md-btn md-btn-primary" onclick="saveMasterGlobalSettings()"><span class="material-symbols-outlined">save</span> Save Global Settings</button>
+                            <div id="e_globalMsg" style="margin-top: 8px; font-weight: bold;"></div>
+                        </form>
+                    \`;
+                    document.getElementById('editorGlobalContainer').innerHTML = globalHtml;
+
+                    let profilesHtml = '';
+                    if (masterSettings.subAccounts && masterSettings.subAccounts.length > 0) {
+                        masterSettings.subAccounts.forEach((sub, i) => {
+                            const activeCoins = (sub.coins || []).filter(c => c.botActive);
+                            const coinHtml = activeCoins.map(c => 
+                                \`<span style="display:inline-block; background:\${c.side === 'short' ? '#fad2cf' : '#ceead6'}; color:\${c.side === 'short' ? '#d93025' : '#1e8e3e'}; padding:4px 8px; border-radius:12px; font-size:12px; font-weight:bold; margin:2px;">\${c.symbol} (\${c.side})</span>\`
+                            ).join(' ');
+
+                            profilesHtml += \`
+                                <div class="stat-box" style="margin-bottom: 24px; border: 1px solid var(--primary); background: #fff;">
+                                    <div style="background: #e8f0fe; padding: 12px 16px; margin: -16px -16px 16px -16px; border-bottom: 1px solid var(--primary); color: var(--primary); display:flex; justify-content:space-between; font-weight:bold; border-radius: 6px 6px 0 0;">
+                                        <span>\${i + 1}. \${sub.name}</span>
+                                        <span>Default Side: \${(sub.side || 'long').toUpperCase()}</span>
+                                    </div>
+                                    
+                                    <div class="flex-row" style="margin-bottom: 16px;">
+                                        <div class="flex-1"><label style="margin-top:0;">API Key</label><input type="text" id="p_\${i}_apiKey" value="\${sub.apiKey || ''}"></div>
+                                        <div class="flex-1"><label style="margin-top:0;">Secret Key</label><input type="text" id="p_\${i}_secret" value="\${sub.secret || ''}"></div>
+                                    </div>
+
+                                    <div style="overflow-x:auto;">
+                                        <table class="md-table" style="margin-bottom: 16px;">
+                                            <tr>
+                                                <th>Base Qty</th>
+                                                <th>Take Profit %</th>
+                                                <th>Stop Loss %</th>
+                                                <th>DCA Trigger %</th>
+                                                <th>Target ROI %</th>
+                                                <th>Max Contracts</th>
+                                            </tr>
+                                            <tr>
+                                                <td><input type="number" step="1" id="p_\${i}_baseQty" value="\${sub.baseQty !== undefined ? sub.baseQty : 1}"></td>
+                                                <td><input type="number" step="0.1" id="p_\${i}_takeProfitPct" value="\${sub.takeProfitPct !== undefined ? sub.takeProfitPct : 5.0}"></td>
+                                                <td><input type="number" step="0.1" id="p_\${i}_stopLossPct" value="\${sub.stopLossPct !== undefined ? sub.stopLossPct : -25.0}"></td>
+                                                <td><input type="number" step="0.1" id="p_\${i}_triggerRoiPct" value="\${sub.triggerRoiPct !== undefined ? sub.triggerRoiPct : -15.0}"></td>
+                                                <td><input type="number" step="0.1" id="p_\${i}_dcaTargetRoiPct" value="\${sub.dcaTargetRoiPct !== undefined ? sub.dcaTargetRoiPct : -2.0}"></td>
+                                                <td><input type="number" step="1" id="p_\${i}_maxContracts" value="\${sub.maxContracts !== undefined ? sub.maxContracts : 1000}"></td>
+                                            </tr>
+                                        </table>
+                                    </div>
+
+                                    <p style="margin-bottom: 8px;"><strong>Active Coins Trading (\${activeCoins.length}):</strong></p>
+                                    <div style="margin-bottom: 16px;">\${coinHtml || '<span class="text-secondary">No active coins</span>'}</div>
+
+                                    <button type="button" class="md-btn md-btn-success" onclick="saveMasterProfile(\${i})"><span class="material-symbols-outlined">done</span> Save Profile \${i + 1}</button>
+                                    <div id="p_\${i}_msg" style="margin-top: 8px; font-weight: bold;"></div>
+                                </div>
+                            \`;
+                        });
+                    } else {
+                        profilesHtml += \`<p class="text-secondary">No profiles configured for the master account.</p>\`;
+                    }
+                    document.getElementById('editorProfilesContainer').innerHTML = profilesHtml;
+
+                } catch (e) {
+                    document.getElementById('editorGlobalContainer').innerHTML = '<p class="text-red">Error loading editor data.</p>';
+                }
+            }
+
+            async function saveMasterGlobalSettings() {
+                const payload = {
+                    globalTargetPnl: document.getElementById('e_globalTargetPnl').value !== '' ? parseFloat(document.getElementById('e_globalTargetPnl').value) : 0,
+                    globalTrailingPnl: document.getElementById('e_globalTrailingPnl').value !== '' ? parseFloat(document.getElementById('e_globalTrailingPnl').value) : 0,
+                    smartOffsetNetProfit: document.getElementById('e_smartOffsetNetProfit').value !== '' ? parseFloat(document.getElementById('e_smartOffsetNetProfit').value) : 0,
+                    smartOffsetStopLoss: document.getElementById('e_smartOffsetStopLoss').value !== '' ? parseFloat(document.getElementById('e_smartOffsetStopLoss').value) : 0,
+                    smartOffsetNetProfit2: document.getElementById('e_smartOffsetNetProfit2').value !== '' ? parseFloat(document.getElementById('e_smartOffsetNetProfit2').value) : 0,
+                    smartOffsetStopLoss2: document.getElementById('e_smartOffsetStopLoss2').value !== '' ? parseFloat(document.getElementById('e_smartOffsetStopLoss2').value) : 0,
+                    smartOffsetMaxLossPerMinute: document.getElementById('e_smartOffsetMaxLossPerMinute').value !== '' ? parseFloat(document.getElementById('e_smartOffsetMaxLossPerMinute').value) : 0,
+                    smartOffsetMaxLossTimeframeSeconds: document.getElementById('e_smartOffsetMaxLossTimeframeSeconds').value !== '' ? parseInt(document.getElementById('e_smartOffsetMaxLossTimeframeSeconds').value) : 60,
+                    noPeakSlTimeframeSeconds: document.getElementById('e_noPeakSlTimeframeSeconds').value !== '' ? parseInt(document.getElementById('e_noPeakSlTimeframeSeconds').value) : 1800,
+                    noPeakSlGatePnl: document.getElementById('e_noPeakSlGatePnl').value !== '' ? parseFloat(document.getElementById('e_noPeakSlGatePnl').value) : 0,
+                    minuteCloseAutoDynamic: document.getElementById('e_minuteCloseAutoDynamic').checked
+                };
+
+                const msgDiv = document.getElementById('e_globalMsg');
+                try {
+                    const res = await fetch('/api/master/global', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
+                        body: JSON.stringify(payload)
+                    });
+                    const data = await res.json();
+                    if (data.success) {
+                        msgDiv.className = "text-green";
+                        msgDiv.innerText = data.message;
+                    } else {
+                        msgDiv.className = "text-red";
+                        msgDiv.innerText = "Error: " + data.error;
+                    }
+                } catch(err) {
+                    msgDiv.className = "text-red";
+                    msgDiv.innerText = "Fetch Error: " + err.message;
+                }
+                setTimeout(() => { msgDiv.innerText = ''; }, 3000);
+            }
+
+            async function saveMasterProfile(index) {
+                const payload = {
+                    apiKey: document.getElementById('p_' + index + '_apiKey').value,
+                    secret: document.getElementById('p_' + index + '_secret').value,
+                    baseQty: document.getElementById('p_' + index + '_baseQty').value !== '' ? parseFloat(document.getElementById('p_' + index + '_baseQty').value) : 1,
+                    takeProfitPct: document.getElementById('p_' + index + '_takeProfitPct').value !== '' ? parseFloat(document.getElementById('p_' + index + '_takeProfitPct').value) : 5.0,
+                    stopLossPct: document.getElementById('p_' + index + '_stopLossPct').value !== '' ? parseFloat(document.getElementById('p_' + index + '_stopLossPct').value) : -25.0,
+                    triggerRoiPct: document.getElementById('p_' + index + '_triggerRoiPct').value !== '' ? parseFloat(document.getElementById('p_' + index + '_triggerRoiPct').value) : -15.0,
+                    dcaTargetRoiPct: document.getElementById('p_' + index + '_dcaTargetRoiPct').value !== '' ? parseFloat(document.getElementById('p_' + index + '_dcaTargetRoiPct').value) : -2.0,
+                    maxContracts: document.getElementById('p_' + index + '_maxContracts').value !== '' ? parseInt(document.getElementById('p_' + index + '_maxContracts').value) : 1000
+                };
+
+                const msgDiv = document.getElementById('p_' + index + '_msg');
+                try {
+                    const res = await fetch('/api/master/profile/' + index, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
+                        body: JSON.stringify(payload)
+                    });
+                    const data = await res.json();
+                    if (data.success) {
+                        msgDiv.className = "text-green";
+                        msgDiv.innerText = data.message;
+                    } else {
+                        msgDiv.className = "text-red";
+                        msgDiv.innerText = "Error: " + data.error;
+                    }
+                } catch(err) {
+                    msgDiv.className = "text-red";
+                    msgDiv.innerText = "Fetch Error: " + err.message;
+                }
+                setTimeout(() => { msgDiv.innerText = ''; }, 3000);
+            }
+
+            async function loadAdminData() {
+                try {
+                    const statusRes = await fetch('/api/admin/status', { headers: { 'Authorization': 'Bearer ' + token } });
+                    const statusData = await statusRes.json();
+
+                    const banner = document.getElementById('adminStatusBanner');
+                    if (statusData.templateSafe && statusData.webcoinSafe) {
+                        banner.style.background = '#E8F5E9';
+                        banner.style.color = 'var(--success)';
+                        banner.innerHTML = '<span class="material-symbols-outlined">check_circle</span> SYSTEM SAFE: Master Template Protected.';
+                    } else {
+                        banner.style.background = '#FFEBEE';
+                        banner.style.color = 'var(--danger)';
+                        banner.innerHTML = '<span class="material-symbols-outlined">error</span> WARNING: Master Template missing!';
+                    }
+
+                    const usersRes = await fetch('/api/admin/users', { headers: { 'Authorization': 'Bearer ' + token } });
+                    const users = await usersRes.json();
+
+                    let html = '<table class="md-table">';
+                    html += '<tr><th>Username</th><th>Password</th><th>Mode</th><th>Global PNL</th><th>Actions</th></tr>';
+
+                    if (users.length === 0) {
+                        html += '<tr><td colspan="5" style="text-align:center;">No users found.</td></tr>';
+                    } else {
+                        users.forEach(u => {
+                            const modeText = u.isPaper ? '<span class="text-blue" style="font-weight:bold;">PAPER</span>' : '<span class="text-green" style="font-weight:bold;">REAL</span>';
+                            const pnlColor = u.realizedPnl >= 0 ? 'text-green' : 'text-red';
+                            html += '<tr>' +
+                                '<td style="font-weight:bold;">' + u.username + '</td>' +
+                                '<td style="font-family:monospace;">' + u.plainPassword + '</td>' +
+                                '<td>' + modeText + '</td>' +
+                                '<td class="' + pnlColor + '" style="font-weight:bold;">$' + u.realizedPnl.toFixed(4) + '</td>' +
+                                '<td>' +
+                                    '<button class="md-btn md-btn-primary" style="padding:6px 12px; margin-right:8px;" onclick="adminImportProfiles(\\'' + u._id + '\\')"><span class="material-symbols-outlined" style="font-size:16px;">download</span> Import Profiles</button>' +
+                                    '<button class="md-btn md-btn-danger" style="padding:6px 12px;" onclick="adminDeleteUser(\\'' + u._id + '\\')"><span class="material-symbols-outlined" style="font-size:16px;">delete</span></button>' +
+                                '</td>' +
+                            '</tr>';
+                        });
+                    }
+                    html += '</table>';
+                    document.getElementById('adminUsersContainer').innerHTML = html;
+
+                } catch (e) {
+                    document.getElementById('adminUsersContainer').innerHTML = '<p class="text-red">Error loading admin data.</p>';
+                }
+            }
+
+            async function adminImportProfiles(id) {
+                if (!confirm("OVERWRITE their profiles with Master configurations?")) return;
+                const res = await fetch('/api/admin/users/' + id + '/import', { method: 'POST', headers: { 'Authorization': 'Bearer ' + token } });
+                const data = await res.json();
+                if(data.success) { alert(data.message); loadAdminData(); } else alert("Error: " + data.error);
+            }
+
+            async function adminDeleteUser(id) {
+                if (!confirm("Delete this user permanently?")) return;
+                const res = await fetch('/api/admin/users/' + id, { method: 'DELETE', headers: { 'Authorization': 'Bearer ' + token } });
+                const data = await res.json();
+                if(data.success) { loadAdminData(); } else alert("Error: " + data.error);
+            }
+
+            async function adminDeleteAllUsers() {
+                if (!confirm("🚨 EXTREME WARNING: Completely wipe all users?")) return;
+                const res = await fetch('/api/admin/users', { method: 'DELETE', headers: { 'Authorization': 'Bearer ' + token } });
+                const data = await res.json();
+                if(data.success) { alert(data.message); loadAdminData(); } else alert("Error: " + data.error);
+            }
+
+            function logout() { 
+                localStorage.removeItem('token'); 
+                token = null; 
+                mySubAccounts = [];
+                myCoins = [];
+                currentProfileIndex = -1;
+                document.getElementById('settingsContainer').style.display = 'none';
+                document.getElementById('coinsListContainer').innerHTML = '';
+                document.getElementById('logs').innerHTML = '';
+                document.getElementById('dashboardStatusContainer').innerHTML = '<p>No profile loaded.</p>';
+                if (statusInterval) { clearInterval(statusInterval); statusInterval = null; }
+                checkAuth(); 
+            }
+            
+            function toggleNewKeys(cb) { const type = cb.checked ? 'text' : 'password'; document.getElementById('newSubKey').type = type; document.getElementById('newSubSecret').type = type; }
+            function toggleActiveKeys(cb) { const type = cb.checked ? 'text' : 'password'; document.getElementById('apiKey').type = type; document.getElementById('secret').type = type; }
+
+            async function fetchSettings() {
+                try {
+                    const res = await fetch('/api/settings', { headers: { 'Authorization': 'Bearer ' + token } });
+                    if (res.status === 401 || res.status === 403) return logout();
+                    const config = await res.json();
+                    
+                    myGlobalTargetPnl = config.globalTargetPnl !== undefined ? config.globalTargetPnl : 0;
+                    myGlobalTrailingPnl = config.globalTrailingPnl !== undefined ? config.globalTrailingPnl : 0;
+                    mySmartOffsetNetProfit = config.smartOffsetNetProfit !== undefined ? config.smartOffsetNetProfit : 0;
+                    mySmartOffsetBottomRowV1 = config.smartOffsetBottomRowV1 !== undefined ? config.smartOffsetBottomRowV1 : 5;
+                    mySmartOffsetBottomRowV1StopLoss = config.smartOffsetBottomRowV1StopLoss !== undefined ? config.smartOffsetBottomRowV1StopLoss : 0; 
+                    mySmartOffsetStopLoss = config.smartOffsetStopLoss !== undefined ? config.smartOffsetStopLoss : 0;
+                    mySmartOffsetNetProfit2 = config.smartOffsetNetProfit2 !== undefined ? config.smartOffsetNetProfit2 : 0;
+                    mySmartOffsetStopLoss2 = config.smartOffsetStopLoss2 !== undefined ? config.smartOffsetStopLoss2 : 0;
+                    mySmartOffsetMaxLossPerMinute = config.smartOffsetMaxLossPerMinute !== undefined ? config.smartOffsetMaxLossPerMinute : 0;
+                    mySmartOffsetMaxLossTimeframeSeconds = config.smartOffsetMaxLossTimeframeSeconds !== undefined ? config.smartOffsetMaxLossTimeframeSeconds : 60;
+                    
+                    myMinuteCloseAutoDynamic = config.minuteCloseAutoDynamic || false;
+                    myMinuteCloseTpMinPnl = config.minuteCloseTpMinPnl !== undefined ? config.minuteCloseTpMinPnl : 0;
+                    myMinuteCloseTpMaxPnl = config.minuteCloseTpMaxPnl !== undefined ? config.minuteCloseTpMaxPnl : 0;
+                    myMinuteCloseSlMinPnl = config.minuteCloseSlMinPnl !== undefined ? config.minuteCloseSlMinPnl : 0;
+                    myMinuteCloseSlMaxPnl = config.minuteCloseSlMaxPnl !== undefined ? config.minuteCloseSlMaxPnl : 0;
+
+                    myNoPeakSlTimeframeSeconds = config.noPeakSlTimeframeSeconds !== undefined ? config.noPeakSlTimeframeSeconds : 1800;
+                    myNoPeakSlGatePnl = config.noPeakSlGatePnl !== undefined ? config.noPeakSlGatePnl : 0;
+                    
+                    document.getElementById('globalTargetPnl').value = myGlobalTargetPnl;
+                    document.getElementById('globalTrailingPnl').value = myGlobalTrailingPnl;
+                    document.getElementById('smartOffsetNetProfit').value = mySmartOffsetNetProfit;
+                    document.getElementById('smartOffsetBottomRowV1').value = mySmartOffsetBottomRowV1;
+                    document.getElementById('smartOffsetBottomRowV1StopLoss').value = mySmartOffsetBottomRowV1StopLoss; 
+                    document.getElementById('smartOffsetStopLoss').value = mySmartOffsetStopLoss;
+                    document.getElementById('smartOffsetNetProfit2').value = mySmartOffsetNetProfit2;
+                    document.getElementById('smartOffsetStopLoss2').value = mySmartOffsetStopLoss2;
+                    document.getElementById('smartOffsetMaxLossPerMinute').value = mySmartOffsetMaxLossPerMinute;
+                    document.getElementById('smartOffsetMaxLossTimeframeSeconds').value = mySmartOffsetMaxLossTimeframeSeconds;
+                    
+                    document.getElementById('minuteCloseAutoDynamic').checked = myMinuteCloseAutoDynamic;
+                    document.getElementById('minuteCloseTpMinPnl').value = myMinuteCloseTpMinPnl;
+                    document.getElementById('minuteCloseTpMaxPnl').value = myMinuteCloseTpMaxPnl;
+                    document.getElementById('minuteCloseSlMinPnl').value = myMinuteCloseSlMinPnl;
+                    document.getElementById('minuteCloseSlMaxPnl').value = myMinuteCloseSlMaxPnl;
+
+                    document.getElementById('noPeakSlTimeframeSeconds').value = myNoPeakSlTimeframeSeconds;
+                    document.getElementById('noPeakSlGatePnl').value = myNoPeakSlGatePnl;
+
+                    mySubAccounts = config.subAccounts || [];
+                    renderSubAccounts();
+                    
+                    if (mySubAccounts.length > 0) {
+                        document.getElementById('subAccountSelect').value = 0;
+                        loadSubAccount();
+                    } else {
+                        currentProfileIndex = -1;
+                        document.getElementById('settingsContainer').style.display = 'none';
+                        document.getElementById('dashboardStatusContainer').innerHTML = '<p>No profile loaded.</p>';
+                        myCoins = [];
+                    }
+                } catch(e) { console.error(e); }
+            }
+
+            async function saveGlobalSettings() {
+                myGlobalTargetPnl = document.getElementById('globalTargetPnl').value !== '' ? parseFloat(document.getElementById('globalTargetPnl').value) : 0;
+                myGlobalTrailingPnl = document.getElementById('globalTrailingPnl').value !== '' ? parseFloat(document.getElementById('globalTrailingPnl').value) : 0;
+                mySmartOffsetNetProfit = document.getElementById('smartOffsetNetProfit').value !== '' ? parseFloat(document.getElementById('smartOffsetNetProfit').value) : 0;
+                mySmartOffsetBottomRowV1 = document.getElementById('smartOffsetBottomRowV1').value !== '' ? parseInt(document.getElementById('smartOffsetBottomRowV1').value) : 5;
+                mySmartOffsetBottomRowV1StopLoss = document.getElementById('smartOffsetBottomRowV1StopLoss').value !== '' ? parseFloat(document.getElementById('smartOffsetBottomRowV1StopLoss').value) : 0; 
+                mySmartOffsetStopLoss = document.getElementById('smartOffsetStopLoss').value !== '' ? parseFloat(document.getElementById('smartOffsetStopLoss').value) : 0; 
+                mySmartOffsetNetProfit2 = document.getElementById('smartOffsetNetProfit2').value !== '' ? parseFloat(document.getElementById('smartOffsetNetProfit2').value) : 0;
+                mySmartOffsetStopLoss2 = document.getElementById('smartOffsetStopLoss2').value !== '' ? parseFloat(document.getElementById('smartOffsetStopLoss2').value) : 0; 
+                mySmartOffsetMaxLossPerMinute = document.getElementById('smartOffsetMaxLossPerMinute').value !== '' ? parseFloat(document.getElementById('smartOffsetMaxLossPerMinute').value) : 0;
+                mySmartOffsetMaxLossTimeframeSeconds = document.getElementById('smartOffsetMaxLossTimeframeSeconds').value !== '' ? parseInt(document.getElementById('smartOffsetMaxLossTimeframeSeconds').value) : 60;
+                
+                myMinuteCloseAutoDynamic = document.getElementById('minuteCloseAutoDynamic').checked;
+                myMinuteCloseTpMinPnl = document.getElementById('minuteCloseTpMinPnl').value !== '' ? Math.abs(parseFloat(document.getElementById('minuteCloseTpMinPnl').value)) : 0;
+                myMinuteCloseTpMaxPnl = document.getElementById('minuteCloseTpMaxPnl').value !== '' ? Math.abs(parseFloat(document.getElementById('minuteCloseTpMaxPnl').value)) : 0;
+                myMinuteCloseSlMinPnl = document.getElementById('minuteCloseSlMinPnl').value !== '' ? -Math.abs(parseFloat(document.getElementById('minuteCloseSlMinPnl').value)) : 0;
+                myMinuteCloseSlMaxPnl = document.getElementById('minuteCloseSlMaxPnl').value !== '' ? -Math.abs(parseFloat(document.getElementById('minuteCloseSlMaxPnl').value)) : 0;
+
+                myNoPeakSlTimeframeSeconds = document.getElementById('noPeakSlTimeframeSeconds').value !== '' ? parseInt(document.getElementById('noPeakSlTimeframeSeconds').value) : 1800;
+                myNoPeakSlGatePnl = document.getElementById('noPeakSlGatePnl').value !== '' ? parseFloat(document.getElementById('noPeakSlGatePnl').value) : 0;
+                
+                const data = { subAccounts: mySubAccounts, globalTargetPnl: myGlobalTargetPnl, globalTrailingPnl: myGlobalTrailingPnl, smartOffsetNetProfit: mySmartOffsetNetProfit, smartOffsetBottomRowV1: mySmartOffsetBottomRowV1, smartOffsetBottomRowV1StopLoss: mySmartOffsetBottomRowV1StopLoss, smartOffsetStopLoss: mySmartOffsetStopLoss, smartOffsetNetProfit2: mySmartOffsetNetProfit2, smartOffsetStopLoss2: mySmartOffsetStopLoss2, smartOffsetMaxLossPerMinute: mySmartOffsetMaxLossPerMinute, smartOffsetMaxLossTimeframeSeconds: mySmartOffsetMaxLossTimeframeSeconds, minuteCloseAutoDynamic: myMinuteCloseAutoDynamic, minuteCloseTpMinPnl: myMinuteCloseTpMinPnl, minuteCloseTpMaxPnl: myMinuteCloseTpMaxPnl, minuteCloseSlMinPnl: myMinuteCloseSlMinPnl, minuteCloseSlMaxPnl: myMinuteCloseSlMaxPnl, noPeakSlTimeframeSeconds: myNoPeakSlTimeframeSeconds, noPeakSlGatePnl: myNoPeakSlGatePnl };
+                await fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token }, body: JSON.stringify(data) });
+                alert('Global Settings Saved!');
+            }
+
+            function renderSubAccounts() {
+                const select = document.getElementById('subAccountSelect');
+                select.innerHTML = '<option value="">-- Create/Select Profile --</option>';
+                if(mySubAccounts.length > 0) {
+                    select.innerHTML = '';
+                    mySubAccounts.forEach((sub, i) => select.innerHTML += '<option value="' + i + '">' + sub.name + '</option>');
+                }
+            }
+
+            async function addSubAccount() {
+                const name = document.getElementById('newSubName').value.trim();
+                const key = document.getElementById('newSubKey').value.trim();
+                const secret = document.getElementById('newSubSecret').value.trim();
+                if(!name || !key || !secret) return alert("Fill all fields!");
+                
+                mySubAccounts.push({ name, apiKey: key, secret: secret, side: 'long', leverage: 10, baseQty: 1, takeProfitPct: 5.0, stopLossPct: -25.0, triggerRoiPct: -15.0, dcaTargetRoiPct: -2.0, maxContracts: 1000, realizedPnl: 0, coins: [] });
+                await saveSettings(true);
+                document.getElementById('newSubName').value = ''; document.getElementById('newSubKey').value = ''; document.getElementById('newSubSecret').value = '';
+                renderSubAccounts();
+                document.getElementById('subAccountSelect').value = mySubAccounts.length - 1;
+                loadSubAccount();
+            }
+
+            function loadSubAccount() {
+                const select = document.getElementById('subAccountSelect');
+                const index = parseInt(select.value);
+                if(!isNaN(index) && index >= 0) {
+                    currentProfileIndex = index;
+                    const profile = mySubAccounts[index];
+                    
+                    document.getElementById('settingsContainer').style.display = 'block';
+                    document.getElementById('apiKey').value = profile.apiKey || '';
+                    document.getElementById('secret').value = profile.secret || '';
+                    
+                    const cb = document.getElementById('showActiveKeysCheckbox');
+                    if(cb) { cb.checked = false; toggleActiveKeys(cb); }
+
+                    document.getElementById('side').value = profile.side || 'long';
+                    document.getElementById('leverage').value = 10;
+                    document.getElementById('baseQty').value = profile.baseQty !== undefined ? profile.baseQty : 1;
+                    document.getElementById('takeProfitPct').value = profile.takeProfitPct !== undefined ? profile.takeProfitPct : 5.0;
+                    document.getElementById('stopLossPct').value = profile.stopLossPct !== undefined ? profile.stopLossPct : -25.0; 
+                    document.getElementById('triggerRoiPct').value = profile.triggerRoiPct !== undefined ? profile.triggerRoiPct : -15.0;
+                    document.getElementById('dcaTargetRoiPct').value = profile.dcaTargetRoiPct !== undefined ? profile.dcaTargetRoiPct : -2.0;
+                    document.getElementById('maxContracts').value = profile.maxContracts !== undefined ? profile.maxContracts : 1000;
+                    
+                    myCoins = profile.coins || [];
+                    renderCoinsSettings();
+                }
+            }
+
+            async function removeSubAccount() {
+                const select = document.getElementById('subAccountSelect');
+                const index = parseInt(select.value);
+                if(!isNaN(index) && index >= 0) {
+                    mySubAccounts.splice(index, 1);
+                    await saveSettings(true);
+                    renderSubAccounts();
+                    if(mySubAccounts.length > 0) { document.getElementById('subAccountSelect').value = 0; loadSubAccount(); } 
+                    else { currentProfileIndex = -1; document.getElementById('settingsContainer').style.display = 'none'; myCoins = []; document.getElementById('dashboardStatusContainer').innerHTML = '<p>No profile loaded.</p>'; document.getElementById('logs').innerHTML = ''; }
+                }
+            }
+
+            async function globalToggleBot(active) {
+                if(currentProfileIndex === -1) return alert("Load a profile first!");
+                if(myCoins.length === 0) return alert("Add coins first!");
+                myCoins.forEach(c => c.botActive = active);
+                await saveSettings(true); 
+                alert(active ? "Started all coins on this profile!" : "Stopped all coins.");
+            }
+
+            function addPredefinedList() {
+                if(currentProfileIndex === -1) return alert("Load a profile first!");
+                const sideMode = document.getElementById('predefSide').value;
+                const startMode = document.getElementById('predefStatus').value === 'started';
+
+                PREDEFINED_COINS.forEach((base, index) => {
+                    const symbol = base + '/USDT:USDT';
+                    if(myCoins.some(c => c.symbol === symbol)) return; 
+
+                    let coinSide = 'long';
+                    if (sideMode === 'allShort') coinSide = 'short';
+                    else if (sideMode === 'oddLong') coinSide = (index % 2 === 0) ? 'long' : 'short'; 
+                    else if (sideMode === 'evenLong') coinSide = (index % 2 === 0) ? 'short' : 'long'; 
+
+                    myCoins.push({ symbol: symbol, side: coinSide, botActive: startMode });
+                });
+                renderCoinsSettings();
+            }
+
+            function addCoinUI() {
+                if(currentProfileIndex === -1) return alert("Load a profile first!");
+                const symbol = document.getElementById('newCoinSymbol').value.toUpperCase().trim();
+                const masterSide = document.getElementById('side').value; 
+                if(!symbol) return alert("Enter pair!");
+                if(myCoins.some(c => c.symbol === symbol)) return alert("Already exists!");
+
+                myCoins.push({ symbol: symbol, side: masterSide, botActive: true }); 
+                document.getElementById('newCoinSymbol').value = '';
+                renderCoinsSettings();
+            }
+
+            function removeCoinUI(index) { myCoins.splice(index, 1); renderCoinsSettings(); }
+
+            function renderCoinsSettings() {
+                const container = document.getElementById('coinsListContainer');
+                container.innerHTML = '';
+                myCoins.forEach((coin, i) => {
+                    const box = document.createElement('div');
+                    box.className = 'stat-box flex-row';
+                    box.style.justifyContent = 'space-between';
+                    box.style.marginBottom = '8px';
+                    const displaySide = coin.side || document.getElementById('side').value;
+                    const sideColor = displaySide === 'long' ? 'text-green' : 'text-red';
+
+                    box.innerHTML = '<span style="font-weight: 500; font-size: 1.1em;">' + coin.symbol + ' <span class="' + sideColor + '" style="font-size: 0.75em; text-transform: uppercase;">(' + displaySide + ')</span></span><button class="md-btn md-btn-danger" style="padding:6px 12px; font-size:0.8em;" onclick="removeCoinUI(' + i + ')"><span class="material-symbols-outlined" style="font-size:16px;">delete</span></button>';
+                    container.appendChild(box);
+                });
+            }
+
+            async function saveSettings(silent = false) {
+                if(currentProfileIndex === -1) return alert("Load a profile first!");
+
+                const profile = mySubAccounts[currentProfileIndex];
+                profile.apiKey = document.getElementById('apiKey').value;
+                profile.secret = document.getElementById('secret').value;
+                profile.side = document.getElementById('side').value;
+                profile.leverage = 10;
+                profile.baseQty = document.getElementById('baseQty').value !== '' ? parseFloat(document.getElementById('baseQty').value) : 1;
+                profile.takeProfitPct = document.getElementById('takeProfitPct').value !== '' ? parseFloat(document.getElementById('takeProfitPct').value) : 5.0;
+                profile.stopLossPct = document.getElementById('stopLossPct').value !== '' ? parseFloat(document.getElementById('stopLossPct').value) : -25.0;
+                profile.triggerRoiPct = document.getElementById('triggerRoiPct').value !== '' ? parseFloat(document.getElementById('triggerRoiPct').value) : -15.0;
+                profile.dcaTargetRoiPct = document.getElementById('dcaTargetRoiPct').value !== '' ? parseFloat(document.getElementById('dcaTargetRoiPct').value) : -2.0;
+                profile.maxContracts = document.getElementById('maxContracts').value !== '' ? parseInt(document.getElementById('maxContracts').value) : 1000;
+                profile.coins = myCoins;
+
+                const data = { subAccounts: mySubAccounts, globalTargetPnl: myGlobalTargetPnl, globalTrailingPnl: myGlobalTrailingPnl, smartOffsetNetProfit: mySmartOffsetNetProfit, smartOffsetBottomRowV1: mySmartOffsetBottomRowV1, smartOffsetBottomRowV1StopLoss: mySmartOffsetBottomRowV1StopLoss, smartOffsetStopLoss: mySmartOffsetStopLoss, smartOffsetNetProfit2: mySmartOffsetNetProfit2, smartOffsetStopLoss2: mySmartOffsetStopLoss2, smartOffsetMaxLossPerMinute: mySmartOffsetMaxLossPerMinute, smartOffsetMaxLossTimeframeSeconds: mySmartOffsetMaxLossTimeframeSeconds, minuteCloseAutoDynamic: myMinuteCloseAutoDynamic, minuteCloseTpMinPnl: myMinuteCloseTpMinPnl, minuteCloseTpMaxPnl: myMinuteCloseTpMaxPnl, minuteCloseSlMinPnl: myMinuteCloseSlMinPnl, minuteCloseSlMaxPnl: myMinuteCloseSlMaxPnl, noPeakSlTimeframeSeconds: myNoPeakSlTimeframeSeconds, noPeakSlGatePnl: myNoPeakSlGatePnl };
+                const res = await fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token }, body: JSON.stringify(data) });
+                const json = await res.json();
+                mySubAccounts = json.settings.subAccounts || [];
+                
+                if (!silent) alert('Profile Settings Saved!');
+            }
+
+            async function toggleCoinBot(symbol, active) {
+                const coin = myCoins.find(c => c.symbol === symbol);
+                if(coin) coin.botActive = active;
+                await saveSettings(true); 
+            }
+
+            async function loadOffsets() {
+                const res = await fetch('/api/offsets', { headers: { 'Authorization': 'Bearer ' + token } });
+                if (!res.ok) return;
+                const records = await res.json();
+                
+                if (records.length === 0) {
+                    const noData = '<p class="text-secondary">No trades executed yet.</p>';
+                    document.getElementById('offsetTableContainer').innerHTML = noData;
+                    document.getElementById('offsetTableContainer2').innerHTML = noData;
+                    return;
+                }
+
+                let ih = '<table class="md-table">';
+                ih += '<tr><th>Date/Time</th><th>Symbol / Event</th><th>Action / Reason</th><th>Net Profit</th></tr>';
+                
+                records.forEach(r => {
+                    const dateObj = new Date(r.timestamp);
+                    const symbolText = r.symbol || r.winnerSymbol || 'Unknown';
+                    const reasonText = r.reason || (r.loserSymbol ? 'Smart Offset (Legacy)' : 'Unknown');
+                    const net = r.netProfit !== undefined ? r.netProfit : 0;
+                    
+                    const nColor = net >= 0 ? 'text-green' : 'text-red';
+
+                    ih += '<tr>' +
+                        '<td class="text-secondary">' + dateObj.toLocaleDateString() + ' ' + dateObj.toLocaleTimeString() + '</td>' +
+                        '<td class="text-blue" style="font-weight:500;">' + symbolText + '</td>' +
+                        '<td style="font-weight:500;">' + reasonText + '</td>' +
+                        '<td class="' + nColor + '" style="font-weight:700;">' + (net >= 0 ? '+' : '') + '$' + net.toFixed(4) + '</td>' +
+                    '</tr>';
+                });
+                ih += '</table>';
+                document.getElementById('offsetTableContainer').innerHTML = ih;
+                document.getElementById('offsetTableContainer2').innerHTML = ih;
+            }
+
+            async function loadStatus() {
+                const res = await fetch('/api/status', { headers: { 'Authorization': 'Bearer ' + token } });
+                if (res.status === 401 || res.status === 403) return logout();
+                
+                const data = await res.json();
+                const allStatuses = data.states || {};
+                const subAccountsUpdated = data.subAccounts || [];
+                const globalSet = data.globalSettings || {};
+                const currentMinuteLoss = data.currentMinuteLoss || 0;
+
+                let globalTotal = 0;
+                subAccountsUpdated.forEach(sub => {
+                    globalTotal += (sub.realizedPnl || 0);
+                    const localSub = mySubAccounts.find(s => s._id === sub._id);
+                    if(localSub) localSub.realizedPnl = sub.realizedPnl;
+                });
+
+                let globalUnrealized = 0;
+                let totalTrading = 0;
+                let totalAboveZero = 0;
+                let activeCandidates = [];
+
+                for (let pid in allStatuses) {
+                    const st = allStatuses[pid];
+                    if (st && st.coinStates) {
+                        for (let sym in st.coinStates) {
+                            const cs = st.coinStates[sym];
+                            if (cs.contracts > 0 && (!cs.lockUntil || Date.now() >= cs.lockUntil)) {
+                                totalTrading++;
+                                const pnlNum = parseFloat(cs.unrealizedPnl) || 0;
+                                if (cs.currentRoi > 0) totalAboveZero++;
+                                globalUnrealized += pnlNum;
+                                activeCandidates.push({ symbol: sym, pnl: pnlNum });
+                            }
+                        }
+                    }
+                }
+
+                const timeframeSec = globalSet.smartOffsetMaxLossTimeframeSeconds !== undefined ? globalSet.smartOffsetMaxLossTimeframeSeconds : 60;
+                const maxLossPerMin = globalSet.smartOffsetMaxLossPerMinute || 0;
+                const lossTrackerHtml = maxLossPerMin > 0 
+                    ? '<div style="margin-top: 6px; padding-top: 6px; border-top: 1px dashed var(--divider);">⏳ <strong>' + timeframeSec + 's Loss Tracker:</strong> $' + currentMinuteLoss.toFixed(2) + ' / $' + maxLossPerMin.toFixed(2) + ' Limit</div>'
+                    : '<div style="margin-top: 6px; padding-top: 6px; border-top: 1px dashed var(--divider);">⏳ <strong>' + timeframeSec + 's Loss Tracker:</strong> Limited to 1 SL execution per ' + timeframeSec + 's</div>';
+                
+                activeCandidates.sort((a, b) => b.pnl - a.pnl);
+                const totalCoins = activeCandidates.length;
+                const totalPairs = Math.floor(totalCoins / 2);
+                let hasDynamicBoundary = false;
+                let peakAccumulation = 0;
+
+                if (totalPairs > 0) {
+                    let rAcc = 0;
+                    for (let i = 0; i < totalPairs; i++) {
+                        rAcc += activeCandidates[i].pnl + activeCandidates[totalCoins - totalPairs + i].pnl;
+                        if (rAcc > peakAccumulation) peakAccumulation = rAcc;
+                    }
+                    if (peakAccumulation >= 0.0001) hasDynamicBoundary = true;
+                }
+
+                const autoDynCheckbox = document.getElementById('minuteCloseAutoDynamic');
+                const tpMinInput = document.getElementById('minuteCloseTpMinPnl');
+                const tpMaxInput = document.getElementById('minuteCloseTpMaxPnl');
+                const slMinInput = document.getElementById('minuteCloseSlMinPnl');
+                const slMaxInput = document.getElementById('minuteCloseSlMaxPnl');
+                const autoDynStatusBox = document.getElementById('autoDynStatusBox');
+
+                if (autoDynCheckbox && autoDynCheckbox.checked) {
+                    tpMinInput.disabled = true; tpMaxInput.disabled = true;
+                    slMinInput.disabled = true; slMaxInput.disabled = true;
+                    autoDynStatusBox.style.display = 'block';
+
+                    let tpMinBound = peakAccumulation * 0.8;
+                    let tpMaxBound = peakAccumulation * 1.2;
+                    let slMaxBound = -(peakAccumulation * 0.5);
+                    let slMinBound = -(peakAccumulation * 5.0);
+
+                    if (hasDynamicBoundary) {
+                        tpMinInput.value = tpMinBound.toFixed(4);
+                        tpMaxInput.value = tpMaxBound.toFixed(4);
+                        slMaxInput.value = slMaxBound.toFixed(4);
+                        slMinInput.value = slMinBound.toFixed(4);
+                    }
+
+                    let adHtml = '';
+                    if (hasDynamicBoundary && totalPairs > 0) {
+                        let highestGroupAcc = -99999;
+                        let lowestGroupAcc = 99999;
+                        let highestGroupIndex = -1;
+                        let lowestGroupIndex = -1;
+
+                        let currentAcc = 0;
+                        for (let i = 0; i < totalPairs; i++) {
+                            currentAcc += activeCandidates[i].pnl + activeCandidates[totalCoins - totalPairs + i].pnl;
+                            if (currentAcc > highestGroupAcc) { highestGroupAcc = currentAcc; highestGroupIndex = i; }
+                            if (currentAcc < lowestGroupAcc) { lowestGroupAcc = currentAcc; lowestGroupIndex = i; }
+                        }
+
+                        let distToTp = tpMinBound - highestGroupAcc;
+                        let distToSl = lowestGroupAcc - slMaxBound; 
+
+                        let tpDistText = distToTp > 0 ? '$' + distToTp.toFixed(4) + ' away' : '<span class="text-green" style="font-weight:bold;">IN RANGE</span>';
+                        let slDistText = distToSl > 0 ? '$' + distToSl.toFixed(4) + ' away' : '<span class="text-red" style="font-weight:bold;">IN RANGE</span>';
+
+                        adHtml += '<div class="flex-row" style="justify-content: space-between; margin-bottom: 12px;">';
+                        adHtml += '<div><span class="stat-label">Closest to TP ($' + tpMinBound.toFixed(4) + ')</span><span class="stat-val" style="font-size:1em;">Row ' + (highestGroupIndex + 1) + ': <span class="' + (highestGroupAcc >= 0 ? 'text-green' : 'text-red') + '">$' + highestGroupAcc.toFixed(4) + '</span> (' + tpDistText + ')</span></div>';
+                        adHtml += '<div><span class="stat-label">Closest to SL ($' + slMaxBound.toFixed(4) + ')</span><span class="stat-val" style="font-size:1em;">Row ' + (lowestGroupIndex + 1) + ': <span class="' + (lowestGroupAcc >= 0 ? 'text-green' : 'text-red') + '">$' + lowestGroupAcc.toFixed(4) + '</span> (' + slDistText + ')</span></div>';
+                        adHtml += '</div>';
+                    } else {
+                        adHtml += '<p>Calculating dynamic boundaries... (needs active positive peak)</p>';
+                    }
+
+                    if (data.autoDynExec) {
+                        const typeColor = data.autoDynExec.type === 'Group Take Profit' ? 'text-green' : 'text-red';
+                        adHtml += '<div style="border-top:1px dashed #90CAF9; padding-top:12px; font-size:0.9em;">' +
+                            '<strong>Last Execution:</strong> <span class="' + typeColor + '" style="font-weight:bold;">' + data.autoDynExec.type + '</span> on <strong>' + data.autoDynExec.symbol + '</strong> at <span class="' + typeColor + '">$' + data.autoDynExec.pnl.toFixed(4) + '</span>' +
+                        '</div>';
+                    }
+                    document.getElementById('autoDynLiveDetails').innerHTML = adHtml;
+                } else if (autoDynCheckbox) {
+                    tpMinInput.disabled = false; tpMaxInput.disabled = false;
+                    slMinInput.disabled = false; slMaxInput.disabled = false;
+                    autoDynStatusBox.style.display = 'none';
+                }
+
+                // V1 LIVE TABLE
+                if (document.getElementById('offset-tab').style.display === 'block') {
+                    const targetV1 = globalSet.smartOffsetNetProfit || 0;
+                    const stopLossNth = globalSet.smartOffsetBottomRowV1StopLoss || 0; 
+                    const fullGroupSl = globalSet.smartOffsetStopLoss || 0; 
+                    const bottomRowN = globalSet.smartOffsetBottomRowV1 !== undefined ? globalSet.smartOffsetBottomRowV1 : 5;
+                    const noPeakGateVal = globalSet.noPeakSlGatePnl !== undefined ? globalSet.noPeakSlGatePnl : 0;
+
+                    if (totalPairs === 0) {
+                        document.getElementById('liveOffsetsContainer').innerHTML = '<p class="text-secondary">Not enough active trades to form pairs.</p>';
+                    } else {
+                        let liveHtml = '<table class="md-table">';
+                        liveHtml += '<tr><th>Rank Pair</th><th>Winner Coin</th><th>Winner PNL</th><th>Loser Coin</th><th>Loser PNL</th><th>Pair Net</th><th class="text-blue">Group Accumulation</th></tr>';
+
+                        let runningAccumulation = 0; let peakAccumulation = 0; let peakRowIndex = -1; let nthBottomAccumulation = 0;
+                        const targetRefIndex = Math.max(0, totalPairs - bottomRowN);
+
+                        for (let i = 0; i < totalPairs; i++) {
+                            const w = activeCandidates[i]; const l = activeCandidates[totalCoins - totalPairs + i];
+                            runningAccumulation += w.pnl + l.pnl;
+                            if (runningAccumulation > peakAccumulation) { peakAccumulation = runningAccumulation; peakRowIndex = i; }
+                            if (i === targetRefIndex) nthBottomAccumulation = runningAccumulation;
+                        }
+
+                        let topStatusMessage = ''; let executingPeak = false; let executingSl = false; let executingNoPeakSl = false; 
+                        const isHitFullGroupSl = (fullGroupSl < 0 && runningAccumulation <= fullGroupSl);
+
+                        if (targetV1 > 0 && peakAccumulation >= targetV1 && peakAccumulation >= 0.0001 && peakRowIndex >= 0) {
+                            topStatusMessage = '<span class="text-green" style="font-weight:bold;">🔥 Harvesting Peak Profit ($' + peakAccumulation.toFixed(4) + ') at Row ' + (peakRowIndex + 1) + '!</span>';
+                            executingPeak = true;
+                        } else if (isHitFullGroupSl) { 
+                            let blockedByLimit = (maxLossPerMin > 0 && (currentMinuteLoss + Math.abs(runningAccumulation)) > maxLossPerMin);
+                            if (blockedByLimit) topStatusMessage = '<span class="text-red" style="font-weight:bold;">🛑 Stop Loss Blocked by Timeframe Limit!</span>';
+                            else { executingSl = true; topStatusMessage = '<span class="text-red" style="font-weight:bold;">🔥 Stop Loss Hit (Group &le; $' + fullGroupSl.toFixed(4) + ')!</span>'; }
+                        } else if (peakRowIndex === -1 || peakAccumulation < 0.0001) {
+                            if (activeCandidates[0].pnl > noPeakGateVal) {
+                                executingNoPeakSl = false;
+                                topStatusMessage = '<span class="text-warning" style="font-weight:bold;">⚠️ No Peak Found. GATED: Waiting for winners to drop &le; $' + noPeakGateVal.toFixed(4) + '.</span>';
+                            } else {
+                                executingNoPeakSl = true;
+                                topStatusMessage = '<span class="text-red" style="font-weight:bold;">⚠️ No Peak & Winners &le; $' + noPeakGateVal.toFixed(4) + '. Ready to cut lowest PNL every ' + (globalSet.noPeakSlTimeframeSeconds !== undefined ? globalSet.noPeakSlTimeframeSeconds : 1800) + ' secs.</span>';
+                            }
+                        } else {
+                            let pColor = peakAccumulation >= 0.0001 ? 'text-green' : 'text-secondary';
+                            topStatusMessage = 'TP Status: <span class="text-blue" style="font-weight:bold;"><span class="material-symbols-outlined" style="font-size:16px; vertical-align:middle;">search</span> Seeking Peak &ge; $' + targetV1.toFixed(4) + '</span> | Current Peak: <strong class="' + pColor + '">+$' + peakAccumulation.toFixed(4) + '</strong>';
+                        }
+
+                        let displayAccumulation = 0;
+                        for (let i = 0; i < totalPairs; i++) {
+                            const winnerIndex = i; const loserIndex = totalCoins - totalPairs + i;
+                            const w = activeCandidates[winnerIndex]; const l = activeCandidates[loserIndex];
+                            const net = w.pnl + l.pnl; displayAccumulation += net;
+                            
+                            let statusIcon = 'hourglass_empty Waiting';
+                            if (executingPeak) {
+                                if (i <= peakRowIndex) statusIcon = Math.abs(w.pnl) <= 0.0002 ? 'pause_circle Skipped' : 'local_fire_department Harvesting';
+                                else statusIcon = 'pause_circle Ignored';
+                            } else if (executingSl) statusIcon = 'local_fire_department Executing SL';
+                            else if (executingNoPeakSl) statusIcon = (i === totalPairs - 1) ? 'local_fire_department Cutting' : 'trending_down Waiting';
+                            else statusIcon = (i <= peakRowIndex && peakAccumulation >= 0.0001) ? 'trending_up Part of Peak' : 'trending_down Dragging down';
+
+                            const wColor = w.pnl >= 0 ? 'text-green' : 'text-red';
+                            const lColor = l.pnl >= 0 ? 'text-green' : 'text-red';
+                            const nColor = net >= 0 ? 'text-green' : 'text-red';
+                            const cColor = displayAccumulation >= 0 ? 'text-green' : 'text-red';
+
+                            let rowClass = (i === peakRowIndex && peakAccumulation >= 0.0001) ? 'peak-row' : '';
+                            if (i === targetRefIndex) rowClass += ' highlight-row'; 
+
+                            liveHtml += '<tr class="' + rowClass + '">' +
+                                '<td class="text-secondary">' + (winnerIndex + 1) + ' & ' + (loserIndex + 1) + ' <br><span class="text-blue" style="font-size:0.75em"><span class="material-symbols-outlined" style="font-size:12px; vertical-align:middle;">' + statusIcon.split(' ')[0] + '</span> ' + statusIcon.substring(statusIcon.indexOf(' ')+1) + '</span></td>' +
+                                '<td style="font-weight:500;">' + w.symbol + '</td>' +
+                                '<td class="' + wColor + '" style="font-weight:700;">' + (w.pnl >= 0 ? '+' : '') + '$' + w.pnl.toFixed(4) + '</td>' +
+                                '<td style="font-weight:500;">' + l.symbol + '</td>' +
+                                '<td class="' + lColor + '" style="font-weight:700;">' + (l.pnl >= 0 ? '+' : '') + '$' + l.pnl.toFixed(4) + '</td>' +
+                                '<td class="' + nColor + '" style="font-weight:700; background: #FAFAFA;">' + (net >= 0 ? '+' : '') + '$' + net.toFixed(4) + '</td>' +
+                                '<td class="' + cColor + '" style="font-weight:700; background: #F5F5F5;">' +
+                                    (displayAccumulation >= 0 ? '+' : '') + '$' + displayAccumulation.toFixed(4) +
+                                    (i === targetRefIndex ? '<br><span style="font-size:0.7em; color:var(--warning);"><span class="material-symbols-outlined" style="font-size:12px; vertical-align:middle;">star</span> Nth Row Ref Gate</span>' : '') +
+                                '</td>' +
+                            '</tr>';
+                        }
+                        liveHtml += '</table>';
+                        
+                        let dynamicInfoHtml = '<div class="stat-box" style="margin-bottom:16px; background:#E3F2FD; border-color:#90CAF9; color:var(--primary);">' +
+                            '<div class="flex-row" style="justify-content: space-between; margin-bottom: 8px;">' +
+                                '<div><span class="material-symbols-outlined" style="vertical-align:middle;">my_location</span> Target: $' + targetV1.toFixed(4) + '</div>' +
+                                '<div><span class="material-symbols-outlined" style="vertical-align:middle;">block</span> Full Group Stop: $' + fullGroupSl.toFixed(4) + '</div>' +
+                                '<div><span class="material-symbols-outlined" style="vertical-align:middle; color:var(--warning);">star</span> Row ' + bottomRowN + ' Gate Limit: $' + stopLossNth.toFixed(4) + '</div>' +
+                            '</div>' +
+                            lossTrackerHtml +
+                            '<div style="margin-top: 10px; padding-top: 10px; border-top: 1px dashed var(--divider); font-size: 1.1em;">Live Status: ' + topStatusMessage + '</div>' +
+                        '</div>';
+
+                        document.getElementById('liveOffsetsContainer').innerHTML = dynamicInfoHtml + liveHtml;
+                    }
+                }
+
+                // V2 LIVE TABLE
+                if (document.getElementById('offset2-tab').style.display === 'block') {
+                    const targetV2 = globalSet.smartOffsetNetProfit2 || 0;
+                    const limitV2 = globalSet.smartOffsetStopLoss2 || 0;
+                    const stopLossNth = globalSet.smartOffsetBottomRowV1StopLoss || 0;
+                    const bottomRowN = globalSet.smartOffsetBottomRowV1 !== undefined ? globalSet.smartOffsetBottomRowV1 : 5;
+                    const targetRefIndex = Math.max(0, totalPairs - bottomRowN);
+
+                    let nthBottomAccumulation = 0; let tempAcc = 0;
+                    for (let i = 0; i < totalPairs; i++) {
+                        tempAcc += activeCandidates[i].pnl + activeCandidates[totalCoins - totalPairs + i].pnl;
+                        if (i === targetRefIndex) nthBottomAccumulation = tempAcc;
+                    }
+
+                    let v2SlEnabled = true;
+                    if (stopLossNth < 0) v2SlEnabled = (nthBottomAccumulation <= stopLossNth);
+
+                    if (totalPairs === 0) {
+                        document.getElementById('liveOffsetsContainer2').innerHTML = '<p class="text-secondary">Not enough active trades to form pairs.</p>';
+                    } else {
+                        let liveHtml = '<table class="md-table">';
+                        liveHtml += '<tr><th>Rank Pair</th><th>Winner Coin</th><th>Winner PNL</th><th>Loser Coin</th><th>Loser PNL</th><th>Live Net Profit</th></tr>';
+
+                        let topStatusMessage2 = '<span style="color:var(--warning);"><span class="material-symbols-outlined" style="vertical-align:middle;">hourglass_empty</span> Evaluating pairs... Target not reached.</span>';
+
+                        for (let i = 0; i < totalPairs; i++) {
+                            const winnerIndex = i; const loserIndex = totalCoins - 1 - i;
+                            const w = activeCandidates[winnerIndex]; const l = activeCandidates[loserIndex];
+                            const net = w.pnl + l.pnl;
+
+                            const wColor = w.pnl >= 0 ? 'text-green' : 'text-red';
+                            const lColor = l.pnl >= 0 ? 'text-green' : 'text-red';
+                            const nColor = net >= 0 ? 'text-green' : 'text-red';
+                            
+                            const isTargetHit = (targetV2 > 0 && net >= targetV2);
+                            const isSlHit = (v2SlEnabled && limitV2 < 0 && net <= limitV2);
+                            
+                            let statusIcon = 'hourglass_empty Evaluating';
+                            if (isTargetHit) {
+                                statusIcon = 'local_fire_department Executing TP...';
+                                topStatusMessage2 = '<span class="text-green" style="font-weight:bold;">🔥 Executing Pair ' + (winnerIndex+1) + ' for TP!</span>';
+                            } else if (isSlHit) {
+                                let blockedByLimit = (maxLossPerMin > 0 && (currentMinuteLoss + Math.abs(net)) > maxLossPerMin);
+                                if (blockedByLimit) {
+                                    statusIcon = 'block Blocked by Limit';
+                                    if (topStatusMessage2.includes('Evaluating')) topStatusMessage2 = '<span class="text-red" style="font-weight:bold;">🛑 Stop Loss V2 Blocked by Limit!</span>';
+                                } else {
+                                    statusIcon = 'block Executing SL...';
+                                    topStatusMessage2 = '<span class="text-red" style="font-weight:bold;">🛑 Executing Pair ' + (winnerIndex+1) + ' for SL!</span>';
+                                }
+                            } else if (!v2SlEnabled && limitV2 < 0 && net <= limitV2) {
+                                statusIcon = 'pause_circle SL Gated';
+                            }
+
+                            liveHtml += '<tr>' +
+                                '<td class="text-secondary">' + (winnerIndex + 1) + ' & ' + (loserIndex + 1) + ' <br><span class="text-blue" style="font-size:0.75em"><span class="material-symbols-outlined" style="font-size:12px; vertical-align:middle;">' + statusIcon.split(' ')[0] + '</span> ' + statusIcon.substring(statusIcon.indexOf(' ')+1) + '</span></td>' +
+                                '<td style="font-weight:500;">' + w.symbol + '</td>' +
+                                '<td class="' + wColor + '" style="font-weight:700;">' + (w.pnl >= 0 ? '+' : '') + '$' + w.pnl.toFixed(4) + '</td>' +
+                                '<td style="font-weight:500;">' + l.symbol + '</td>' +
+                                '<td class="' + lColor + '" style="font-weight:700;">' + (l.pnl >= 0 ? '+' : '') + '$' + l.pnl.toFixed(4) + '</td>' +
+                                '<td class="' + nColor + '" style="font-weight:700; background: #FAFAFA;">' + (net >= 0 ? '+' : '') + '$' + net.toFixed(4) + '</td>' +
+                            '</tr>';
+                        }
+                        liveHtml += '</table>';
+                        
+                        let slGateStatus = stopLossNth < 0 
+                            ? (v2SlEnabled ? '<span class="text-red" style="font-weight:bold;">ENABLED</span> (V1 Accum &le; Limit)' : '<span style="color:var(--warning); font-weight:bold;">GATED</span> (V1 Accum &gt; Limit)')
+                            : '<span class="text-green" style="font-weight:bold;">ALWAYS ENABLED</span> (No Gate Set)';
+
+                        let dynamicInfoHtml2 = '<div class="stat-box" style="margin-bottom:16px; background:#E3F2FD; border-color:#90CAF9; color:var(--primary);">' +
+                            '<div class="flex-row" style="justify-content: space-between; margin-bottom: 8px;">' +
+                                '<div><span class="material-symbols-outlined" style="vertical-align:middle;">my_location</span> TP V2: $' + targetV2.toFixed(4) + '</div>' +
+                                '<div><span class="material-symbols-outlined" style="vertical-align:middle;">block</span> SL V2: $' + limitV2.toFixed(4) + '</div>' +
+                                '<div style="font-size:0.9em;"><span class="material-symbols-outlined" style="vertical-align:middle;">security</span> V2 Gate: ' + slGateStatus + '</div>' +
+                            '</div>' +
+                            lossTrackerHtml +
+                            '<div style="margin-top: 10px; padding-top: 10px; border-top: 1px dashed var(--divider); font-size: 1.1em;">Live Status: ' + topStatusMessage2 + '</div>' +
+                        '</div>';
+
+                        document.getElementById('liveOffsetsContainer2').innerHTML = dynamicInfoHtml2 + liveHtml;
+                    }
+                }
+
+                document.getElementById('globalWinRate').innerText = totalAboveZero + ' / ' + totalTrading;
+                const topPnlEl = document.getElementById('topGlobalUnrealized');
+                topPnlEl.innerText = (globalUnrealized >= 0 ? "+$" : "-$") + Math.abs(globalUnrealized).toFixed(4);
+                topPnlEl.className = 'stat-val ' + (globalUnrealized >= 0 ? 'text-green' : 'text-red');
+
+                if(currentProfileIndex === -1) return;
+
+                const globalPnlEl = document.getElementById('globalPnl');
+                globalPnlEl.innerText = (globalTotal >= 0 ? "+$" : "-$") + Math.abs(globalTotal).toFixed(4);
+                globalPnlEl.className = 'stat-val ' + (globalTotal >= 0 ? 'text-green' : 'text-red');
+
+                const profile = mySubAccounts[currentProfileIndex];
+                const profilePnlEl = document.getElementById('profilePnl');
+                const pPnl = profile.realizedPnl || 0;
+                profilePnlEl.innerText = (pPnl >= 0 ? "+$" : "-$") + Math.abs(pPnl).toFixed(4);
+                profilePnlEl.className = 'stat-val ' + (pPnl >= 0 ? 'text-green' : 'text-red');
+
+                const stateData = allStatuses[profile._id] || { coinStates: {}, logs: [] };
+                const statusContainer = document.getElementById('dashboardStatusContainer');
+                
+                if(!myCoins || myCoins.length === 0) {
+                    statusContainer.innerHTML = '<p class="text-secondary">No coins added to this profile.</p>';
+                } else {
+                    let html = '';
+                    myCoins.forEach(coin => {
+                        const state = stateData.coinStates && stateData.coinStates[coin.symbol] ? stateData.coinStates[coin.symbol] : { status: 'Stopped', currentPrice: 0, avgEntry: 0, contracts: 0, currentRoi: 0, unrealizedPnl: 0 };
+                        let statusColor = state.status === 'Running' ? 'text-green' : 'text-red';
+                        let roiColorClass = state.currentRoi >= 0 ? 'text-green' : 'text-red';
+                        const displaySide = coin.side || profile.side || 'long';
+
+                        if (state.lockUntil && Date.now() < state.lockUntil) {
+                            statusColor = 'text-warning';
+                            state.status = 'Closing / Locked';
+                        }
+
+                        html += '<div class="stat-box" style="margin-bottom:16px;">' +
+                            '<div class="flex-row" style="justify-content: space-between; border-bottom: 1px solid var(--divider); padding-bottom: 12px; margin-bottom: 12px;">' +
+                                '<div style="font-size: 1.1em; font-weight: 500;">' +
+                                    coin.symbol + ' <span class="text-secondary" style="font-size: 0.8em;">(' + displaySide.toUpperCase() + ')</span> - Status: <span class="' + statusColor + '" style="font-weight:700;">' + state.status + '</span>' +
+                                '</div>' +
+                                '<div class="flex-row">' +
+                                    '<button class="md-btn md-btn-success" style="padding:6px 12px;" onclick="toggleCoinBot(\\'' + coin.symbol + '\\', true)"><span class="material-symbols-outlined" style="font-size:18px;">play_arrow</span> Start</button>' +
+                                    '<button class="md-btn md-btn-danger" style="padding:6px 12px;" onclick="toggleCoinBot(\\'' + coin.symbol + '\\', false)"><span class="material-symbols-outlined" style="font-size:18px;">stop</span> Stop</button>' +
+                                '</div>' +
+                            '</div>' +
+                            '<div class="flex-row" style="justify-content: space-between;">' +
+                                '<div><span class="stat-label">Price</span><span class="stat-val" style="font-size:1em;">' + (state.currentPrice || 0) + '</span></div>' +
+                                '<div><span class="stat-label">Avg Entry</span><span class="stat-val" style="font-size:1em;">' + (state.avgEntry || 0) + '</span></div>' +
+                                '<div><span class="stat-label">Contracts</span><span class="stat-val" style="font-size:1em;">' + (state.contracts || 0) + '</span></div>' +
+                                '<div><span class="stat-label">Unrealized PNL</span><span class="stat-val ' + roiColorClass + '" style="font-size:1em;">' + (state.unrealizedPnl || 0).toFixed(4) + '</span></div>' +
+                                '<div><span class="stat-label">ROI %</span><span class="stat-val ' + roiColorClass + '" style="font-size:1em;">' + (state.currentRoi || 0).toFixed(2) + '%</span></div>' +
+                            '</div>' +
+                        '</div>';
+                    });
+                    statusContainer.innerHTML = html;
+                }
+
+                document.getElementById('logs').innerHTML = (stateData.logs || []).join('<br>');
+            }
+
+            checkAuth(); // Initialize
+        </script>
+    </body>
+    </html>
+    `);
 });
 
+// VERCEL EXPORT: Safe Execution Block
 if (require.main === module) {
     app.listen(PORT, () => console.log(`🚀 Running locally on http://localhost:${PORT}`));
 }
