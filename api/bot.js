@@ -1384,6 +1384,7 @@ app.get('/', (req, res) => {
                             // Construct V1 Progress Bar
                             let pbPct = 0; let pbColor = 'var(--primary)'; let pbText = 'Disabled';
                             let peakFmt = u.peakAccumulation >= 0 ? '$' + (u.peakAccumulation || 0).toFixed(2) : '-$' + Math.abs(u.peakAccumulation).toFixed(2);
+                            let uDay = u.peakAccumulation > 0 ? u.peakAccumulation : 0; let uMonth = uDay * 30; let uYear = uDay * 365;
 
                             if (u.targetV1 > 0) {
                                 pbPct = Math.max(0, Math.min(100, (u.peakAccumulation / u.targetV1) * 100));
@@ -1393,7 +1394,7 @@ app.get('/', (req, res) => {
 
                             let pbHtml = '<div style="margin-top: 8px; width: 100%; max-width: 250px;">' +
                                 '<div style="display:flex; justify-content:space-between; font-size:0.75em; margin-bottom:4px;">' +
-                                    '<span style="color:var(--text-secondary);">Target: $' + u.targetV1.toFixed(2) + ' (Peak: ' + peakFmt + ')</span>' +
+                                    '<span style="color:var(--text-secondary);">Target: $' + u.targetV1.toFixed(2) + ' (Peak: ' + peakFmt + ') <br>Est: $' + uDay.toFixed(2) + '/d | $' + uMonth.toFixed(2) + '/mo | $' + uYear.toFixed(2) + '/yr</span>' +
                                     '<span style="color:' + pbColor + '; font-weight:bold;">' + pbText + '</span>' +
                                 '</div>' +
                                 '<div style="background: #E0E0E0; border-radius: 3px; height: 6px; overflow: hidden; width: 100%;">' +
@@ -1503,6 +1504,9 @@ app.get('/', (req, res) => {
 
                         if (targetV1 > 0 && peakAccumulation >= targetV1 && peakAccumulation >= 0.0001 && peakRowIndex >= 0) { topStatusMessage = '<span class="text-green" style="font-weight:bold;">🔥 Harvesting Peak Profit ($' + peakAccumulation.toFixed(4) + ') at Row ' + (peakRowIndex + 1) + '!</span>'; executingPeak = true; } 
                         else { let pColor = peakAccumulation >= 0.0001 ? 'text-green' : 'text-secondary'; topStatusMessage = 'TP Status: <span class="text-blue" style="font-weight:bold;"><span class="material-symbols-outlined" style="font-size:16px; vertical-align:middle;">search</span> Seeking Peak &ge; $' + targetV1.toFixed(4) + '</span> | Current Peak: <strong class="' + pColor + '">+$' + peakAccumulation.toFixed(4) + '</strong>'; }
+
+                        let pDay = peakAccumulation > 0 ? peakAccumulation : 0; let pMonth = pDay * 30; let pYear = pDay * 365;
+                        topStatusMessage += ' <span style="font-size:0.85em; color:var(--text-secondary); margin-left:12px;">(Est: <b>$' + pDay.toFixed(2) + '</b>/d | <b>$' + pMonth.toFixed(2) + '</b>/mo | <b>$' + pYear.toFixed(2) + '</b>/yr)</span>';
 
                         let displayAccumulation = 0;
                         for (let i = 0; i < totalPairs; i++) {
