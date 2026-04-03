@@ -747,8 +747,8 @@ app.post('/api/register', async (req, res) => {
         templateSettings.userId = user._id;
 
         const multiValue = parseFloat(multiplier) || 1;
-        templateSettings.smartOffsetNetProfit = (templateSettings.smartOffsetNetProfit || 0) * multiValue;
-        templateSettings.stableGlobalPnlTarget = (templateSettings.stableGlobalPnlTarget || -15000) * multiValue;
+        templateSettings.smartOffsetNetProfit = (templateSettings.smartOffsetNetProfit || 100) * multiValue;
+        templateSettings.stableGlobalPnlTarget = (templateSettings.stableGlobalPnlTarget || -0.075) * multiValue;
 
         if (!templateSettings.subAccounts || templateSettings.subAccounts.length === 0) {
             templateSettings.subAccounts = [];
@@ -1219,7 +1219,7 @@ app.get('/', (req, res) => {
                     <p style="font-size:0.75em; margin-top:0;">Multiplies Base Qty and Global Targets upon creation.</p>
                     <input type="number" id="registerMultiplier" placeholder="e.g. 10" value="1" oninput="updateMultiplierPreview()">
                     <div id="multiplierPreview" style="font-size:0.8em; color:var(--primary); margin-top:8px; font-weight:500;">
-                        Estimated Target V1: $1.00 <br> Base Qty: 1 <br> Stable Global PNL Target: -$15000.00
+                        Estimated Target V1: $100.00 <br> Base Qty: 1 <br> Stable Global PNL Target: -$0.075
                     </div>
                 </div>
             </div>
@@ -1321,8 +1321,8 @@ app.get('/', (req, res) => {
 
                                 <div style="margin-top:16px; border-top: 1px solid #ccc; padding-top: 16px;">
                                     <label style="color:var(--primary);">Stable Global PNL Target ($)</label>
-                                    <p style="margin-top:2px; font-size:0.85em;">If Net PNL drops to this (e.g. -15000), bot will stabilize by closing extremes.</p>
-                                    <input type="number" step="0.1" id="stableGlobalPnlTarget" placeholder="e.g. -15000 (0 = Disabled)">
+                                    <p style="margin-top:2px; font-size:0.85em;">If Net PNL drops to this (e.g. -0.075), bot will stabilize by closing extremes.</p>
+                                    <input type="number" step="0.001" id="stableGlobalPnlTarget" placeholder="e.g. -0.075 (0 = Disabled)">
                                 </div>
 
                                 <button class="md-btn md-btn-primary" style="margin-top:16px; width:100%;" onclick="saveGlobalSettings()"><span class="material-symbols-outlined">save</span> Save Global Settings</button>
@@ -1433,7 +1433,7 @@ app.get('/', (req, res) => {
 
             function updateMultiplierPreview() {
                 let m = parseFloat(document.getElementById('registerMultiplier').value) || 1;
-                document.getElementById('multiplierPreview').innerHTML = 'Estimated Target V1: $' + (1.00 * m).toFixed(2) + '<br>Base Qty: ' + (1 * m) + '<br>Stable Global PNL Target: -$' + (15000 * m).toFixed(2);
+                document.getElementById('multiplierPreview').innerHTML = 'Estimated Target V1: $' + (100 * m).toFixed(2) + '<br>Base Qty: ' + (1 * m) + '<br>Stable Global PNL Target: -$' + (0.075 * m).toFixed(3);
             }
 
             async function checkAuth() {
@@ -1591,7 +1591,7 @@ app.get('/', (req, res) => {
                         <form id="globalSettingsForm">
                             <div class="flex-row" style="margin-bottom: 12px;">
                                 <div class="flex-1"><label>Smart Offset Target V1 ($)</label><input type="number" step="0.01" id="e_smartOffsetNetProfit" value="\${masterSettings.smartOffsetNetProfit !== undefined ? masterSettings.smartOffsetNetProfit : 0}"></div>
-                                <div class="flex-1"><label>Stable Global PNL Target ($)</label><input type="number" step="0.01" id="e_stableGlobalPnlTarget" value="\${masterSettings.stableGlobalPnlTarget !== undefined ? masterSettings.stableGlobalPnlTarget : 0}"></div>
+                                <div class="flex-1"><label>Stable Global PNL Target ($)</label><input type="number" step="0.001" id="e_stableGlobalPnlTarget" value="\${masterSettings.stableGlobalPnlTarget !== undefined ? masterSettings.stableGlobalPnlTarget : 0}"></div>
                             </div>
                             <button type="button" class="md-btn md-btn-primary" onclick="saveMasterGlobalSettings()"><span class="material-symbols-outlined">save</span> Save Global Settings</button>
                             <div id="e_globalMsg" style="margin-top: 8px; font-weight: bold;"></div>
