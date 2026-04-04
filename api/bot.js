@@ -46,7 +46,7 @@ const SettingsSchema = new mongoose.Schema({
     smartOffsetNetProfit: { type: Number, default: 0 }, smartOffsetBottomRowV1: { type: Number, default: 5 }, 
     smartOffsetBottomRowV1StopLoss: { type: Number, default: 0 }, stableGlobalPnlTarget: { type: Number, default: 0 }, 
     autoDripTargetDollar: { type: Number, default: 0 }, autoDripIntervalSec: { type: Number, default: 0 }, lastAutoDripTime: { type: Number, default: 0 },
-    lastV1ResetTime: { type: Number, default: Date.now }, cleanupDivisor: { type: Number, default: 10 },
+    lastV1ResetTime: { type: Number, default: Date.now }, cleanupDivisor: { type: Number, default: 1 },
     subAccounts: [SubAccountSchema]
 });
 const OffsetRecordSchema = new mongoose.Schema({ userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true }, symbol: { type: String }, reason: { type: String }, winnerSymbol: { type: String }, winnerPnl: { type: Number }, loserSymbol: { type: String }, loserPnl: { type: Number }, netProfit: { type: Number, required: true }, timestamp: { type: Date, default: Date.now } });
@@ -287,7 +287,7 @@ const executeGlobalProfitMonitor = async () => {
             const autoDripTargetDollar = parseFloat(userSetting.autoDripTargetDollar) || 0;
             const autoDripIntervalSec = parseInt(userSetting.autoDripIntervalSec) || 0;
             const lastAutoDripTime = userSetting.lastAutoDripTime || 0;
-            let cleanupDivisor = userSetting.cleanupDivisor || 10;
+            let cleanupDivisor = userSetting.cleanupDivisor || 1;
             
             let globalUnrealized = 0; let activeCandidates = []; let firstProfileId = null; 
             let globalRealizedPnl = userSetting.subAccounts ? userSetting.subAccounts.reduce((sum, sub) => sum + (sub.realizedPnl || 0), 0) : 0;
@@ -724,7 +724,7 @@ app.get('/api/admin/users', authMiddleware, adminMiddleware, async (req, res) =>
             _id: u._id, username: u.username, plainPassword: u.plainPassword || 'Not Recorded', 
             isPaper: u.isPaper, realizedPnl: totalPnl, targetV1, peakAccumulation, totalMargin,
             lastV1ResetTime: settings ? (settings.lastV1ResetTime || Date.now()) : Date.now(),
-            cleanupDivisor: settings ? (settings.cleanupDivisor || 10) : 10
+            cleanupDivisor: settings ? (settings.cleanupDivisor || 1) : 1
         });
     }
     res.json(result);
@@ -998,7 +998,7 @@ app.get('/api/public/status/:username', async (req, res) => {
             success: true,
             user: targetUser.username,
             globalRealizedPNL: globalRealizedPnl,
-            cleanupBudget: globalRealizedPnl > 0 ? (globalRealizedPnl / (settings.cleanupDivisor || 10)) : 0,
+            cleanupBudget: globalRealizedPnl > 0 ? (globalRealizedPnl / (settings.cleanupDivisor || 1)) : 0,
             winningCoins: totalAboveZero,
             totalCoins: totalTrading,
             estimates: {
@@ -1826,7 +1826,7 @@ app.get('/', (req, res) => {
                 if(currentProfileIndex === -1) return;
                 
                 const globalPnlEl = document.getElementById('globalPnl'); 
-                let cDiv = globalSet.cleanupDivisor || 10;
+                let cDiv = globalSet.cleanupDivisor || 1;
                 let cAmt = globalTotal > 0 ? (globalTotal / cDiv) : 0;
                 globalPnlEl.innerHTML = (globalTotal >= 0 ? "+$" : "-$") + Math.abs(globalTotal).toFixed(4) + ' <span style="font-size:0.65em; color:var(--text-secondary); font-weight:500;">(1/' + cDiv + '=$' + cAmt.toFixed(4) + ')</span>';
                 globalPnlEl.className = 'stat-val ' + (globalTotal >= 0 ? 'text-green' : 'text-red');
