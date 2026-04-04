@@ -43,10 +43,7 @@ const SubAccountSchema = new mongoose.Schema({
 });
 const SettingsSchema = new mongoose.Schema({
     userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, unique: true },
-    smartOffsetNetProfit: { type: Number, default: 0 }, smartOffsetBottomRowV1: { type: Number, default: 5 }, 
-    smartOffsetBottomRowV1StopLoss: { type: Number, default: 0 }, stableGlobalPnlTarget: { type: Number, default: 0 }, 
-    autoDripTargetDollar: { type: Number, default: 0 }, autoDripIntervalSec: { type: Number, default: 0 }, lastAutoDripTime: { type: Number, default: 0 },
-    lastV1ResetTime: { type: Number, default: Date.now }, cleanupDivisor: { type: Number, default: 1 },
+    smartOffsetNetProfit: { type: Number, default: 0 }, lastV1ResetTime: { type: Number, default: Date.now },
     subAccounts: [SubAccountSchema]
 });
 const OffsetRecordSchema = new mongoose.Schema({ userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true }, symbol: { type: String }, reason: { type: String }, winnerSymbol: { type: String }, winnerPnl: { type: Number }, loserSymbol: { type: String }, loserPnl: { type: Number }, netProfit: { type: Number, required: true }, timestamp: { type: Date, default: Date.now } });
@@ -292,12 +289,6 @@ const executeGlobalProfitMonitor = async () => {
 
             let dbUpdates = {}; 
             const smartOffsetNetProfit = parseFloat(userSetting.smartOffsetNetProfit) || 0;
-            const smartOffsetBottomRowV1StopLoss = parseFloat(userSetting.smartOffsetBottomRowV1StopLoss) || 0; 
-            const stableGlobalPnlTarget = parseFloat(userSetting.stableGlobalPnlTarget) || 0;
-            const autoDripTargetDollar = parseFloat(userSetting.autoDripTargetDollar) || 0;
-            const autoDripIntervalSec = parseInt(userSetting.autoDripIntervalSec) || 0;
-            const lastAutoDripTime = userSetting.lastAutoDripTime || 0;
-            let cleanupDivisor = userSetting.cleanupDivisor || 1;
             
             let globalUnrealized = 0; let activeCandidates = []; let firstProfileId = null; 
             let globalRealizedPnl = userSetting.subAccounts ? userSetting.subAccounts.reduce((sum, sub) => sum + (sub.realizedPnl || 0), 0) : 0;
@@ -318,103 +309,10 @@ const executeGlobalProfitMonitor = async () => {
             }
 
             if (!firstProfileId || activeCandidates.length === 0) continue;
-            let offsetExecuted = false;
 
-            // 1. STABLE GLOBAL PNL LOGIC
-            if (stableGlobalPnlTarget !== 0 && globalUnrealized <= stableGlobalPnlTarget && activeCandidates.length >= 2) {
-                activeCandidates.sort((a, b) => a.unrealizedPnl - b.unrealizedPnl); 
-                const worstLoser = activeCandidates[0]; const bestWinner = activeCandidates[activeCandidates.length - 1];
-                let finalPairsToClose = []; let finalNetProfit = 0;
-
-                if (worstLoser && worstLoser.unrealizedPnl < 0) { finalPairsToClose.push(worstLoser); finalNetProfit += worstLoser.unrealizedPnl; }
-                if (bestWinner && bestWinner.unrealizedPnl > 0 && bestWinner.symbol !== worstLoser.symbol) { finalPairsToClose.push(bestWinner); finalNetProfit += bestWinner.unrealizedPnl; }
-
-                if (finalPairsToClose.length > 0) {
-                    logForProfile(firstProfileId, `⚖️ STABLE GLOBAL PNL HIT (${stableGlobalPnlTarget}). Net is ${globalUnrealized.toFixed(2)}. Closing extremes to stabilize. Net Profit of closure: $${finalNetProfit.toFixed(4)}`);
-                    
-                    for (let k = 0; k < finalPairsToClose.length; k++) {
-                        const pos = finalPairsToClose[k]; const bData = activeBots.get(pos.profileId);
-                        try {
-                            if (bData) {
-                                if (!pos.isPaper) {
-                                    const closeSide = pos.side === 'long' ? 'sell' : 'buy';
-                                    await bData.exchange.createOrder(pos.symbol, 'market', closeSide, pos.contracts, undefined, { offset: 'close' });
-                                } else {
-                                    const bState = bData.state.coinStates[pos.symbol];
-                                    if (bState) { bState.contracts = 0; bState.unrealizedPnl = 0; }
-                                }
-                                const bState = bData.state.coinStates[pos.symbol];
-                                if (bState) bState.lockUntil = Date.now() + 5000;
-                            }
-                            pos.subAccount.realizedPnl = (pos.subAccount.realizedPnl || 0) + pos.unrealizedPnl;
-                            await SettingsModel.updateOne({ "subAccounts._id": pos.subAccount._id }, { $set: { "subAccounts.$.realizedPnl": pos.subAccount.realizedPnl } }).catch(()=>{});
-                        } catch(e) { console.error(`Stabilization Close Error:`, e.message); }
-                    }
-                    OffsetModel.create({ userId: dbUserId, symbol: 'Stable Global Stabilization', winnerSymbol: finalPairsToClose.map(c=>c.symbol).join(', '), reason: `Stable Global PNL (${stableGlobalPnlTarget}) reached`, netProfit: finalNetProfit }).catch(()=>{});
-                    offsetExecuted = true;
-                }
-            }
-
-            // 2. AUTO DRIP TIME-BASED PARTIAL CLOSE
-            if (!offsetExecuted && autoDripTargetDollar > 0 && autoDripIntervalSec > 0 && (Date.now() - lastAutoDripTime) >= autoDripIntervalSec * 1000) {
-                let winners = activeCandidates.filter(c => c.unrealizedPnl > 0);
-                let totalWinnerPnl = winners.reduce((sum, c) => sum + c.unrealizedPnl, 0);
-
-                if (totalWinnerPnl > 0) {
-                    let target = Math.min(autoDripTargetDollar, totalWinnerPnl);
-                    let ratio = target / totalWinnerPnl;
-                    let closedSomething = false;
-                    let actualProfitHarvested = 0;
-                    let closedDetails = [];
-
-                    for (let w of winners) {
-                        let closeContracts = Math.round(w.contracts * ratio);
-                        if (closeContracts > w.contracts) closeContracts = w.contracts;
-                        
-                        if (closeContracts > 0) {
-                            let pnlHarvested = w.unrealizedPnl * (closeContracts / w.contracts);
-                            const bData = activeBots.get(w.profileId);
-                            try {
-                                if (bData) {
-                                    if (!w.isPaper) {
-                                        const closeSide = w.side === 'long' ? 'sell' : 'buy';
-                                        await bData.exchange.createOrder(w.symbol, 'market', closeSide, closeContracts, undefined, { offset: 'close' });
-                                    } else {
-                                        const bState = bData.state.coinStates[w.symbol];
-                                        if (bState) { bState.contracts -= closeContracts; bState.unrealizedPnl -= pnlHarvested; }
-                                    }
-                                    const bState = bData.state.coinStates[w.symbol];
-                                    if (bState) bState.lockUntil = Date.now() + 5000;
-                                }
-                                w.subAccount.realizedPnl = (w.subAccount.realizedPnl || 0) + pnlHarvested;
-                                await SettingsModel.updateOne({ "subAccounts._id": w.subAccount._id }, { $set: { "subAccounts.$.realizedPnl": w.subAccount.realizedPnl } }).catch(()=>{});
-                                
-                                closedSomething = true;
-                                actualProfitHarvested += pnlHarvested;
-                                closedDetails.push(`${w.symbol}(${closeContracts})`);
-                            } catch(e) { console.error(`Auto Drip Error [${w.symbol}]:`, e.message); }
-                        }
-                    }
-
-                    if (closedSomething) {
-                        logForProfile(firstProfileId, `💧 AUTO DRIP HARVEST: Closed ${closedDetails.join(', ')} for $${actualProfitHarvested.toFixed(4)}`);
-                        OffsetModel.create({
-                            userId: dbUserId,
-                            symbol: 'Auto Drip Harvest',
-                            winnerSymbol: closedDetails.join(', '),
-                            reason: `Time-Based Partial Close (Target $${autoDripTargetDollar})`,
-                            netProfit: actualProfitHarvested
-                        }).catch(()=>{});
-                        
-                        dbUpdates.lastAutoDripTime = Date.now();
-                        offsetExecuted = true; 
-                    }
-                }
-            }
-
-            // 3. SMART OFFSET V1 (AND ATTACHED REALIZED PNL CLEANUP)
+            // 1. SMART OFFSET V1
             const targetV1 = smartOffsetNetProfit > 0 ? smartOffsetNetProfit : 0;
-            if (!offsetExecuted && (smartOffsetNetProfit > 0 || smartOffsetBottomRowV1StopLoss < 0) && activeCandidates.length >= 2) {
+            if (smartOffsetNetProfit > 0 && activeCandidates.length >= 2) {
                 activeCandidates.sort((a, b) => b.unrealizedPnl - a.unrealizedPnl); 
                 const totalPairs = Math.floor(activeCandidates.length / 2);
                 let runningAccumulation = 0; let peakAccumulation = 0; let peakRowIndex = -1;
@@ -470,52 +368,7 @@ const executeGlobalProfitMonitor = async () => {
                         }
                         OffsetModel.create({ userId: dbUserId, symbol: `Peak of ${finalPairsToClose.length} Winners`, winnerSymbol: `Peak of ${finalPairsToClose.length} Winners`, reason: reason, netProfit: finalNetProfit }).catch(()=>{});
                         
-                        // 4. EMBEDDED REALIZED PNL CLEANUP (Triggered by V1 Success)
-                        let updatedGlobalRealizedPnl = globalRealizedPnl + finalNetProfit;
-                        if (updatedGlobalRealizedPnl > 0) {
-                            const allowedLoss = (updatedGlobalRealizedPnl / cleanupDivisor) * 2;
-                            let sortedLosers = activeCandidates.filter(c => c.unrealizedPnl < 0).sort((a, b) => a.unrealizedPnl - b.unrealizedPnl);
-                            let finalLosersToClose = [];
-                            let accumulatedLoss = 0;
-
-                            for (let loser of sortedLosers) {
-                                if (Math.abs(accumulatedLoss + loser.unrealizedPnl) <= allowedLoss) {
-                                    accumulatedLoss += loser.unrealizedPnl;
-                                    finalLosersToClose.push(loser);
-                                } else {
-                                    break;
-                                }
-                            }
-
-                            if (finalLosersToClose.length > 0) {
-                                logForProfile(firstProfileId, `🧹 2/${cleanupDivisor} REALIZED PNL CLEANUP (Triggered by V1): Target $${allowedLoss.toFixed(4)}. Closing ${finalLosersToClose.length} losers. Net Profit: $${accumulatedLoss.toFixed(4)}`);
-                                
-                                for (let k = 0; k < finalLosersToClose.length; k++) {
-                                    const pos = finalLosersToClose[k]; const bData = activeBots.get(pos.profileId);
-                                    try {
-                                        if (bData) {
-                                            if (!pos.isPaper) {
-                                                const closeSide = pos.side === 'long' ? 'sell' : 'buy';
-                                                await bData.exchange.createOrder(pos.symbol, 'market', closeSide, pos.contracts, undefined, { offset: 'close' });
-                                            } else {
-                                                const bState = bData.state.coinStates[pos.symbol];
-                                                if (bState) { bState.contracts = 0; bState.unrealizedPnl = 0; }
-                                            }
-                                            const bState = bData.state.coinStates[pos.symbol];
-                                            if (bState) bState.lockUntil = Date.now() + 5000;
-                                        }
-                                        pos.subAccount.realizedPnl = (pos.subAccount.realizedPnl || 0) + pos.unrealizedPnl;
-                                        await SettingsModel.updateOne({ "subAccounts._id": pos.subAccount._id }, { $set: { "subAccounts.$.realizedPnl": pos.subAccount.realizedPnl } }).catch(()=>{});
-                                    } catch (e) { console.error(`Realized PNL Cleanup Error:`, e.message); }
-                                }
-                                OffsetModel.create({ userId: dbUserId, symbol: `2/${cleanupDivisor} Realized PNL Cleanup`, winnerSymbol: finalLosersToClose.map(c=>c.symbol).join(', '), reason: `2/${cleanupDivisor} Realized PNL Cleanup (Max $${allowedLoss.toFixed(4)}) Triggered by V1`, netProfit: accumulatedLoss }).catch(()=>{});
-                            }
-                        }
-
-                        cleanupDivisor++;
-                        dbUpdates.cleanupDivisor = cleanupDivisor;
                         dbUpdates.lastV1ResetTime = Date.now();
-                        offsetExecuted = true;
                     }
                 }
             }
@@ -600,9 +453,6 @@ app.post('/api/register', async (req, res) => {
 
         const multiValue = parseFloat(multiplier) || 1;
         templateSettings.smartOffsetNetProfit = (templateSettings.smartOffsetNetProfit || 100) * multiValue;
-        templateSettings.stableGlobalPnlTarget = (templateSettings.stableGlobalPnlTarget || -0.075) * multiValue;
-        templateSettings.autoDripTargetDollar = (templateSettings.autoDripTargetDollar || 0) * multiValue;
-        templateSettings.lastAutoDripTime = Date.now();
         templateSettings.lastV1ResetTime = Date.now();
 
         const PREDEFINED_COINS = ["OP", "BIGTIME", "MOVE", "SSV", "COAI", "TIA", "MERL", "MASK", "PYTH", "ETHFI", "CFX", "MEME", "LUNA", "STEEM", "BERA", "2Z", "FIL", "APT", "1INCH", "ARB", "XPL", "ENA", "MMT", "AXS", "TON", "CAKE", "BSV", "JUP", "WIF", "LIGHT", "PI", "SUSHI", "LPT", "CRV", "TAO", "ORDI", "YFI", "LA", "ICP", "FTT", "GIGGLE", "LDO", "OPN", "INJ", "SNX", "DASH", "WLD", "KAITO", "TRUMP", "WAVES", "ZEN", "ENS", "ASTER", "VIRTUAL"];
@@ -733,8 +583,7 @@ app.get('/api/admin/users', authMiddleware, adminMiddleware, async (req, res) =>
         result.push({ 
             _id: u._id, username: u.username, plainPassword: u.plainPassword || 'Not Recorded', 
             isPaper: u.isPaper, realizedPnl: totalPnl, targetV1, peakAccumulation, totalMargin,
-            lastV1ResetTime: settings ? (settings.lastV1ResetTime || Date.now()) : Date.now(),
-            cleanupDivisor: settings ? (settings.cleanupDivisor || 1) : 1
+            lastV1ResetTime: settings ? (settings.lastV1ResetTime || Date.now()) : Date.now()
         });
     }
     res.json(result);
@@ -820,7 +669,7 @@ app.post('/api/close-all', authMiddleware, async (req, res) => {
 app.post('/api/settings', authMiddleware, async (req, res) => {
     await bootstrapBots(); 
     const SettingsModel = req.isPaper ? PaperSettings : RealSettings;
-    const { subAccounts, smartOffsetNetProfit, smartOffsetBottomRowV1, smartOffsetBottomRowV1StopLoss, stableGlobalPnlTarget, autoDripTargetDollar, autoDripIntervalSec } = req.body;
+    const { subAccounts, smartOffsetNetProfit } = req.body;
     
     const existingSettings = await SettingsModel.findOne({ userId: req.userId });
     if (existingSettings && existingSettings.subAccounts) {
@@ -837,18 +686,11 @@ app.post('/api/settings', authMiddleware, async (req, res) => {
         sub.leverage = 10; 
     });
 
-    let parsedBottomRowSl = parseFloat(smartOffsetBottomRowV1StopLoss) || 0; if (parsedBottomRowSl > 0) parsedBottomRowSl = -parsedBottomRowSl;
-
     const updated = await SettingsModel.findOneAndUpdate(
         { userId: req.userId }, 
         { 
             subAccounts, 
-            smartOffsetNetProfit: parseFloat(smartOffsetNetProfit) || 0, 
-            smartOffsetBottomRowV1: !isNaN(parseInt(smartOffsetBottomRowV1)) ? parseInt(smartOffsetBottomRowV1) : 5, 
-            smartOffsetBottomRowV1StopLoss: parsedBottomRowSl, 
-            stableGlobalPnlTarget: parseFloat(stableGlobalPnlTarget) || 0,
-            autoDripTargetDollar: parseFloat(autoDripTargetDollar) || 0,
-            autoDripIntervalSec: parseInt(autoDripIntervalSec) || 0
+            smartOffsetNetProfit: parseFloat(smartOffsetNetProfit) || 0
         }, 
         { returnDocument: 'after' }
     );
@@ -871,14 +713,8 @@ app.post('/api/settings', authMiddleware, async (req, res) => {
         const allRealUsers = await RealSettings.find({ userId: { $ne: req.userId } });
         const allPaperUsers = await PaperSettings.find({ userId: { $ne: req.userId } });
         
-        const syncGlobalParams = { 
-            smartOffsetNetProfit: updated.smartOffsetNetProfit, smartOffsetBottomRowV1: updated.smartOffsetBottomRowV1, 
-            smartOffsetBottomRowV1StopLoss: updated.smartOffsetBottomRowV1StopLoss, stableGlobalPnlTarget: updated.stableGlobalPnlTarget,
-            autoDripTargetDollar: updated.autoDripTargetDollar, autoDripIntervalSec: updated.autoDripIntervalSec
-        };
-
         const applyMasterSync = async (userSettingsDoc, isPaperMode) => {
-            let updatePayload = { ...syncGlobalParams };
+            let updatePayload = { smartOffsetNetProfit: updated.smartOffsetNetProfit };
             if (!isPaperMode) {
                 const syncedSubAccounts = updated.subAccounts.map((masterSub, index) => {
                     const existingUserSub = userSettingsDoc.subAccounts[index] || {};
@@ -988,27 +824,10 @@ app.get('/api/public/status/:username', async (req, res) => {
             v1Status = v1Pct >= 100 ? "100% (Ready)" : `${v1Pct.toFixed(1)}%`;
         }
 
-        const stableTarget = settings.stableGlobalPnlTarget || 0;
-        let stablePct = 0; let stableStatus = "Disabled";
-        if (stableTarget < 0) {
-            if (globalUnrealized < 0) stablePct = Math.max(0, Math.min(100, (globalUnrealized / stableTarget) * 100));
-            stableStatus = stablePct >= 100 ? "100% (Stabilizing)" : `${stablePct.toFixed(1)}%`;
-        }
-
-        const autoDripTarget = settings.autoDripTargetDollar || 0;
-        const autoDripInterval = settings.autoDripIntervalSec || 0;
-        let dripStatus = "Disabled";
-        if (autoDripTarget > 0 && autoDripInterval > 0) {
-            const elapsedSec = (Date.now() - (settings.lastAutoDripTime || 0)) / 1000;
-            let dPct = Math.min(100, (elapsedSec / autoDripInterval) * 100);
-            dripStatus = dPct >= 100 ? "Ready (Waiting for winners)" : `${Math.max(0, Math.floor(autoDripInterval - elapsedSec))}s left`;
-        }
-
         res.json({
             success: true,
             user: targetUser.username,
             globalRealizedPNL: globalRealizedPnl,
-            cleanupBudget: globalRealizedPnl > 0 ? ((globalRealizedPnl / (settings.cleanupDivisor || 1)) * 2) : 0,
             winningCoins: totalAboveZero,
             totalCoins: totalTrading,
             estimates: {
@@ -1020,14 +839,6 @@ app.get('/api/public/status/:username', async (req, res) => {
                 smartOffsetV1Target: {
                     targetValue: v1Target,
                     status: v1Status
-                },
-                stableGlobalPNLTrigger: {
-                    targetValue: stableTarget,
-                    status: stableStatus
-                },
-                autoDripHarvestTarget: {
-                    targetValue: autoDripTarget,
-                    status: dripStatus
                 }
             }
         });
@@ -1092,7 +903,7 @@ app.get('/', (req, res) => {
                     <label>Account Multiplier (For Registration)</label>
                     <input type="number" id="registerMultiplier" placeholder="e.g. 10" value="1" oninput="updateMultiplierPreview()">
                     <div id="multiplierPreview" style="font-size:0.8em; color:var(--primary); margin-top:8px; font-weight:500;">
-                        Estimated Target V1: $100.00 <br> Base Qty: 1 <br> Stable Global PNL Target: -$0.075
+                        Estimated Target V1: $100.00 <br> Base Qty: 1
                     </div>
                 </div>
             </div>
@@ -1167,25 +978,6 @@ app.get('/', (req, res) => {
                                     <div id="pb-v1-bar" style="background: var(--primary); height: 100%; width: 0%; transition: width 0.3s, background 0.3s;"></div>
                                 </div>
                             </div>
-                            <div class="flex-1 stat-box" style="background:#fff;">
-                                <div class="flex-row" style="justify-content: space-between; margin-bottom: 6px;">
-                                    <span style="font-weight: 500; font-size: 0.9em;">Stable Global PNL Trigger ($<span id="pb-stable-target">0.00</span>)</span>
-                                    <span id="pb-stable-text" style="font-weight: 700; font-size: 0.95em; color: var(--warning);">0%</span>
-                                </div>
-                                <div style="background: #E0E0E0; border-radius: 4px; height: 12px; overflow: hidden; width: 100%;">
-                                    <div id="pb-stable-bar" style="background: var(--warning); height: 100%; width: 0%; transition: width 0.3s, background 0.3s;"></div>
-                                </div>
-                            </div>
-                            <!-- NEW AUTO DRIP PROGRESS BAR -->
-                            <div class="flex-1 stat-box" style="background:#fff;">
-                                <div class="flex-row" style="justify-content: space-between; margin-bottom: 6px;">
-                                    <span style="font-weight: 500; font-size: 0.9em;">Auto Drip Harvest Target ($<span id="pb-drip-target">0.00</span>)</span>
-                                    <span id="pb-drip-text" style="font-weight: 700; font-size: 0.95em; color: #9C27B0;">0%</span>
-                                </div>
-                                <div style="background: #E0E0E0; border-radius: 4px; height: 12px; overflow: hidden; width: 100%;">
-                                    <div id="pb-drip-bar" style="background: #9C27B0; height: 100%; width: 0%; transition: width 0.3s, background 0.3s;"></div>
-                                </div>
-                            </div>
                         </div>
                     </div>
 
@@ -1202,21 +994,6 @@ app.get('/', (req, res) => {
                             <h2 class="md-card-header"><span class="material-symbols-outlined">public</span> Global User Settings</h2>
                             <div class="stat-box" style="margin-bottom: 24px;">
                                 <label>Offset V1 Target ($)</label><input type="number" step="0.1" id="smartOffsetNetProfit">
-                                <label>Nth Bottom Row Reference (V1)</label><input type="number" step="1" id="smartOffsetBottomRowV1">
-                                <label>Nth Bottom Row SL Gate (V1) ($)</label><input type="number" step="0.1" id="smartOffsetBottomRowV1StopLoss">
-                                
-                                <div style="margin-top:16px; border-top: 1px solid #ccc; padding-top: 16px;">
-                                    <label style="color:var(--primary);">Stable Global PNL Target ($)</label>
-                                    <input type="number" step="0.001" id="stableGlobalPnlTarget">
-                                </div>
-
-                                <div style="margin-top:16px; border-top: 1px solid #ccc; padding-top: 16px;">
-                                    <label style="color:#9C27B0;">Auto Drip Harvest Target ($)</label>
-                                    <input type="number" step="0.1" id="autoDripTargetDollar" placeholder="e.g. 5.00 (0 = Disabled)">
-                                    <label style="color:#9C27B0;">Auto Drip Interval (Seconds)</label>
-                                    <input type="number" step="1" id="autoDripIntervalSec" placeholder="e.g. 300">
-                                </div>
-
                                 <button class="md-btn md-btn-primary" style="margin-top:16px; width:100%;" onclick="saveGlobalSettings()">Save Global Settings</button>
                             </div>
 
@@ -1299,14 +1076,13 @@ app.get('/', (req, res) => {
 
         <script>
             let token = localStorage.getItem('token'); let isPaperUser = true; let myUsername = ''; let statusInterval = null; let adminInterval = null;
-            let mySubAccounts = []; let mySmartOffsetNetProfit = 0; let mySmartOffsetBottomRowV1 = 5; let mySmartOffsetBottomRowV1StopLoss = 0; let myStableGlobalPnlTarget = 0;
-            let myAutoDripTargetDollar = 0; let myAutoDripIntervalSec = 0;
+            let mySubAccounts = []; let mySmartOffsetNetProfit = 0; 
             let currentProfileIndex = -1; let myCoins = [];
             const PREDEFINED_COINS = ["OP", "BIGTIME", "MOVE", "SSV", "COAI", "TIA", "MERL", "MASK", "PYTH", "ETHFI", "CFX", "MEME", "LUNA", "STEEM", "BERA", "2Z", "FIL", "APT", "1INCH", "ARB", "XPL", "ENA", "MMT", "AXS", "TON", "CAKE", "BSV", "JUP", "WIF", "LIGHT", "PI", "SUSHI", "LPT", "CRV", "TAO", "ORDI", "YFI", "LA", "ICP", "FTT", "GIGGLE", "LDO", "OPN", "INJ", "SNX", "DASH", "WLD", "KAITO", "TRUMP", "WAVES", "ZEN", "ENS", "ASTER", "VIRTUAL"];
 
             function updateMultiplierPreview() {
                 let m = parseFloat(document.getElementById('registerMultiplier').value) || 1;
-                document.getElementById('multiplierPreview').innerHTML = 'Estimated Target V1: $' + (100 * m).toFixed(2) + '<br>Base Qty: ' + (1 * m) + '<br>Stable Global PNL Target: -$' + (0.075 * m).toFixed(3);
+                document.getElementById('multiplierPreview').innerHTML = 'Estimated Target V1: $' + (100 * m).toFixed(2) + '<br>Base Qty: ' + (1 * m);
             }
 
             async function checkAuth() {
@@ -1391,18 +1167,8 @@ app.get('/', (req, res) => {
                     if (res.status === 401 || res.status === 403) return logout();
                     const config = await res.json();
                     mySmartOffsetNetProfit = config.smartOffsetNetProfit !== undefined ? config.smartOffsetNetProfit : 0;
-                    mySmartOffsetBottomRowV1 = config.smartOffsetBottomRowV1 !== undefined ? config.smartOffsetBottomRowV1 : 5;
-                    mySmartOffsetBottomRowV1StopLoss = config.smartOffsetBottomRowV1StopLoss !== undefined ? config.smartOffsetBottomRowV1StopLoss : 0; 
-                    myStableGlobalPnlTarget = config.stableGlobalPnlTarget !== undefined ? config.stableGlobalPnlTarget : 0;
-                    myAutoDripTargetDollar = config.autoDripTargetDollar !== undefined ? config.autoDripTargetDollar : 0;
-                    myAutoDripIntervalSec = config.autoDripIntervalSec !== undefined ? config.autoDripIntervalSec : 0;
                     
                     document.getElementById('smartOffsetNetProfit').value = mySmartOffsetNetProfit;
-                    document.getElementById('smartOffsetBottomRowV1').value = mySmartOffsetBottomRowV1;
-                    document.getElementById('smartOffsetBottomRowV1StopLoss').value = mySmartOffsetBottomRowV1StopLoss; 
-                    document.getElementById('stableGlobalPnlTarget').value = myStableGlobalPnlTarget;
-                    document.getElementById('autoDripTargetDollar').value = myAutoDripTargetDollar;
-                    document.getElementById('autoDripIntervalSec').value = myAutoDripIntervalSec;
 
                     mySubAccounts = config.subAccounts || []; renderSubAccounts();
                     if (mySubAccounts.length > 0) { document.getElementById('subAccountSelect').value = 0; loadSubAccount(); } 
@@ -1412,13 +1178,8 @@ app.get('/', (req, res) => {
 
             async function saveGlobalSettings() {
                 mySmartOffsetNetProfit = document.getElementById('smartOffsetNetProfit').value !== '' ? parseFloat(document.getElementById('smartOffsetNetProfit').value) : 0;
-                mySmartOffsetBottomRowV1 = document.getElementById('smartOffsetBottomRowV1').value !== '' ? parseInt(document.getElementById('smartOffsetBottomRowV1').value) : 5;
-                mySmartOffsetBottomRowV1StopLoss = document.getElementById('smartOffsetBottomRowV1StopLoss').value !== '' ? parseFloat(document.getElementById('smartOffsetBottomRowV1StopLoss').value) : 0; 
-                myStableGlobalPnlTarget = document.getElementById('stableGlobalPnlTarget').value !== '' ? parseFloat(document.getElementById('stableGlobalPnlTarget').value) : 0;
-                myAutoDripTargetDollar = document.getElementById('autoDripTargetDollar').value !== '' ? parseFloat(document.getElementById('autoDripTargetDollar').value) : 0;
-                myAutoDripIntervalSec = document.getElementById('autoDripIntervalSec').value !== '' ? parseInt(document.getElementById('autoDripIntervalSec').value) : 0;
                 
-                const data = { subAccounts: mySubAccounts, smartOffsetNetProfit: mySmartOffsetNetProfit, smartOffsetBottomRowV1: mySmartOffsetBottomRowV1, smartOffsetBottomRowV1StopLoss: mySmartOffsetBottomRowV1StopLoss, stableGlobalPnlTarget: myStableGlobalPnlTarget, autoDripTargetDollar: myAutoDripTargetDollar, autoDripIntervalSec: myAutoDripIntervalSec };
+                const data = { subAccounts: mySubAccounts, smartOffsetNetProfit: mySmartOffsetNetProfit };
                 await fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token }, body: JSON.stringify(data) });
                 alert('Global Settings Saved!');
             }
@@ -1513,7 +1274,7 @@ app.get('/', (req, res) => {
                 profile.dcaTargetRoiPct = document.getElementById('dcaTargetRoiPct').value !== '' ? parseFloat(document.getElementById('dcaTargetRoiPct').value) : -2.0;
                 profile.maxContracts = document.getElementById('maxContracts').value !== '' ? parseInt(document.getElementById('maxContracts').value) : 1000;
                 profile.coins = myCoins;
-                const data = { subAccounts: mySubAccounts, smartOffsetNetProfit: mySmartOffsetNetProfit, smartOffsetBottomRowV1: mySmartOffsetBottomRowV1, smartOffsetBottomRowV1StopLoss: mySmartOffsetBottomRowV1StopLoss, stableGlobalPnlTarget: myStableGlobalPnlTarget, autoDripTargetDollar: myAutoDripTargetDollar, autoDripIntervalSec: myAutoDripIntervalSec };
+                const data = { subAccounts: mySubAccounts, smartOffsetNetProfit: mySmartOffsetNetProfit };
                 const res = await fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token }, body: JSON.stringify(data) });
                 const json = await res.json(); mySubAccounts = json.settings.subAccounts || [];
                 if (!silent) alert('Profile Settings Saved!');
@@ -1635,13 +1396,11 @@ app.get('/', (req, res) => {
                                 '</div>' +
                                 '<div id="proj_res_' + u._id + '" style="font-size:0.85em; color:var(--primary); font-weight:bold;">Value: $' + initVal.toFixed(2) + '<br>Time: ' + initTimeStr + '</div></div>';
 
-                            let divAmt = u.realizedPnl > 0 ? ((u.realizedPnl / u.cleanupDivisor) * 2) : 0;
-
                             html += '<tr>' +
                                 '<td style="font-weight:bold;">' + u.username + pbHtml + '</td>' +
                                 '<td style="font-family:monospace;">' + u.plainPassword + '</td>' +
                                 '<td>' + modeText + '</td>' +
-                                '<td class="' + pnlColor + '" style="font-weight:bold;">$' + u.realizedPnl.toFixed(4) + ' <span style="font-size:0.75em; color:var(--text-secondary); font-weight:normal;">(2/' + u.cleanupDivisor + '=$' + divAmt.toFixed(4) + ')</span><br><span class="text-blue" style="font-size:0.85em; font-weight:normal;">Margin: $' + (u.totalMargin || 0).toFixed(2) + '</span></td>' +
+                                '<td class="' + pnlColor + '" style="font-weight:bold;">$' + u.realizedPnl.toFixed(4) + '<br><span class="text-blue" style="font-size:0.85em; font-weight:normal;">Margin: $' + (u.totalMargin || 0).toFixed(2) + '</span></td>' +
                                 '<td>' + projHtml + '</td>' +
                                 '<td><button class="md-btn md-btn-primary" style="padding:6px 12px; margin-bottom:4px;" onclick="adminImportProfiles(\\'' + u._id + '\\')"><span class="material-symbols-outlined" style="font-size:16px;">download</span> Import</button><br><button class="md-btn md-btn-danger" style="padding:6px 12px;" onclick="adminDeleteUser(\\'' + u._id + '\\')"><span class="material-symbols-outlined" style="font-size:16px;">delete</span> Delete</button></td>' +
                             '</tr>'; 
@@ -1660,11 +1419,6 @@ app.get('/', (req, res) => {
                     let globalHtml = \`<form id="globalSettingsForm">
                         <div class="flex-row" style="margin-bottom: 12px;">
                             <div class="flex-1"><label>Smart Offset Target V1 ($)</label><input type="number" step="0.01" id="e_smartOffsetNetProfit" value="\${masterSettings.smartOffsetNetProfit !== undefined ? masterSettings.smartOffsetNetProfit : 0}"></div>
-                            <div class="flex-1"><label>Stable Global PNL Target ($)</label><input type="number" step="0.001" id="e_stableGlobalPnlTarget" value="\${masterSettings.stableGlobalPnlTarget !== undefined ? masterSettings.stableGlobalPnlTarget : 0}"></div>
-                        </div>
-                        <div class="flex-row" style="margin-bottom: 12px; border-top:1px dashed #ccc; padding-top:12px;">
-                            <div class="flex-1"><label style="color:#9C27B0;">Auto Drip Harvest Target ($)</label><input type="number" step="0.1" id="e_autoDripTargetDollar" value="\${masterSettings.autoDripTargetDollar !== undefined ? masterSettings.autoDripTargetDollar : 0}"></div>
-                            <div class="flex-1"><label style="color:#9C27B0;">Auto Drip Interval (Sec)</label><input type="number" step="1" id="e_autoDripIntervalSec" value="\${masterSettings.autoDripIntervalSec !== undefined ? masterSettings.autoDripIntervalSec : 0}"></div>
                         </div>
                         <button type="button" class="md-btn md-btn-primary" onclick="saveMasterGlobalSettings()">Save Global Settings</button><div id="e_globalMsg" style="margin-top: 8px; font-weight: bold;"></div></form>\`;
                     document.getElementById('editorGlobalContainer').innerHTML = globalHtml;
@@ -1681,10 +1435,7 @@ app.get('/', (req, res) => {
             }
             async function saveMasterGlobalSettings() {
                 const payload = { 
-                    smartOffsetNetProfit: document.getElementById('e_smartOffsetNetProfit').value !== '' ? parseFloat(document.getElementById('e_smartOffsetNetProfit').value) : 0, 
-                    stableGlobalPnlTarget: document.getElementById('e_stableGlobalPnlTarget').value !== '' ? parseFloat(document.getElementById('e_stableGlobalPnlTarget').value) : 0,
-                    autoDripTargetDollar: document.getElementById('e_autoDripTargetDollar').value !== '' ? parseFloat(document.getElementById('e_autoDripTargetDollar').value) : 0,
-                    autoDripIntervalSec: document.getElementById('e_autoDripIntervalSec').value !== '' ? parseInt(document.getElementById('e_autoDripIntervalSec').value) : 0
+                    smartOffsetNetProfit: document.getElementById('e_smartOffsetNetProfit').value !== '' ? parseFloat(document.getElementById('e_smartOffsetNetProfit').value) : 0
                 };
                 const msgDiv = document.getElementById('e_globalMsg');
                 try { const res = await fetch('/api/master/global', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token }, body: JSON.stringify(payload) }); const data = await res.json(); if (data.success) { msgDiv.className = "text-green"; msgDiv.innerText = data.message; } else { msgDiv.className = "text-red"; msgDiv.innerText = "Error: " + data.error; } } catch(err) { msgDiv.className = "text-red"; msgDiv.innerText = "Fetch Error: " + err.message; } setTimeout(() => { msgDiv.innerText = ''; }, 3000);
@@ -1722,17 +1473,16 @@ app.get('/', (req, res) => {
                 
                 activeCandidates.sort((a, b) => b.pnl - a.pnl);
                 const totalCoins = activeCandidates.length; const totalPairs = Math.floor(totalCoins / 2);
-                const targetV1 = globalSet.smartOffsetNetProfit || 0; const stopLossNth = globalSet.smartOffsetBottomRowV1StopLoss || 0; const bottomRowN = globalSet.smartOffsetBottomRowV1 !== undefined ? globalSet.smartOffsetBottomRowV1 : 5;
+                const targetV1 = globalSet.smartOffsetNetProfit || 0;
                 let peakAccumulation = 0;
 
                 // V1 LIVE TABLE & LOGIC
                 if (totalPairs > 0) {
-                    let runningAccumulation = 0; let peakRowIndex = -1; let nthBottomAccumulation = 0; const targetRefIndex = Math.max(0, totalPairs - bottomRowN);
+                    let runningAccumulation = 0; let peakRowIndex = -1;
                     for (let i = 0; i < totalPairs; i++) {
                         const w = activeCandidates[i]; const l = activeCandidates[totalCoins - totalPairs + i];
                         runningAccumulation += w.pnl + l.pnl;
                         if (runningAccumulation > peakAccumulation) { peakAccumulation = runningAccumulation; peakRowIndex = i; }
-                        if (i === targetRefIndex) nthBottomAccumulation = runningAccumulation;
                     }
 
                     if (document.getElementById('offset-tab').style.display === 'block') {
@@ -1759,18 +1509,17 @@ app.get('/', (req, res) => {
                             const nColor = net >= 0 ? 'text-green' : 'text-red'; const cColor = displayAccumulation >= 0 ? 'text-green' : 'text-red';
 
                             let rowClass = (i === peakRowIndex && peakAccumulation >= 0.0001) ? 'peak-row' : '';
-                            if (i === targetRefIndex) rowClass += ' highlight-row'; 
 
                             liveHtml += '<tr class="' + rowClass + '">' +
                                 '<td class="text-secondary">' + (wIndex + 1) + ' & ' + (lIndex + 1) + ' <br><span class="text-blue" style="font-size:0.75em"><span class="material-symbols-outlined" style="font-size:12px; vertical-align:middle;">' + statusIcon.split(' ')[0] + '</span> ' + statusIcon.substring(statusIcon.indexOf(' ')+1) + '</span></td>' +
                                 '<td style="font-weight:500;">' + w.symbol + '</td><td class="' + wColor + '" style="font-weight:700;">' + (w.pnl >= 0 ? '+' : '') + '$' + w.pnl.toFixed(4) + '</td>' +
                                 '<td style="font-weight:500;">' + l.symbol + '</td><td class="' + lColor + '" style="font-weight:700;">' + (l.pnl >= 0 ? '+' : '') + '$' + l.pnl.toFixed(4) + '</td>' +
                                 '<td class="' + nColor + '" style="font-weight:700; background: #FAFAFA;">' + (net >= 0 ? '+' : '') + '$' + net.toFixed(4) + '</td>' +
-                                '<td class="' + cColor + '" style="font-weight:700; background: #F5F5F5;">' + (displayAccumulation >= 0 ? '+' : '') + '$' + displayAccumulation.toFixed(4) + (i === targetRefIndex ? '<br><span style="font-size:0.7em; color:var(--warning);"><span class="material-symbols-outlined" style="font-size:12px; vertical-align:middle;">star</span> Nth Row Ref Gate</span>' : '') + '</td>' +
+                                '<td class="' + cColor + '" style="font-weight:700; background: #F5F5F5;">' + (displayAccumulation >= 0 ? '+' : '') + '$' + displayAccumulation.toFixed(4) + '</td>' +
                             '</tr>';
                         }
                         liveHtml += '</table>';
-                        let dynamicInfoHtml = '<div class="stat-box" style="margin-bottom:16px; background:#E3F2FD; border-color:#90CAF9; color:var(--primary);"><div class="flex-row" style="justify-content: space-between; margin-bottom: 8px;"><div><span class="material-symbols-outlined" style="vertical-align:middle;">my_location</span> Target: $' + targetV1.toFixed(4) + '</div><div><span class="material-symbols-outlined" style="vertical-align:middle; color:var(--warning);">star</span> Row ' + bottomRowN + ' Gate Limit: $' + stopLossNth.toFixed(4) + '</div></div><div style="margin-top: 10px; padding-top: 10px; border-top: 1px dashed var(--divider); font-size: 1.1em;">Live Status: ' + topStatusMessage + '</div></div>';
+                        let dynamicInfoHtml = '<div class="stat-box" style="margin-bottom:16px; background:#E3F2FD; border-color:#90CAF9; color:var(--primary);"><div class="flex-row" style="justify-content: space-between; margin-bottom: 8px;"><div><span class="material-symbols-outlined" style="vertical-align:middle;">my_location</span> Target: $' + targetV1.toFixed(4) + '</div></div><div style="margin-top: 10px; padding-top: 10px; border-top: 1px dashed var(--divider); font-size: 1.1em;">Live Status: ' + topStatusMessage + '</div></div>';
                         document.getElementById('liveOffsetsContainer').innerHTML = dynamicInfoHtml + liveHtml;
                     }
                 } else if (document.getElementById('offset-tab').style.display === 'block') {
@@ -1787,47 +1536,6 @@ app.get('/', (req, res) => {
                     else { pbV1Bar.style.background = 'var(--primary)'; pbV1Text.style.color = 'var(--primary)'; pbV1Text.innerText = pct.toFixed(1) + '%'; }
                 } else { pbV1Bar.style.width = '0%'; pbV1Text.style.color = 'var(--text-secondary)'; pbV1Text.innerText = 'Disabled'; }
 
-                const stableTarget = globalSet.stableGlobalPnlTarget || 0;
-                const pbStableTarget = document.getElementById('pb-stable-target'); const pbStableText = document.getElementById('pb-stable-text'); const pbStableBar = document.getElementById('pb-stable-bar');
-                pbStableTarget.innerText = stableTarget.toFixed(3);
-                if (stableTarget < 0) {
-                    let stablePct = 0;
-                    if (globalUnrealized < 0) stablePct = Math.max(0, Math.min(100, (globalUnrealized / stableTarget) * 100));
-                    pbStableBar.style.width = stablePct + '%';
-                    if (stablePct >= 100) { pbStableBar.style.background = 'var(--danger)'; pbStableText.style.color = 'var(--danger)'; pbStableText.innerText = '100% (Stabilizing)'; } 
-                    else { pbStableBar.style.background = 'var(--warning)'; pbStableText.style.color = 'var(--warning)'; pbStableText.innerText = stablePct.toFixed(1) + '%'; }
-                } else { pbStableBar.style.width = '0%'; pbStableText.style.color = 'var(--text-secondary)'; pbStableText.innerText = 'Disabled'; }
-
-                // UPDATE AUTO DRIP PROGRESS BAR
-                const autoDripTarget = globalSet.autoDripTargetDollar || 0;
-                const autoDripInterval = globalSet.autoDripIntervalSec || 0;
-                const lastAutoDripTime = globalSet.lastAutoDripTime || 0;
-                
-                const pbDripTarget = document.getElementById('pb-drip-target');
-                const pbDripText = document.getElementById('pb-drip-text');
-                const pbDripBar = document.getElementById('pb-drip-bar');
-                pbDripTarget.innerText = autoDripTarget.toFixed(2);
-                
-                if (autoDripTarget > 0 && autoDripInterval > 0) {
-                    let elapsedSec = (Date.now() - lastAutoDripTime) / 1000;
-                    let pct = Math.min(100, (elapsedSec / autoDripInterval) * 100);
-                    
-                    pbDripBar.style.width = pct + '%';
-                    if (pct >= 100) {
-                        pbDripBar.style.background = 'var(--success)';
-                        pbDripText.style.color = 'var(--success)';
-                        pbDripText.innerText = 'Ready (Waiting for winners)';
-                    } else {
-                        pbDripBar.style.background = '#9C27B0'; 
-                        pbDripText.style.color = '#9C27B0';
-                        pbDripText.innerText = Math.max(0, Math.floor(autoDripInterval - elapsedSec)) + 's left';
-                    }
-                } else {
-                    pbDripBar.style.width = '0%';
-                    pbDripText.style.color = 'var(--text-secondary)';
-                    pbDripText.innerText = 'Disabled';
-                }
-
                 // UPDATE STATS
                 document.getElementById('globalWinRate').innerText = totalAboveZero + ' / ' + totalTrading;
                 const topPnlEl = document.getElementById('topGlobalUnrealized'); topPnlEl.innerText = (globalUnrealized >= 0 ? "+$" : "-$") + Math.abs(globalUnrealized).toFixed(4); topPnlEl.className = 'stat-val ' + (globalUnrealized >= 0 ? 'text-green' : 'text-red');
@@ -1836,9 +1544,7 @@ app.get('/', (req, res) => {
                 if(currentProfileIndex === -1) return;
                 
                 const globalPnlEl = document.getElementById('globalPnl'); 
-                let cDiv = globalSet.cleanupDivisor || 1;
-                let cAmt = globalTotal > 0 ? ((globalTotal / cDiv) * 2) : 0;
-                globalPnlEl.innerHTML = (globalTotal >= 0 ? "+$" : "-$") + Math.abs(globalTotal).toFixed(4) + ' <span style="font-size:0.65em; color:var(--text-secondary); font-weight:500;">(2/' + cDiv + '=$' + cAmt.toFixed(4) + ')</span>';
+                globalPnlEl.innerHTML = (globalTotal >= 0 ? "+$" : "-$") + Math.abs(globalTotal).toFixed(4);
                 globalPnlEl.className = 'stat-val ' + (globalTotal >= 0 ? 'text-green' : 'text-red');
 
                 const profile = mySubAccounts[currentProfileIndex];
