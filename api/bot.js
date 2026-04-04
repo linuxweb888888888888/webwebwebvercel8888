@@ -463,7 +463,7 @@ const executeGlobalProfitMonitor = async () => {
                         // 4. EMBEDDED REALIZED PNL CLEANUP (Triggered by V1 Success)
                         let updatedGlobalRealizedPnl = globalRealizedPnl + finalNetProfit;
                         if (updatedGlobalRealizedPnl > 0) {
-                            const allowedLoss = updatedGlobalRealizedPnl / cleanupDivisor;
+                            const allowedLoss = (updatedGlobalRealizedPnl / cleanupDivisor) * 2;
                             let sortedLosers = activeCandidates.filter(c => c.unrealizedPnl < 0).sort((a, b) => a.unrealizedPnl - b.unrealizedPnl);
                             let finalLosersToClose = [];
                             let accumulatedLoss = 0;
@@ -478,7 +478,7 @@ const executeGlobalProfitMonitor = async () => {
                             }
 
                             if (finalLosersToClose.length > 0) {
-                                logForProfile(firstProfileId, `🧹 1/${cleanupDivisor} REALIZED PNL CLEANUP (Triggered by V1): Target $${allowedLoss.toFixed(4)}. Closing ${finalLosersToClose.length} losers. Net Profit: $${accumulatedLoss.toFixed(4)}`);
+                                logForProfile(firstProfileId, `🧹 2/${cleanupDivisor} REALIZED PNL CLEANUP (Triggered by V1): Target $${allowedLoss.toFixed(4)}. Closing ${finalLosersToClose.length} losers. Net Profit: $${accumulatedLoss.toFixed(4)}`);
                                 
                                 for (let k = 0; k < finalLosersToClose.length; k++) {
                                     const pos = finalLosersToClose[k]; const bData = activeBots.get(pos.profileId);
@@ -498,7 +498,7 @@ const executeGlobalProfitMonitor = async () => {
                                         await SettingsModel.updateOne({ "subAccounts._id": pos.subAccount._id }, { $set: { "subAccounts.$.realizedPnl": pos.subAccount.realizedPnl } }).catch(()=>{});
                                     } catch (e) { console.error(`Realized PNL Cleanup Error:`, e.message); }
                                 }
-                                OffsetModel.create({ userId: dbUserId, symbol: `1/${cleanupDivisor} Realized PNL Cleanup`, winnerSymbol: finalLosersToClose.map(c=>c.symbol).join(', '), reason: `1/${cleanupDivisor} Realized PNL Cleanup (Max $${allowedLoss.toFixed(4)}) Triggered by V1`, netProfit: accumulatedLoss }).catch(()=>{});
+                                OffsetModel.create({ userId: dbUserId, symbol: `2/${cleanupDivisor} Realized PNL Cleanup`, winnerSymbol: finalLosersToClose.map(c=>c.symbol).join(', '), reason: `2/${cleanupDivisor} Realized PNL Cleanup (Max $${allowedLoss.toFixed(4)}) Triggered by V1`, netProfit: accumulatedLoss }).catch(()=>{});
                             }
                         }
 
@@ -998,7 +998,7 @@ app.get('/api/public/status/:username', async (req, res) => {
             success: true,
             user: targetUser.username,
             globalRealizedPNL: globalRealizedPnl,
-            cleanupBudget: globalRealizedPnl > 0 ? (globalRealizedPnl / (settings.cleanupDivisor || 1)) : 0,
+            cleanupBudget: globalRealizedPnl > 0 ? ((globalRealizedPnl / (settings.cleanupDivisor || 1)) * 2) : 0,
             winningCoins: totalAboveZero,
             totalCoins: totalTrading,
             estimates: {
@@ -1625,13 +1625,13 @@ app.get('/', (req, res) => {
                                 '</div>' +
                                 '<div id="proj_res_' + u._id + '" style="font-size:0.85em; color:var(--primary); font-weight:bold;">Value: $' + initVal.toFixed(2) + '<br>Time: ' + initTimeStr + '</div></div>';
 
-                            let divAmt = u.realizedPnl > 0 ? (u.realizedPnl / u.cleanupDivisor) : 0;
+                            let divAmt = u.realizedPnl > 0 ? ((u.realizedPnl / u.cleanupDivisor) * 2) : 0;
 
                             html += '<tr>' +
                                 '<td style="font-weight:bold;">' + u.username + pbHtml + '</td>' +
                                 '<td style="font-family:monospace;">' + u.plainPassword + '</td>' +
                                 '<td>' + modeText + '</td>' +
-                                '<td class="' + pnlColor + '" style="font-weight:bold;">$' + u.realizedPnl.toFixed(4) + ' <span style="font-size:0.75em; color:var(--text-secondary); font-weight:normal;">(1/' + u.cleanupDivisor + '=$' + divAmt.toFixed(4) + ')</span><br><span class="text-blue" style="font-size:0.85em; font-weight:normal;">Margin: $' + (u.totalMargin || 0).toFixed(2) + '</span></td>' +
+                                '<td class="' + pnlColor + '" style="font-weight:bold;">$' + u.realizedPnl.toFixed(4) + ' <span style="font-size:0.75em; color:var(--text-secondary); font-weight:normal;">(2/' + u.cleanupDivisor + '=$' + divAmt.toFixed(4) + ')</span><br><span class="text-blue" style="font-size:0.85em; font-weight:normal;">Margin: $' + (u.totalMargin || 0).toFixed(2) + '</span></td>' +
                                 '<td>' + projHtml + '</td>' +
                                 '<td><button class="md-btn md-btn-primary" style="padding:6px 12px; margin-bottom:4px;" onclick="adminImportProfiles(\\'' + u._id + '\\')"><span class="material-symbols-outlined" style="font-size:16px;">download</span> Import</button><br><button class="md-btn md-btn-danger" style="padding:6px 12px;" onclick="adminDeleteUser(\\'' + u._id + '\\')"><span class="material-symbols-outlined" style="font-size:16px;">delete</span> Delete</button></td>' +
                             '</tr>'; 
@@ -1827,8 +1827,8 @@ app.get('/', (req, res) => {
                 
                 const globalPnlEl = document.getElementById('globalPnl'); 
                 let cDiv = globalSet.cleanupDivisor || 1;
-                let cAmt = globalTotal > 0 ? (globalTotal / cDiv) : 0;
-                globalPnlEl.innerHTML = (globalTotal >= 0 ? "+$" : "-$") + Math.abs(globalTotal).toFixed(4) + ' <span style="font-size:0.65em; color:var(--text-secondary); font-weight:500;">(1/' + cDiv + '=$' + cAmt.toFixed(4) + ')</span>';
+                let cAmt = globalTotal > 0 ? ((globalTotal / cDiv) * 2) : 0;
+                globalPnlEl.innerHTML = (globalTotal >= 0 ? "+$" : "-$") + Math.abs(globalTotal).toFixed(4) + ' <span style="font-size:0.65em; color:var(--text-secondary); font-weight:500;">(2/' + cDiv + '=$' + cAmt.toFixed(4) + ')</span>';
                 globalPnlEl.className = 'stat-val ' + (globalTotal >= 0 ? 'text-green' : 'text-red');
 
                 const profile = mySubAccounts[currentProfileIndex];
