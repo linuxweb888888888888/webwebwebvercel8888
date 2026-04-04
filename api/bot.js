@@ -122,17 +122,7 @@ async function startBot(userId, subAccount, isPaper) {
                 ]);
                 positions = fetchedPos; allTickers = fetchedTick;
             } else {
-                global.simPrices = global.simPrices || {};
-                const missing = symbolsToFetch.filter(s => !global.simPrices[s]);
-                if (missing.length > 0) {
-                    const fresh = await exchange.fetchTickers(missing).catch(() => ({}));
-                    missing.forEach(s => { global.simPrices[s] = (fresh[s] && fresh[s].last) ? fresh[s].last : 100; });
-                }
-                symbolsToFetch.forEach(s => {
-                    const vol = (Math.random() - 0.5) * 0.015; // Fast +/- 0.75% realistic simulated tick movement
-                    global.simPrices[s] = global.simPrices[s] * (1 + vol);
-                    allTickers[s] = { last: global.simPrices[s] };
-                });
+                allTickers = await exchange.fetchTickers(symbolsToFetch).catch(e => { throw new Error('Tickers: ' + e.message); });
             }
 
             for (let coin of activeCoins) {
