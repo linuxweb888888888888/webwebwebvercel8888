@@ -46,7 +46,7 @@ const SettingsSchema = new mongoose.Schema({
     smartOffsetNetProfit: { type: Number, default: 0 }, smartOffsetBottomRowV1: { type: Number, default: 5 }, 
     smartOffsetBottomRowV1StopLoss: { type: Number, default: 0 }, stableGlobalPnlTarget: { type: Number, default: 0 }, 
     autoDripTargetDollar: { type: Number, default: 0 }, autoDripIntervalSec: { type: Number, default: 0 }, lastAutoDripTime: { type: Number, default: 0 },
-    lastV1ResetTime: { type: Number, default: Date.now },
+    lastV1ResetTime: { type: Number, default: Date.now }, cleanupDivisor: { type: Number, default: 10 },
     subAccounts: [SubAccountSchema]
 });
 const OffsetRecordSchema = new mongoose.Schema({ userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true }, symbol: { type: String }, reason: { type: String }, winnerSymbol: { type: String }, winnerPnl: { type: Number }, loserSymbol: { type: String }, loserPnl: { type: Number }, netProfit: { type: Number, required: true }, timestamp: { type: Date, default: Date.now } });
@@ -287,6 +287,7 @@ const executeGlobalProfitMonitor = async () => {
             const autoDripTargetDollar = parseFloat(userSetting.autoDripTargetDollar) || 0;
             const autoDripIntervalSec = parseInt(userSetting.autoDripIntervalSec) || 0;
             const lastAutoDripTime = userSetting.lastAutoDripTime || 0;
+            let cleanupDivisor = userSetting.cleanupDivisor || 10;
             
             let globalUnrealized = 0; let activeCandidates = []; let firstProfileId = null; 
             let globalRealizedPnl = userSetting.subAccounts ? userSetting.subAccounts.reduce((sum, sub) => sum + (sub.realizedPnl || 0), 0) : 0;
@@ -401,7 +402,7 @@ const executeGlobalProfitMonitor = async () => {
                 }
             }
 
-            // 3. SMART OFFSET V1 (AND ATTACHED 10% REALIZED PNL CLEANUP)
+            // 3. SMART OFFSET V1 (AND ATTACHED REALIZED PNL CLEANUP)
             const targetV1 = smartOffsetNetProfit > 0 ? smartOffsetNetProfit : 0;
             if (!offsetExecuted && (smartOffsetNetProfit > 0 || smartOffsetBottomRowV1StopLoss < 0) && activeCandidates.length >= 2) {
                 activeCandidates.sort((a, b) => b.unrealizedPnl - a.unrealizedPnl); 
@@ -459,10 +460,10 @@ const executeGlobalProfitMonitor = async () => {
                         }
                         OffsetModel.create({ userId: dbUserId, symbol: `Peak of ${finalPairsToClose.length} Winners`, winnerSymbol: `Peak of ${finalPairsToClose.length} Winners`, reason: reason, netProfit: finalNetProfit }).catch(()=>{});
                         
-                        // 4. EMBEDDED 10% REALIZED PNL CLEANUP (Triggered by V1 Success)
+                        // 4. EMBEDDED REALIZED PNL CLEANUP (Triggered by V1 Success)
                         let updatedGlobalRealizedPnl = globalRealizedPnl + finalNetProfit;
                         if (updatedGlobalRealizedPnl > 0) {
-                            const allowedLoss = updatedGlobalRealizedPnl / 10;
+                            const allowedLoss = updatedGlobalRealizedPnl / cleanupDivisor;
                             let sortedLosers = activeCandidates.filter(c => c.unrealizedPnl < 0).sort((a, b) => a.unrealizedPnl - b.unrealizedPnl);
                             let finalLosersToClose = [];
                             let accumulatedLoss = 0;
@@ -477,7 +478,7 @@ const executeGlobalProfitMonitor = async () => {
                             }
 
                             if (finalLosersToClose.length > 0) {
-                                logForProfile(firstProfileId, `🧹 10% REALIZED PNL CLEANUP (Triggered by V1): Target $${allowedLoss.toFixed(4)}. Closing ${finalLosersToClose.length} losers. Net Profit: $${accumulatedLoss.toFixed(4)}`);
+                                logForProfile(firstProfileId, `🧹 1/${cleanupDivisor} REALIZED PNL CLEANUP (Triggered by V1): Target $${allowedLoss.toFixed(4)}. Closing ${finalLosersToClose.length} losers. Net Profit: $${accumulatedLoss.toFixed(4)}`);
                                 
                                 for (let k = 0; k < finalLosersToClose.length; k++) {
                                     const pos = finalLosersToClose[k]; const bData = activeBots.get(pos.profileId);
@@ -497,10 +498,12 @@ const executeGlobalProfitMonitor = async () => {
                                         await SettingsModel.updateOne({ "subAccounts._id": pos.subAccount._id }, { $set: { "subAccounts.$.realizedPnl": pos.subAccount.realizedPnl } }).catch(()=>{});
                                     } catch (e) { console.error(`Realized PNL Cleanup Error:`, e.message); }
                                 }
-                                OffsetModel.create({ userId: dbUserId, symbol: '10% Realized PNL Cleanup', winnerSymbol: finalLosersToClose.map(c=>c.symbol).join(', '), reason: `10% Realized PNL Cleanup (Max $${allowedLoss.toFixed(4)}) Triggered by V1`, netProfit: accumulatedLoss }).catch(()=>{});
+                                OffsetModel.create({ userId: dbUserId, symbol: `1/${cleanupDivisor} Realized PNL Cleanup`, winnerSymbol: finalLosersToClose.map(c=>c.symbol).join(', '), reason: `1/${cleanupDivisor} Realized PNL Cleanup (Max $${allowedLoss.toFixed(4)}) Triggered by V1`, netProfit: accumulatedLoss }).catch(()=>{});
                             }
                         }
 
+                        cleanupDivisor++;
+                        dbUpdates.cleanupDivisor = cleanupDivisor;
                         dbUpdates.lastV1ResetTime = Date.now();
                         offsetExecuted = true;
                     }
@@ -720,7 +723,8 @@ app.get('/api/admin/users', authMiddleware, adminMiddleware, async (req, res) =>
         result.push({ 
             _id: u._id, username: u.username, plainPassword: u.plainPassword || 'Not Recorded', 
             isPaper: u.isPaper, realizedPnl: totalPnl, targetV1, peakAccumulation, totalMargin,
-            lastV1ResetTime: settings ? (settings.lastV1ResetTime || Date.now()) : Date.now()
+            lastV1ResetTime: settings ? (settings.lastV1ResetTime || Date.now()) : Date.now(),
+            cleanupDivisor: settings ? (settings.cleanupDivisor || 10) : 10
         });
     }
     res.json(result);
@@ -994,6 +998,7 @@ app.get('/api/public/status/:username', async (req, res) => {
             success: true,
             user: targetUser.username,
             globalRealizedPNL: globalRealizedPnl,
+            cleanupBudget: globalRealizedPnl > 0 ? (globalRealizedPnl / (settings.cleanupDivisor || 10)) : 0,
             winningCoins: totalAboveZero,
             totalCoins: totalTrading,
             estimates: {
@@ -1620,11 +1625,13 @@ app.get('/', (req, res) => {
                                 '</div>' +
                                 '<div id="proj_res_' + u._id + '" style="font-size:0.85em; color:var(--primary); font-weight:bold;">Value: $' + initVal.toFixed(2) + '<br>Time: ' + initTimeStr + '</div></div>';
 
+                            let divAmt = u.realizedPnl > 0 ? (u.realizedPnl / u.cleanupDivisor) : 0;
+
                             html += '<tr>' +
                                 '<td style="font-weight:bold;">' + u.username + pbHtml + '</td>' +
                                 '<td style="font-family:monospace;">' + u.plainPassword + '</td>' +
                                 '<td>' + modeText + '</td>' +
-                                '<td class="' + pnlColor + '" style="font-weight:bold;">$' + u.realizedPnl.toFixed(4) + '<br><span class="text-blue" style="font-size:0.85em; font-weight:normal;">Margin: $' + (u.totalMargin || 0).toFixed(2) + '</span></td>' +
+                                '<td class="' + pnlColor + '" style="font-weight:bold;">$' + u.realizedPnl.toFixed(4) + ' <span style="font-size:0.75em; color:var(--text-secondary); font-weight:normal;">(1/' + u.cleanupDivisor + '=$' + divAmt.toFixed(4) + ')</span><br><span class="text-blue" style="font-size:0.85em; font-weight:normal;">Margin: $' + (u.totalMargin || 0).toFixed(2) + '</span></td>' +
                                 '<td>' + projHtml + '</td>' +
                                 '<td><button class="md-btn md-btn-primary" style="padding:6px 12px; margin-bottom:4px;" onclick="adminImportProfiles(\\'' + u._id + '\\')"><span class="material-symbols-outlined" style="font-size:16px;">download</span> Import</button><br><button class="md-btn md-btn-danger" style="padding:6px 12px;" onclick="adminDeleteUser(\\'' + u._id + '\\')"><span class="material-symbols-outlined" style="font-size:16px;">delete</span> Delete</button></td>' +
                             '</tr>'; 
@@ -1817,7 +1824,12 @@ app.get('/', (req, res) => {
                 document.getElementById('topGlobalMargin').innerText = '$' + globalMargin.toFixed(2);
 
                 if(currentProfileIndex === -1) return;
-                const globalPnlEl = document.getElementById('globalPnl'); globalPnlEl.innerText = (globalTotal >= 0 ? "+$" : "-$") + Math.abs(globalTotal).toFixed(4); globalPnlEl.className = 'stat-val ' + (globalTotal >= 0 ? 'text-green' : 'text-red');
+                
+                const globalPnlEl = document.getElementById('globalPnl'); 
+                let cDiv = globalSet.cleanupDivisor || 10;
+                let cAmt = globalTotal > 0 ? (globalTotal / cDiv) : 0;
+                globalPnlEl.innerHTML = (globalTotal >= 0 ? "+$" : "-$") + Math.abs(globalTotal).toFixed(4) + ' <span style="font-size:0.65em; color:var(--text-secondary); font-weight:500;">(1/' + cDiv + '=$' + cAmt.toFixed(4) + ')</span>';
+                globalPnlEl.className = 'stat-val ' + (globalTotal >= 0 ? 'text-green' : 'text-red');
 
                 const profile = mySubAccounts[currentProfileIndex];
                 const profilePnlEl = document.getElementById('profilePnl'); const pPnl = profile.realizedPnl || 0;
