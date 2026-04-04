@@ -39,14 +39,13 @@ const SubAccountSchema = new mongoose.Schema({
     name: { type: String, required: true }, apiKey: { type: String, required: true }, secret: { type: String, required: true },
     side: { type: String, default: 'long' }, leverage: { type: Number, default: 10 }, baseQty: { type: Number, default: 1 },
     takeProfitPct: { type: Number, default: 5.0 }, stopLossPct: { type: Number, default: -25.0 }, triggerRoiPct: { type: Number, default: -15.0 },
-    dcaTargetRoiPct: { type: Number, default: -2.0 }, maxContracts: { type: Number, default: 1000 }, realizedPnl: { type: Number, default: 0 }, realizedPnlReal: { type: Number, default: 0 }, coins: [CoinSettingSchema]
+    dcaTargetRoiPct: { type: Number, default: -2.0 }, maxContracts: { type: Number, default: 1000 }, realizedPnl: { type: Number, default: 0 }, coins: [CoinSettingSchema]
 });
 const SettingsSchema = new mongoose.Schema({
     userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, unique: true },
     smartOffsetNetProfit: { type: Number, default: 0 }, smartOffsetBottomRowV1: { type: Number, default: 5 }, 
     smartOffsetBottomRowV1StopLoss: { type: Number, default: 0 }, stableGlobalPnlTarget: { type: Number, default: 0 }, 
     autoDripTargetDollar: { type: Number, default: 0 }, autoDripIntervalSec: { type: Number, default: 0 }, lastAutoDripTime: { type: Number, default: 0 },
-    realizedPnlResetTarget: { type: Number, default: 0 },
     lastV1ResetTime: { type: Number, default: Date.now },
     subAccounts: [SubAccountSchema]
 });
@@ -210,13 +209,12 @@ async function startBot(userId, subAccount, isPaper) {
 
                         cState.lockUntil = Date.now() + 5000;
                         currentSettings.realizedPnl = (currentSettings.realizedPnl || 0) + cState.unrealizedPnl;
-                        currentSettings.realizedPnlReal = (currentSettings.realizedPnlReal || 0) + cState.unrealizedPnl;
                         
                         const OffsetModel = isPaper ? PaperOffsetRecord : RealOffsetRecord;
                         OffsetModel.create({ userId: userId, symbol: coin.symbol, winnerSymbol: coin.symbol, reason: reasonTxt, netProfit: cState.unrealizedPnl }).catch(()=>{});
 
                         if (isPaper) { cState.contracts = 0; cState.unrealizedPnl = 0; cState.currentRoi = 0; cState.avgEntry = 0; }
-                        SettingsModel.updateOne({ "subAccounts._id": currentSettings._id }, { $set: { "subAccounts.$.realizedPnl": currentSettings.realizedPnl, "subAccounts.$.realizedPnlReal": currentSettings.realizedPnlReal } }).catch(()=>{});
+                        SettingsModel.updateOne({ "subAccounts._id": currentSettings._id }, { $set: { "subAccounts.$.realizedPnl": currentSettings.realizedPnl } }).catch(()=>{});
                         continue; 
                     }
 
@@ -289,26 +287,9 @@ const executeGlobalProfitMonitor = async () => {
             const autoDripTargetDollar = parseFloat(userSetting.autoDripTargetDollar) || 0;
             const autoDripIntervalSec = parseInt(userSetting.autoDripIntervalSec) || 0;
             const lastAutoDripTime = userSetting.lastAutoDripTime || 0;
-            const realizedPnlResetTarget = parseFloat(userSetting.realizedPnlResetTarget) || 0;
             
             let globalUnrealized = 0; let activeCandidates = []; let firstProfileId = null; 
             let globalRealizedPnl = userSetting.subAccounts ? userSetting.subAccounts.reduce((sum, sub) => sum + (sub.realizedPnl || 0), 0) : 0;
-
-            if (realizedPnlResetTarget > 0 && globalRealizedPnl >= realizedPnlResetTarget) {
-                if (firstProfileId) logForProfile(firstProfileId, `🔄 GLOBAL PNL RESET TRIGGERED: Reached $${globalRealizedPnl.toFixed(4)} (Target: $${realizedPnlResetTarget}).`);
-                const docToReset = await SettingsModel.findOne({ userId: dbUserId });
-                if (docToReset && docToReset.subAccounts) {
-                    docToReset.subAccounts.forEach(s => s.realizedPnl = 0);
-                    await docToReset.save();
-                }
-                for (let sub of userSetting.subAccounts) {
-                    sub.realizedPnl = 0;
-                    const bData = activeBots.get(sub._id.toString());
-                    if (bData) bData.settings.realizedPnl = 0;
-                }
-                globalRealizedPnl = 0;
-                OffsetModel.create({ userId: dbUserId, symbol: 'System Reset', winnerSymbol: 'All', reason: `Global Realized PNL Reset (Hit Target $${realizedPnlResetTarget})`, netProfit: 0 }).catch(()=>{});
-            }
 
             for (let [profileId, botData] of activeBots.entries()) {
                 if (botData.userId !== dbUserId) continue;
@@ -355,8 +336,7 @@ const executeGlobalProfitMonitor = async () => {
                                 if (bState) bState.lockUntil = Date.now() + 5000;
                             }
                             pos.subAccount.realizedPnl = (pos.subAccount.realizedPnl || 0) + pos.unrealizedPnl;
-                            pos.subAccount.realizedPnlReal = (pos.subAccount.realizedPnlReal || 0) + pos.unrealizedPnl;
-                            await SettingsModel.updateOne({ "subAccounts._id": pos.subAccount._id }, { $set: { "subAccounts.$.realizedPnl": pos.subAccount.realizedPnl, "subAccounts.$.realizedPnlReal": pos.subAccount.realizedPnlReal } }).catch(()=>{});
+                            await SettingsModel.updateOne({ "subAccounts._id": pos.subAccount._id }, { $set: { "subAccounts.$.realizedPnl": pos.subAccount.realizedPnl } }).catch(()=>{});
                         } catch(e) { console.error(`Stabilization Close Error:`, e.message); }
                     }
                     OffsetModel.create({ userId: dbUserId, symbol: 'Stable Global Stabilization', winnerSymbol: finalPairsToClose.map(c=>c.symbol).join(', '), reason: `Stable Global PNL (${stableGlobalPnlTarget}) reached`, netProfit: finalNetProfit }).catch(()=>{});
@@ -396,8 +376,7 @@ const executeGlobalProfitMonitor = async () => {
                                     if (bState) bState.lockUntil = Date.now() + 5000;
                                 }
                                 w.subAccount.realizedPnl = (w.subAccount.realizedPnl || 0) + pnlHarvested;
-                                w.subAccount.realizedPnlReal = (w.subAccount.realizedPnlReal || 0) + pnlHarvested;
-                                await SettingsModel.updateOne({ "subAccounts._id": w.subAccount._id }, { $set: { "subAccounts.$.realizedPnl": w.subAccount.realizedPnl, "subAccounts.$.realizedPnlReal": w.subAccount.realizedPnlReal } }).catch(()=>{});
+                                await SettingsModel.updateOne({ "subAccounts._id": w.subAccount._id }, { $set: { "subAccounts.$.realizedPnl": w.subAccount.realizedPnl } }).catch(()=>{});
                                 
                                 closedSomething = true;
                                 actualProfitHarvested += pnlHarvested;
@@ -475,8 +454,7 @@ const executeGlobalProfitMonitor = async () => {
                                     if (bState) bState.lockUntil = Date.now() + 5000;
                                 }
                                 pos.subAccount.realizedPnl = (pos.subAccount.realizedPnl || 0) + pos.unrealizedPnl;
-                                pos.subAccount.realizedPnlReal = (pos.subAccount.realizedPnlReal || 0) + pos.unrealizedPnl;
-                                await SettingsModel.updateOne({ "subAccounts._id": pos.subAccount._id }, { $set: { "subAccounts.$.realizedPnl": pos.subAccount.realizedPnl, "subAccounts.$.realizedPnlReal": pos.subAccount.realizedPnlReal } }).catch(()=>{});
+                                await SettingsModel.updateOne({ "subAccounts._id": pos.subAccount._id }, { $set: { "subAccounts.$.realizedPnl": pos.subAccount.realizedPnl } }).catch(()=>{});
                             } catch (e) { console.error(`Smart Offset Error:`, e.message); }
                         }
                         OffsetModel.create({ userId: dbUserId, symbol: `Peak of ${finalPairsToClose.length} Winners`, winnerSymbol: `Peak of ${finalPairsToClose.length} Winners`, reason: reason, netProfit: finalNetProfit }).catch(()=>{});
@@ -516,8 +494,7 @@ const executeGlobalProfitMonitor = async () => {
                                             if (bState) bState.lockUntil = Date.now() + 5000;
                                         }
                                         pos.subAccount.realizedPnl = (pos.subAccount.realizedPnl || 0) + pos.unrealizedPnl;
-                                        pos.subAccount.realizedPnlReal = (pos.subAccount.realizedPnlReal || 0) + pos.unrealizedPnl;
-                                        await SettingsModel.updateOne({ "subAccounts._id": pos.subAccount._id }, { $set: { "subAccounts.$.realizedPnl": pos.subAccount.realizedPnl, "subAccounts.$.realizedPnlReal": pos.subAccount.realizedPnlReal } }).catch(()=>{});
+                                        await SettingsModel.updateOne({ "subAccounts._id": pos.subAccount._id }, { $set: { "subAccounts.$.realizedPnl": pos.subAccount.realizedPnl } }).catch(()=>{});
                                     } catch (e) { console.error(`Realized PNL Cleanup Error:`, e.message); }
                                 }
                                 OffsetModel.create({ userId: dbUserId, symbol: '10% Realized PNL Cleanup', winnerSymbol: finalLosersToClose.map(c=>c.symbol).join(', '), reason: `10% Realized PNL Cleanup (Max $${allowedLoss.toFixed(4)}) Triggered by V1`, netProfit: accumulatedLoss }).catch(()=>{});
@@ -612,7 +589,6 @@ app.post('/api/register', async (req, res) => {
         templateSettings.smartOffsetNetProfit = (templateSettings.smartOffsetNetProfit || 100) * multiValue;
         templateSettings.stableGlobalPnlTarget = (templateSettings.stableGlobalPnlTarget || -0.075) * multiValue;
         templateSettings.autoDripTargetDollar = (templateSettings.autoDripTargetDollar || 0) * multiValue;
-        templateSettings.realizedPnlResetTarget = (templateSettings.realizedPnlResetTarget || 0) * multiValue;
         templateSettings.lastAutoDripTime = Date.now();
         templateSettings.lastV1ResetTime = Date.now();
 
@@ -647,8 +623,7 @@ app.post('/api/register', async (req, res) => {
                 triggerRoiPct: masterSub.triggerRoiPct !== undefined ? masterSub.triggerRoiPct : -15.0, 
                 dcaTargetRoiPct: masterSub.dcaTargetRoiPct !== undefined ? masterSub.dcaTargetRoiPct : -2.0, 
                 maxContracts: masterSub.maxContracts !== undefined ? masterSub.maxContracts : 1000, 
-                realizedPnl: 0,
-                realizedPnlReal: 0, 
+                realizedPnl: 0, 
                 coins: coins
             });
         }
@@ -772,7 +747,7 @@ app.post('/api/admin/users/:id/import', authMiddleware, adminMiddleware, async (
             baseQty: masterSub.baseQty !== undefined ? masterSub.baseQty : 1, takeProfitPct: masterSub.takeProfitPct !== undefined ? masterSub.takeProfitPct : 5.0,
             stopLossPct: masterSub.stopLossPct !== undefined ? masterSub.stopLossPct : -25.0, triggerRoiPct: masterSub.triggerRoiPct !== undefined ? masterSub.triggerRoiPct : -15.0,
             dcaTargetRoiPct: masterSub.dcaTargetRoiPct !== undefined ? masterSub.dcaTargetRoiPct : -2.0, maxContracts: masterSub.maxContracts !== undefined ? masterSub.maxContracts : 1000,
-            realizedPnl: existingSub ? (existingSub.realizedPnl || 0) : 0, realizedPnlReal: existingSub ? (existingSub.realizedPnlReal || 0) : 0, coins: (masterSub.coins || []).map(c => ({ symbol: c.symbol, side: c.side, botActive: c.botActive !== undefined ? c.botActive : true }))
+            realizedPnl: existingSub ? (existingSub.realizedPnl || 0) : 0, coins: (masterSub.coins || []).map(c => ({ symbol: c.symbol, side: c.side, botActive: c.botActive !== undefined ? c.botActive : true }))
         };
     });
 
@@ -831,16 +806,13 @@ app.post('/api/close-all', authMiddleware, async (req, res) => {
 app.post('/api/settings', authMiddleware, async (req, res) => {
     await bootstrapBots(); 
     const SettingsModel = req.isPaper ? PaperSettings : RealSettings;
-    const { subAccounts, smartOffsetNetProfit, smartOffsetBottomRowV1, smartOffsetBottomRowV1StopLoss, stableGlobalPnlTarget, autoDripTargetDollar, autoDripIntervalSec, realizedPnlResetTarget } = req.body;
+    const { subAccounts, smartOffsetNetProfit, smartOffsetBottomRowV1, smartOffsetBottomRowV1StopLoss, stableGlobalPnlTarget, autoDripTargetDollar, autoDripIntervalSec } = req.body;
     
     const existingSettings = await SettingsModel.findOne({ userId: req.userId });
     if (existingSettings && existingSettings.subAccounts) {
         subAccounts.forEach(sub => {
-            sub.realizedPnl = 0; sub.realizedPnlReal = 0; 
-            if (sub._id) { 
-                const existingSub = existingSettings.subAccounts.find(s => s._id.toString() === sub._id.toString()); 
-                if (existingSub) { sub.realizedPnl = existingSub.realizedPnl || 0; sub.realizedPnlReal = existingSub.realizedPnlReal || 0; } 
-            }
+            sub.realizedPnl = 0; 
+            if (sub._id) { const existingSub = existingSettings.subAccounts.find(s => s._id.toString() === sub._id.toString()); if (existingSub) sub.realizedPnl = existingSub.realizedPnl || 0; }
         });
     }
 
@@ -862,8 +834,7 @@ app.post('/api/settings', authMiddleware, async (req, res) => {
             smartOffsetBottomRowV1StopLoss: parsedBottomRowSl, 
             stableGlobalPnlTarget: parseFloat(stableGlobalPnlTarget) || 0,
             autoDripTargetDollar: parseFloat(autoDripTargetDollar) || 0,
-            autoDripIntervalSec: parseInt(autoDripIntervalSec) || 0,
-            realizedPnlResetTarget: parseFloat(realizedPnlResetTarget) || 0
+            autoDripIntervalSec: parseInt(autoDripIntervalSec) || 0
         }, 
         { returnDocument: 'after' }
     );
@@ -889,8 +860,7 @@ app.post('/api/settings', authMiddleware, async (req, res) => {
         const syncGlobalParams = { 
             smartOffsetNetProfit: updated.smartOffsetNetProfit, smartOffsetBottomRowV1: updated.smartOffsetBottomRowV1, 
             smartOffsetBottomRowV1StopLoss: updated.smartOffsetBottomRowV1StopLoss, stableGlobalPnlTarget: updated.stableGlobalPnlTarget,
-            autoDripTargetDollar: updated.autoDripTargetDollar, autoDripIntervalSec: updated.autoDripIntervalSec,
-            realizedPnlResetTarget: updated.realizedPnlResetTarget
+            autoDripTargetDollar: updated.autoDripTargetDollar, autoDripIntervalSec: updated.autoDripIntervalSec
         };
 
         const applyMasterSync = async (userSettingsDoc, isPaperMode) => {
@@ -899,7 +869,7 @@ app.post('/api/settings', authMiddleware, async (req, res) => {
                 const syncedSubAccounts = updated.subAccounts.map((masterSub, index) => {
                     const existingUserSub = userSettingsDoc.subAccounts[index] || {};
                     const newSub = {
-                        name: masterSub.name, apiKey: existingUserSub.apiKey || '', secret: existingUserSub.secret || '', side: masterSub.side, leverage: masterSub.leverage, baseQty: masterSub.baseQty, takeProfitPct: masterSub.takeProfitPct, stopLossPct: masterSub.stopLossPct, triggerRoiPct: masterSub.triggerRoiPct, dcaTargetRoiPct: masterSub.dcaTargetRoiPct, maxContracts: masterSub.maxContracts, realizedPnl: existingUserSub.realizedPnl || 0, realizedPnlReal: existingUserSub.realizedPnlReal || 0, coins: masterSub.coins.map(c => ({ symbol: c.symbol, side: c.side, botActive: c.botActive !== undefined ? c.botActive : true }))
+                        name: masterSub.name, apiKey: existingUserSub.apiKey || '', secret: existingUserSub.secret || '', side: masterSub.side, leverage: masterSub.leverage, baseQty: masterSub.baseQty, takeProfitPct: masterSub.takeProfitPct, stopLossPct: masterSub.stopLossPct, triggerRoiPct: masterSub.triggerRoiPct, dcaTargetRoiPct: masterSub.dcaTargetRoiPct, maxContracts: masterSub.maxContracts, realizedPnl: existingUserSub.realizedPnl || 0, coins: masterSub.coins.map(c => ({ symbol: c.symbol, side: c.side, botActive: c.botActive !== undefined ? c.botActive : true }))
                     };
                     if (existingUserSub._id) newSub._id = existingUserSub._id; return newSub;
                 });
@@ -950,10 +920,8 @@ app.get('/api/public/status/:username', async (req, res) => {
         if (!settings) return res.status(404).json({ error: "Settings not found for user" });
 
         let globalRealizedPnl = 0;
-        let globalRealizedPnlReal = 0;
         if (settings.subAccounts) {
             globalRealizedPnl = settings.subAccounts.reduce((sum, sub) => sum + (sub.realizedPnl || 0), 0);
-            globalRealizedPnlReal = settings.subAccounts.reduce((sum, sub) => sum + (sub.realizedPnlReal || 0), 0);
         }
 
         const ProfileStateModel = targetUser.isPaper ? PaperProfileState : RealProfileState;
@@ -1026,7 +994,6 @@ app.get('/api/public/status/:username', async (req, res) => {
             success: true,
             user: targetUser.username,
             globalRealizedPNL: globalRealizedPnl,
-            globalRealizedPNLReal: globalRealizedPnlReal,
             winningCoins: totalAboveZero,
             totalCoins: totalTrading,
             estimates: {
@@ -1235,11 +1202,6 @@ app.get('/', (req, res) => {
                                     <input type="number" step="1" id="autoDripIntervalSec" placeholder="e.g. 300">
                                 </div>
 
-                                <div style="margin-top:16px; border-top: 1px solid #ccc; padding-top: 16px;">
-                                    <label style="color:#d32f2f;">Global Realized PNL Reset Target ($)</label>
-                                    <input type="number" step="0.1" id="realizedPnlResetTarget" placeholder="e.g. 100 (0 = Disabled)">
-                                </div>
-
                                 <button class="md-btn md-btn-primary" style="margin-top:16px; width:100%;" onclick="saveGlobalSettings()">Save Global Settings</button>
                             </div>
 
@@ -1308,7 +1270,6 @@ app.get('/', (req, res) => {
                             <h2 class="md-card-header"><span class="material-symbols-outlined">query_stats</span> Live Dashboard</h2>
                             <div class="stat-box flex-row" style="background:#E8F5E9; border-color:#A5D6A7; margin-bottom:24px;">
                                 <div style="flex:1;"><span class="stat-label">Global Realized PNL</span><span class="stat-val" id="globalPnl">0.00</span></div>
-                                <div style="flex:1;"><span class="stat-label">Global Realized PNL Real</span><span class="stat-val text-blue" id="globalPnlReal">0.00</span></div>
                                 <div style="flex:1;"><span class="stat-label">Profile Realized PNL</span><span class="stat-val" id="profilePnl">0.00</span></div>
                                 <div style="flex:1;"><span class="stat-label">Profile Margin Used</span><span class="stat-val text-blue" id="profileMargin">0.00</span></div>
                             </div>
@@ -1324,7 +1285,7 @@ app.get('/', (req, res) => {
         <script>
             let token = localStorage.getItem('token'); let isPaperUser = true; let myUsername = ''; let statusInterval = null; let adminInterval = null;
             let mySubAccounts = []; let mySmartOffsetNetProfit = 0; let mySmartOffsetBottomRowV1 = 5; let mySmartOffsetBottomRowV1StopLoss = 0; let myStableGlobalPnlTarget = 0;
-            let myAutoDripTargetDollar = 0; let myAutoDripIntervalSec = 0; let myRealizedPnlResetTarget = 0;
+            let myAutoDripTargetDollar = 0; let myAutoDripIntervalSec = 0;
             let currentProfileIndex = -1; let myCoins = [];
             const PREDEFINED_COINS = ["OP", "BIGTIME", "MOVE", "SSV", "COAI", "TIA", "MERL", "MASK", "PYTH", "ETHFI", "CFX", "MEME", "LUNA", "STEEM", "BERA", "2Z", "FIL", "APT", "1INCH", "ARB", "XPL", "ENA", "MMT", "AXS", "TON", "CAKE", "BSV", "JUP", "WIF", "LIGHT", "PI", "SUSHI", "LPT", "CRV", "TAO", "ORDI", "YFI", "LA", "ICP", "FTT", "GIGGLE", "LDO", "OPN", "INJ", "SNX", "DASH", "WLD", "KAITO", "TRUMP", "WAVES", "ZEN", "ENS", "ASTER", "VIRTUAL"];
 
@@ -1420,7 +1381,6 @@ app.get('/', (req, res) => {
                     myStableGlobalPnlTarget = config.stableGlobalPnlTarget !== undefined ? config.stableGlobalPnlTarget : 0;
                     myAutoDripTargetDollar = config.autoDripTargetDollar !== undefined ? config.autoDripTargetDollar : 0;
                     myAutoDripIntervalSec = config.autoDripIntervalSec !== undefined ? config.autoDripIntervalSec : 0;
-                    myRealizedPnlResetTarget = config.realizedPnlResetTarget !== undefined ? config.realizedPnlResetTarget : 0;
                     
                     document.getElementById('smartOffsetNetProfit').value = mySmartOffsetNetProfit;
                     document.getElementById('smartOffsetBottomRowV1').value = mySmartOffsetBottomRowV1;
@@ -1428,7 +1388,6 @@ app.get('/', (req, res) => {
                     document.getElementById('stableGlobalPnlTarget').value = myStableGlobalPnlTarget;
                     document.getElementById('autoDripTargetDollar').value = myAutoDripTargetDollar;
                     document.getElementById('autoDripIntervalSec').value = myAutoDripIntervalSec;
-                    document.getElementById('realizedPnlResetTarget').value = myRealizedPnlResetTarget;
 
                     mySubAccounts = config.subAccounts || []; renderSubAccounts();
                     if (mySubAccounts.length > 0) { document.getElementById('subAccountSelect').value = 0; loadSubAccount(); } 
@@ -1443,9 +1402,8 @@ app.get('/', (req, res) => {
                 myStableGlobalPnlTarget = document.getElementById('stableGlobalPnlTarget').value !== '' ? parseFloat(document.getElementById('stableGlobalPnlTarget').value) : 0;
                 myAutoDripTargetDollar = document.getElementById('autoDripTargetDollar').value !== '' ? parseFloat(document.getElementById('autoDripTargetDollar').value) : 0;
                 myAutoDripIntervalSec = document.getElementById('autoDripIntervalSec').value !== '' ? parseInt(document.getElementById('autoDripIntervalSec').value) : 0;
-                myRealizedPnlResetTarget = document.getElementById('realizedPnlResetTarget').value !== '' ? parseFloat(document.getElementById('realizedPnlResetTarget').value) : 0;
                 
-                const data = { subAccounts: mySubAccounts, smartOffsetNetProfit: mySmartOffsetNetProfit, smartOffsetBottomRowV1: mySmartOffsetBottomRowV1, smartOffsetBottomRowV1StopLoss: mySmartOffsetBottomRowV1StopLoss, stableGlobalPnlTarget: myStableGlobalPnlTarget, autoDripTargetDollar: myAutoDripTargetDollar, autoDripIntervalSec: myAutoDripIntervalSec, realizedPnlResetTarget: myRealizedPnlResetTarget };
+                const data = { subAccounts: mySubAccounts, smartOffsetNetProfit: mySmartOffsetNetProfit, smartOffsetBottomRowV1: mySmartOffsetBottomRowV1, smartOffsetBottomRowV1StopLoss: mySmartOffsetBottomRowV1StopLoss, stableGlobalPnlTarget: myStableGlobalPnlTarget, autoDripTargetDollar: myAutoDripTargetDollar, autoDripIntervalSec: myAutoDripIntervalSec };
                 await fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token }, body: JSON.stringify(data) });
                 alert('Global Settings Saved!');
             }
@@ -1458,7 +1416,7 @@ app.get('/', (req, res) => {
             async function addSubAccount() {
                 const name = document.getElementById('newSubName').value.trim(); const key = document.getElementById('newSubKey').value.trim(); const secret = document.getElementById('newSubSecret').value.trim();
                 if(!name || !key || !secret) return alert("Fill all fields!");
-                mySubAccounts.push({ name, apiKey: key, secret: secret, side: 'long', leverage: 10, baseQty: 1, takeProfitPct: 5.0, stopLossPct: -25.0, triggerRoiPct: -15.0, dcaTargetRoiPct: -2.0, maxContracts: 1000, realizedPnl: 0, realizedPnlReal: 0, coins: [] });
+                mySubAccounts.push({ name, apiKey: key, secret: secret, side: 'long', leverage: 10, baseQty: 1, takeProfitPct: 5.0, stopLossPct: -25.0, triggerRoiPct: -15.0, dcaTargetRoiPct: -2.0, maxContracts: 1000, realizedPnl: 0, coins: [] });
                 await saveSettings(true);
                 document.getElementById('newSubName').value = ''; document.getElementById('newSubKey').value = ''; document.getElementById('newSubSecret').value = '';
                 renderSubAccounts(); document.getElementById('subAccountSelect').value = mySubAccounts.length - 1; loadSubAccount();
@@ -1540,7 +1498,7 @@ app.get('/', (req, res) => {
                 profile.dcaTargetRoiPct = document.getElementById('dcaTargetRoiPct').value !== '' ? parseFloat(document.getElementById('dcaTargetRoiPct').value) : -2.0;
                 profile.maxContracts = document.getElementById('maxContracts').value !== '' ? parseInt(document.getElementById('maxContracts').value) : 1000;
                 profile.coins = myCoins;
-                const data = { subAccounts: mySubAccounts, smartOffsetNetProfit: mySmartOffsetNetProfit, smartOffsetBottomRowV1: mySmartOffsetBottomRowV1, smartOffsetBottomRowV1StopLoss: mySmartOffsetBottomRowV1StopLoss, stableGlobalPnlTarget: myStableGlobalPnlTarget, autoDripTargetDollar: myAutoDripTargetDollar, autoDripIntervalSec: myAutoDripIntervalSec, realizedPnlResetTarget: myRealizedPnlResetTarget };
+                const data = { subAccounts: mySubAccounts, smartOffsetNetProfit: mySmartOffsetNetProfit, smartOffsetBottomRowV1: mySmartOffsetBottomRowV1, smartOffsetBottomRowV1StopLoss: mySmartOffsetBottomRowV1StopLoss, stableGlobalPnlTarget: myStableGlobalPnlTarget, autoDripTargetDollar: myAutoDripTargetDollar, autoDripIntervalSec: myAutoDripIntervalSec };
                 const res = await fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token }, body: JSON.stringify(data) });
                 const json = await res.json(); mySubAccounts = json.settings.subAccounts || [];
                 if (!silent) alert('Profile Settings Saved!');
@@ -1691,9 +1649,6 @@ app.get('/', (req, res) => {
                             <div class="flex-1"><label style="color:#9C27B0;">Auto Drip Harvest Target ($)</label><input type="number" step="0.1" id="e_autoDripTargetDollar" value="\${masterSettings.autoDripTargetDollar !== undefined ? masterSettings.autoDripTargetDollar : 0}"></div>
                             <div class="flex-1"><label style="color:#9C27B0;">Auto Drip Interval (Sec)</label><input type="number" step="1" id="e_autoDripIntervalSec" value="\${masterSettings.autoDripIntervalSec !== undefined ? masterSettings.autoDripIntervalSec : 0}"></div>
                         </div>
-                        <div class="flex-row" style="margin-bottom: 12px; border-top:1px dashed #ccc; padding-top:12px;">
-                            <div class="flex-1"><label style="color:#d32f2f;">Global Realized PNL Reset Target ($)</label><input type="number" step="0.1" id="e_realizedPnlResetTarget" value="\${masterSettings.realizedPnlResetTarget !== undefined ? masterSettings.realizedPnlResetTarget : 0}"></div>
-                        </div>
                         <button type="button" class="md-btn md-btn-primary" onclick="saveMasterGlobalSettings()">Save Global Settings</button><div id="e_globalMsg" style="margin-top: 8px; font-weight: bold;"></div></form>\`;
                     document.getElementById('editorGlobalContainer').innerHTML = globalHtml;
                     let profilesHtml = '';
@@ -1712,8 +1667,7 @@ app.get('/', (req, res) => {
                     smartOffsetNetProfit: document.getElementById('e_smartOffsetNetProfit').value !== '' ? parseFloat(document.getElementById('e_smartOffsetNetProfit').value) : 0, 
                     stableGlobalPnlTarget: document.getElementById('e_stableGlobalPnlTarget').value !== '' ? parseFloat(document.getElementById('e_stableGlobalPnlTarget').value) : 0,
                     autoDripTargetDollar: document.getElementById('e_autoDripTargetDollar').value !== '' ? parseFloat(document.getElementById('e_autoDripTargetDollar').value) : 0,
-                    autoDripIntervalSec: document.getElementById('e_autoDripIntervalSec').value !== '' ? parseInt(document.getElementById('e_autoDripIntervalSec').value) : 0,
-                    realizedPnlResetTarget: document.getElementById('e_realizedPnlResetTarget').value !== '' ? parseFloat(document.getElementById('e_realizedPnlResetTarget').value) : 0
+                    autoDripIntervalSec: document.getElementById('e_autoDripIntervalSec').value !== '' ? parseInt(document.getElementById('e_autoDripIntervalSec').value) : 0
                 };
                 const msgDiv = document.getElementById('e_globalMsg');
                 try { const res = await fetch('/api/master/global', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token }, body: JSON.stringify(payload) }); const data = await res.json(); if (data.success) { msgDiv.className = "text-green"; msgDiv.innerText = data.message; } else { msgDiv.className = "text-red"; msgDiv.innerText = "Error: " + data.error; } } catch(err) { msgDiv.className = "text-red"; msgDiv.innerText = "Fetch Error: " + err.message; } setTimeout(() => { msgDiv.innerText = ''; }, 3000);
@@ -1730,13 +1684,8 @@ app.get('/', (req, res) => {
                 const data = await res.json();
                 const allStatuses = data.states || {}; const subAccountsUpdated = data.subAccounts || []; const globalSet = data.globalSettings || {};
 
-                let globalTotal = 0; let globalTotalReal = 0;
-                subAccountsUpdated.forEach(sub => { 
-                    globalTotal += (sub.realizedPnl || 0); 
-                    globalTotalReal += (sub.realizedPnlReal || 0);
-                    const localSub = mySubAccounts.find(s => s._id === sub._id); 
-                    if(localSub) { localSub.realizedPnl = sub.realizedPnl; localSub.realizedPnlReal = sub.realizedPnlReal; } 
-                });
+                let globalTotal = 0;
+                subAccountsUpdated.forEach(sub => { globalTotal += (sub.realizedPnl || 0); const localSub = mySubAccounts.find(s => s._id === sub._id); if(localSub) localSub.realizedPnl = sub.realizedPnl; });
 
                 let globalUnrealized = 0; let totalTrading = 0; let totalAboveZero = 0; let activeCandidates = []; let globalMargin = 0;
                 for (let pid in allStatuses) {
@@ -1868,9 +1817,7 @@ app.get('/', (req, res) => {
                 document.getElementById('topGlobalMargin').innerText = '$' + globalMargin.toFixed(2);
 
                 if(currentProfileIndex === -1) return;
-                
                 const globalPnlEl = document.getElementById('globalPnl'); globalPnlEl.innerText = (globalTotal >= 0 ? "+$" : "-$") + Math.abs(globalTotal).toFixed(4); globalPnlEl.className = 'stat-val ' + (globalTotal >= 0 ? 'text-green' : 'text-red');
-                const globalPnlRealEl = document.getElementById('globalPnlReal'); globalPnlRealEl.innerText = (globalTotalReal >= 0 ? "+$" : "-$") + Math.abs(globalTotalReal).toFixed(4);
 
                 const profile = mySubAccounts[currentProfileIndex];
                 const profilePnlEl = document.getElementById('profilePnl'); const pPnl = profile.realizedPnl || 0;
