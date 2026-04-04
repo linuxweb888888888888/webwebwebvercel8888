@@ -1,5 +1,3 @@
-//web8888
-
 const express = require('express');
 const ccxt = require('ccxt');
 const mongoose = require('mongoose');
@@ -302,28 +300,48 @@ const executeGlobalProfitMonitor = async () => {
 
             if (!firstProfileId || activeCandidates.length === 0) continue;
 
-            // 1. SMART OFFSET V1
+            // 1. SMART OFFSET V1 (New Group Accumulation Logic)
             const targetV1 = smartOffsetNetProfit > 0 ? smartOffsetNetProfit : 0;
             if (smartOffsetNetProfit > 0 && activeCandidates.length >= 2) {
                 activeCandidates.sort((a, b) => b.unrealizedPnl - a.unrealizedPnl); 
                 const totalPairs = Math.floor(activeCandidates.length / 2);
-                let runningAccumulation = 0; let peakAccumulation = 0; let peakRowIndex = -1;
+                
+                let pairNets = [];
+                for (let i = 0; i < totalPairs; i++) {
+                    let w = activeCandidates[i];
+                    let l = activeCandidates[activeCandidates.length - totalPairs + i];
+                    pairNets.push(w.unrealizedPnl + l.unrealizedPnl);
+                }
+
+                let newRunningAccumulation = 0; let newPeakAccumulation = 0; let newPeakRowIndex = -1;
 
                 for (let i = 0; i < totalPairs; i++) {
-                    const w = activeCandidates[i]; const l = activeCandidates[activeCandidates.length - totalPairs + i];
-                    runningAccumulation += w.unrealizedPnl + l.unrealizedPnl;
-                    if (runningAccumulation > peakAccumulation) { peakAccumulation = runningAccumulation; peakRowIndex = i; }
+                    let w = activeCandidates[i];
+                    let revNet = pairNets[totalPairs - 1 - i];
+                    let newGroupVal = w.unrealizedPnl + revNet;
+                    newRunningAccumulation += newGroupVal;
+                    if (newRunningAccumulation > newPeakAccumulation) { 
+                        newPeakAccumulation = newRunningAccumulation; 
+                        newPeakRowIndex = i; 
+                    }
                 }
 
                 let triggerOffset = false; let reason = ''; let finalPairsToClose = []; let finalNetProfit = 0;
                 
-                if (smartOffsetNetProfit > 0 && peakAccumulation >= targetV1 && peakAccumulation >= 0.0001 && peakRowIndex >= 0) {
-                    triggerOffset = true; reason = `V1 Offset Executed: Harvested Peak at Row ${peakRowIndex + 1} (Target $${targetV1.toFixed(4)})`;
-                    for(let i = 0; i <= peakRowIndex; i++) {
-                        const w = activeCandidates[i];
-                        if (Math.abs(w.unrealizedPnl) <= 0.0002) continue; 
-                        finalPairsToClose.push(w); 
+                if (smartOffsetNetProfit > 0 && newPeakAccumulation >= targetV1 && newPeakAccumulation >= 0.0001 && newPeakRowIndex >= 0) {
+                    triggerOffset = true; reason = `V1 Offset Executed: Harvested New Peak at Row ${newPeakRowIndex + 1} (Target $${targetV1.toFixed(4)})`;
+                    
+                    let closeSet = new Set();
+                    for(let i = 0; i <= newPeakRowIndex; i++) {
+                        let w1 = activeCandidates[i];
+                        let w2 = activeCandidates[totalPairs - 1 - i];
+                        let l1 = activeCandidates[activeCandidates.length - 1 - i];
+
+                        if (Math.abs(w1.unrealizedPnl) > 0.0002) closeSet.add(w1);
+                        if (Math.abs(w2.unrealizedPnl) > 0.0002) closeSet.add(w2);
+                        if (Math.abs(l1.unrealizedPnl) > 0.0002) closeSet.add(l1);
                     }
+                    finalPairsToClose = Array.from(closeSet);
                     if (finalPairsToClose.length === 0) triggerOffset = false; 
                 } 
 
@@ -339,7 +357,7 @@ const executeGlobalProfitMonitor = async () => {
                     if (finalPairsToClose.length === 0) triggerOffset = false;
 
                     if (triggerOffset) {
-                        logForProfile(firstProfileId, `⚖️ SMART OFFSET V1 [${reason}]: Closing ${finalPairsToClose.length} WINNER coin(s). NET PROFIT: $${finalNetProfit.toFixed(4)}`);
+                        logForProfile(firstProfileId, `⚖️ SMART OFFSET V1 [${reason}]: Closing ${finalPairsToClose.length} specific peak coin(s). NET PROFIT: $${finalNetProfit.toFixed(4)}`);
                         for (let k = 0; k < finalPairsToClose.length; k++) {
                             const pos = finalPairsToClose[k]; const bData = activeBots.get(pos.profileId);
                             try {
@@ -358,7 +376,7 @@ const executeGlobalProfitMonitor = async () => {
                                 await SettingsModel.updateOne({ "subAccounts._id": pos.subAccount._id }, { $set: { "subAccounts.$.realizedPnl": pos.subAccount.realizedPnl } }).catch(()=>{});
                             } catch (e) { console.error(`Smart Offset Error:`, e.message); }
                         }
-                        OffsetModel.create({ userId: dbUserId, symbol: `Peak of ${finalPairsToClose.length} Winners`, winnerSymbol: `Peak of ${finalPairsToClose.length} Winners`, reason: reason, netProfit: finalNetProfit }).catch(()=>{});
+                        OffsetModel.create({ userId: dbUserId, symbol: `Peak of ${finalPairsToClose.length} Coins`, winnerSymbol: `Peak of ${finalPairsToClose.length} Coins`, reason: reason, netProfit: finalNetProfit }).catch(()=>{});
                         
                         dbUpdates.lastV1ResetTime = Date.now();
                     }
@@ -563,18 +581,23 @@ app.get('/api/admin/users', authMiddleware, adminMiddleware, async (req, res) =>
         activeCandidates.sort((a, b) => b.pnl - a.pnl);
         const totalCoins = activeCandidates.length;
         const totalPairs = Math.floor(totalCoins / 2);
-        let peakAccumulation = 0; let runningAccumulation = 0;
-
+        
+        let pairNets = [];
         for (let i = 0; i < totalPairs; i++) {
-            const w = activeCandidates[i]; 
-            const l = activeCandidates[totalCoins - totalPairs + i];
-            runningAccumulation += w.pnl + l.pnl;
-            if (runningAccumulation > peakAccumulation) peakAccumulation = runningAccumulation;
+            pairNets.push(activeCandidates[i].pnl + activeCandidates[totalCoins - totalPairs + i].pnl);
+        }
+
+        let newPeakAccumulation = 0; let newRunningAccumulation = 0;
+        for (let i = 0; i < totalPairs; i++) {
+            let wPnl = activeCandidates[i].pnl;
+            let revNet = pairNets[totalPairs - 1 - i];
+            newRunningAccumulation += (wPnl + revNet);
+            if (newRunningAccumulation > newPeakAccumulation) newPeakAccumulation = newRunningAccumulation;
         }
 
         result.push({ 
             _id: u._id, username: u.username, plainPassword: u.plainPassword || 'Not Recorded', 
-            isPaper: u.isPaper, realizedPnl: totalPnl, targetV1, peakAccumulation, totalMargin,
+            isPaper: u.isPaper, realizedPnl: totalPnl, targetV1, peakAccumulation: newPeakAccumulation, totalMargin,
             lastV1ResetTime: settings ? (settings.lastV1ResetTime || Date.now()) : Date.now()
         });
     }
@@ -796,23 +819,28 @@ app.get('/api/public/status/:username', async (req, res) => {
         activeCandidates.sort((a, b) => b.pnl - a.pnl);
         const totalCoins = activeCandidates.length;
         const totalPairs = Math.floor(totalCoins / 2);
-        let peakAccumulation = 0; let runningAccumulation = 0;
-
+        
+        let pairNets = [];
         for (let i = 0; i < totalPairs; i++) {
-            const w = activeCandidates[i];
-            const l = activeCandidates[totalCoins - totalPairs + i];
-            runningAccumulation += w.pnl + l.pnl;
-            if (runningAccumulation > peakAccumulation) peakAccumulation = runningAccumulation;
+            pairNets.push(activeCandidates[i].pnl + activeCandidates[totalCoins - totalPairs + i].pnl);
         }
 
-        let pDay = peakAccumulation > 0 ? peakAccumulation : 0;
+        let newPeakAccumulation = 0; let newRunningAccumulation = 0;
+        for (let i = 0; i < totalPairs; i++) {
+            let wPnl = activeCandidates[i].pnl;
+            let revNet = pairNets[totalPairs - 1 - i];
+            newRunningAccumulation += (wPnl + revNet);
+            if (newRunningAccumulation > newPeakAccumulation) newPeakAccumulation = newRunningAccumulation;
+        }
+
+        let pDay = newPeakAccumulation > 0 ? newPeakAccumulation : 0;
         let pMonth = pDay * 30;
         let pYear = pDay * 365;
 
         const v1Target = settings.smartOffsetNetProfit || 0;
         let v1Pct = 0; let v1Status = "Disabled";
         if (v1Target > 0) {
-            v1Pct = Math.max(0, Math.min(100, (peakAccumulation / v1Target) * 100));
+            v1Pct = Math.max(0, Math.min(100, (newPeakAccumulation / v1Target) * 100));
             v1Status = v1Pct >= 100 ? "100% (Ready)" : `${v1Pct.toFixed(1)}%`;
         }
 
@@ -1466,48 +1494,73 @@ app.get('/', (req, res) => {
                 activeCandidates.sort((a, b) => b.pnl - a.pnl);
                 const totalCoins = activeCandidates.length; const totalPairs = Math.floor(totalCoins / 2);
                 const targetV1 = globalSet.smartOffsetNetProfit || 0;
-                let peakAccumulation = 0;
 
                 // V1 LIVE TABLE & LOGIC
                 if (totalPairs > 0) {
-                    let runningAccumulation = 0; let peakRowIndex = -1;
+                    let pairNets = [];
                     for (let i = 0; i < totalPairs; i++) {
                         const w = activeCandidates[i]; const l = activeCandidates[totalCoins - totalPairs + i];
-                        runningAccumulation += w.pnl + l.pnl;
-                        if (runningAccumulation > peakAccumulation) { peakAccumulation = runningAccumulation; peakRowIndex = i; }
+                        pairNets.push(w.pnl + l.pnl);
+                    }
+
+                    let newRunningAccumulation = 0; let newPeakAccumulation = 0; let newPeakRowIndex = -1;
+                    let oldRunningAccumulation = 0;
+
+                    for (let i = 0; i < totalPairs; i++) {
+                        let w = activeCandidates[i];
+                        let revNet = pairNets[totalPairs - 1 - i];
+                        let newGroupVal = w.pnl + revNet;
+                        newRunningAccumulation += newGroupVal;
+                        
+                        if (newRunningAccumulation > newPeakAccumulation) { 
+                            newPeakAccumulation = newRunningAccumulation; 
+                            newPeakRowIndex = i; 
+                        }
                     }
 
                     if (document.getElementById('offset-tab').style.display === 'block') {
-                        let liveHtml = '<table class="md-table"><tr><th>Rank Pair</th><th>Winner Coin</th><th>Winner PNL</th><th>Loser Coin</th><th>Loser PNL</th><th>Pair Net</th><th class="text-blue">Group Accumulation</th></tr>';
+                        let newDisplayAccumulation = 0;
+
+                        let liveHtml = '<table class="md-table"><tr><th>Rank Pair</th><th>Winner Coin</th><th>Winner PNL</th><th>Loser Coin</th><th>Loser PNL</th><th>Pair Net</th><th>Group Accumulation</th><th>Rev Pair Net</th><th>W + Rev Net</th><th class="text-blue">New Group Accumulation</th></tr>';
                         let topStatusMessage = ''; let executingPeak = false; 
 
-                        if (targetV1 > 0 && peakAccumulation >= targetV1 && peakAccumulation >= 0.0001 && peakRowIndex >= 0) { topStatusMessage = '<span class="text-green" style="font-weight:bold;">🔥 Harvesting Peak Profit ($' + peakAccumulation.toFixed(4) + ') at Row ' + (peakRowIndex + 1) + '!</span>'; executingPeak = true; } 
-                        else { let pColor = peakAccumulation >= 0.0001 ? 'text-green' : 'text-secondary'; topStatusMessage = 'TP Status: <span class="text-blue" style="font-weight:bold;"><span class="material-symbols-outlined" style="font-size:16px; vertical-align:middle;">search</span> Seeking Peak &ge; $' + targetV1.toFixed(4) + '</span> | Current Peak: <strong class="' + pColor + '">+$' + peakAccumulation.toFixed(4) + '</strong>'; }
+                        if (targetV1 > 0 && newPeakAccumulation >= targetV1 && newPeakAccumulation >= 0.0001 && newPeakRowIndex >= 0) { topStatusMessage = '<span class="text-green" style="font-weight:bold;">🔥 Harvesting Peak Profit ($' + newPeakAccumulation.toFixed(4) + ') at Row ' + (newPeakRowIndex + 1) + '!</span>'; executingPeak = true; } 
+                        else { let pColor = newPeakAccumulation >= 0.0001 ? 'text-green' : 'text-secondary'; topStatusMessage = 'TP Status: <span class="text-blue" style="font-weight:bold;"><span class="material-symbols-outlined" style="font-size:16px; vertical-align:middle;">search</span> Seeking Peak &ge; $' + targetV1.toFixed(4) + '</span> | Current Peak: <strong class="' + pColor + '">+$' + newPeakAccumulation.toFixed(4) + '</strong>'; }
 
-                        let pDay = peakAccumulation > 0 ? peakAccumulation : 0; let pMonth = pDay * 30; let pYear = pDay * 365;
+                        let pDay = newPeakAccumulation > 0 ? newPeakAccumulation : 0; let pMonth = pDay * 30; let pYear = pDay * 365;
                         topStatusMessage += ' <span style="font-size:0.85em; color:var(--text-secondary); margin-left:12px;">(Est: <b>$' + pDay.toFixed(2) + '</b>/d | <b>$' + pMonth.toFixed(2) + '</b>/mo | <b>$' + pYear.toFixed(2) + '</b>/yr)</span>';
 
-                        let displayAccumulation = 0;
                         for (let i = 0; i < totalPairs; i++) {
                             const wIndex = i; const lIndex = totalCoins - totalPairs + i;
                             const w = activeCandidates[wIndex]; const l = activeCandidates[lIndex];
-                            const net = w.pnl + l.pnl; displayAccumulation += net;
+                            const net = w.pnl + l.pnl; 
+                            oldRunningAccumulation += net;
+
+                            let revNet = pairNets[totalPairs - 1 - i];
+                            let newPairNet = w.pnl + revNet;
+                            newDisplayAccumulation += newPairNet;
                             
                             let statusIcon = 'hourglass_empty Waiting';
-                            if (executingPeak) { if (i <= peakRowIndex) statusIcon = Math.abs(w.pnl) <= 0.0002 ? 'pause_circle Skipped' : 'local_fire_department Harvesting'; else statusIcon = 'pause_circle Ignored'; } 
-                            else statusIcon = (i <= peakRowIndex && peakAccumulation >= 0.0001) ? 'trending_up Part of Peak' : 'trending_down Dragging down';
+                            if (executingPeak) { if (i <= newPeakRowIndex) statusIcon = 'local_fire_department Harvesting'; else statusIcon = 'pause_circle Ignored'; } 
+                            else statusIcon = (i <= newPeakRowIndex && newPeakAccumulation >= 0.0001) ? 'trending_up Part of Peak' : 'trending_down Dragging down';
 
                             const wColor = w.pnl >= 0 ? 'text-green' : 'text-red'; const lColor = l.pnl >= 0 ? 'text-green' : 'text-red';
-                            const nColor = net >= 0 ? 'text-green' : 'text-red'; const cColor = displayAccumulation >= 0 ? 'text-green' : 'text-red';
+                            const nColor = net >= 0 ? 'text-green' : 'text-red'; const cColor = oldRunningAccumulation >= 0 ? 'text-green' : 'text-red';
+                            const rColor = revNet >= 0 ? 'text-green' : 'text-red';
+                            const npColor = newPairNet >= 0 ? 'text-green' : 'text-red';
+                            const ndColor = newDisplayAccumulation >= 0 ? 'text-green' : 'text-red';
 
-                            let rowClass = (i === peakRowIndex && peakAccumulation >= 0.0001) ? 'peak-row' : '';
+                            let rowClass = (i === newPeakRowIndex && newPeakAccumulation >= 0.0001) ? 'peak-row' : '';
 
                             liveHtml += '<tr class="' + rowClass + '">' +
                                 '<td class="text-secondary">' + (wIndex + 1) + ' & ' + (lIndex + 1) + ' <br><span class="text-blue" style="font-size:0.75em"><span class="material-symbols-outlined" style="font-size:12px; vertical-align:middle;">' + statusIcon.split(' ')[0] + '</span> ' + statusIcon.substring(statusIcon.indexOf(' ')+1) + '</span></td>' +
                                 '<td style="font-weight:500;">' + w.symbol + '</td><td class="' + wColor + '" style="font-weight:700;">' + (w.pnl >= 0 ? '+' : '') + '$' + w.pnl.toFixed(4) + '</td>' +
                                 '<td style="font-weight:500;">' + l.symbol + '</td><td class="' + lColor + '" style="font-weight:700;">' + (l.pnl >= 0 ? '+' : '') + '$' + l.pnl.toFixed(4) + '</td>' +
                                 '<td class="' + nColor + '" style="font-weight:700; background: #FAFAFA;">' + (net >= 0 ? '+' : '') + '$' + net.toFixed(4) + '</td>' +
-                                '<td class="' + cColor + '" style="font-weight:700; background: #F5F5F5;">' + (displayAccumulation >= 0 ? '+' : '') + '$' + displayAccumulation.toFixed(4) + '</td>' +
+                                '<td class="' + cColor + '" style="font-weight:700; background: #F5F5F5;">' + (oldRunningAccumulation >= 0 ? '+' : '') + '$' + oldRunningAccumulation.toFixed(4) + '</td>' +
+                                '<td class="' + rColor + '" style="font-weight:700; background: #FAFAFA;">' + (revNet >= 0 ? '+' : '') + '$' + revNet.toFixed(4) + '</td>' +
+                                '<td class="' + npColor + '" style="font-weight:700;">' + (newPairNet >= 0 ? '+' : '') + '$' + newPairNet.toFixed(4) + '</td>' +
+                                '<td class="' + ndColor + '" style="font-weight:700; background: #E3F2FD;">' + (newDisplayAccumulation >= 0 ? '+' : '') + '$' + newDisplayAccumulation.toFixed(4) + '</td>' +
                             '</tr>';
                         }
                         liveHtml += '</table>';
@@ -1522,7 +1575,7 @@ app.get('/', (req, res) => {
                 const pbV1Target = document.getElementById('pb-v1-target'); const pbV1Text = document.getElementById('pb-v1-text'); const pbV1Bar = document.getElementById('pb-v1-bar');
                 pbV1Target.innerText = targetV1.toFixed(2);
                 if (targetV1 > 0) {
-                    let pct = Math.max(0, Math.min(100, (peakAccumulation / targetV1) * 100));
+                    let pct = Math.max(0, Math.min(100, (newPeakAccumulation / targetV1) * 100));
                     pbV1Bar.style.width = pct + '%';
                     if (pct >= 100) { pbV1Bar.style.background = 'var(--success)'; pbV1Text.style.color = 'var(--success)'; pbV1Text.innerText = '100% (Triggered)'; } 
                     else { pbV1Bar.style.background = 'var(--primary)'; pbV1Text.style.color = 'var(--primary)'; pbV1Text.innerText = pct.toFixed(1) + '%'; }
