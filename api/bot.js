@@ -58,7 +58,7 @@ const PaperSettings = mongoose.models.PaperSettings || mongoose.model('PaperSett
 const RealOffsetRecord = mongoose.models.OffsetRecord || mongoose.model('OffsetRecord', OffsetRecordSchema, 'offset_records');
 const PaperOffsetRecord = mongoose.models.PaperOffsetRecord || mongoose.model('PaperOffsetRecord', OffsetRecordSchema, 'paper_offset_records');
 const RealProfileState = mongoose.models.ProfileState || mongoose.model('ProfileState', ProfileStateSchema, 'profile_states');
-const PaperProfileState = mongoose.models.PaperProfileState || mongoose.model('PaperProfileState', ProfileStateSchema, 'paper_profile_states');
+const PaperProfileState = mongoose.models.PaperProfileState || mongoose.model('PaperProfileState', ProfileStateSchema, 'profile_states');
 const MainTemplate = mongoose.models.MainTemplate || mongoose.model('MainTemplate', MainTemplateSchema, 'main_settings_template');
 
 // ==========================================
@@ -289,6 +289,7 @@ const executeGlobalProfitMonitor = async () => {
             const lastAutoDripTime = userSetting.lastAutoDripTime || 0;
             
             let globalUnrealized = 0; let activeCandidates = []; let firstProfileId = null; 
+            let globalRealizedPnl = userSetting.subAccounts ? userSetting.subAccounts.reduce((sum, sub) => sum + (sub.realizedPnl || 0), 0) : 0;
 
             for (let [profileId, botData] of activeBots.entries()) {
                 if (botData.userId !== dbUserId) continue;
@@ -460,6 +461,48 @@ const executeGlobalProfitMonitor = async () => {
                         
                         dbUpdates.lastV1ResetTime = Date.now();
                     }
+                }
+            }
+
+            // 4. REALIZED PNL 10% CLEANUP
+            if (!offsetExecuted && globalRealizedPnl > 0) {
+                const allowedLoss = globalRealizedPnl / 10;
+                let sortedLosers = activeCandidates.filter(c => c.unrealizedPnl < 0).sort((a, b) => a.unrealizedPnl - b.unrealizedPnl);
+                let finalLosersToClose = [];
+                let accumulatedLoss = 0;
+
+                for (let loser of sortedLosers) {
+                    if (Math.abs(accumulatedLoss + loser.unrealizedPnl) <= allowedLoss) {
+                        accumulatedLoss += loser.unrealizedPnl;
+                        finalLosersToClose.push(loser);
+                    } else {
+                        break;
+                    }
+                }
+
+                if (finalLosersToClose.length > 0) {
+                    logForProfile(firstProfileId, `🧹 10% REALIZED PNL CLEANUP: Target $${allowedLoss.toFixed(4)}. Closing ${finalLosersToClose.length} losers. Net Profit: $${accumulatedLoss.toFixed(4)}`);
+                    
+                    for (let k = 0; k < finalLosersToClose.length; k++) {
+                        const pos = finalLosersToClose[k]; const bData = activeBots.get(pos.profileId);
+                        try {
+                            if (bData) {
+                                if (!pos.isPaper) {
+                                    const closeSide = pos.side === 'long' ? 'sell' : 'buy';
+                                    await bData.exchange.createOrder(pos.symbol, 'market', closeSide, pos.contracts, undefined, { offset: 'close' });
+                                } else {
+                                    const bState = bData.state.coinStates[pos.symbol];
+                                    if (bState) { bState.contracts = 0; bState.unrealizedPnl = 0; }
+                                }
+                                const bState = bData.state.coinStates[pos.symbol];
+                                if (bState) bState.lockUntil = Date.now() + 5000;
+                            }
+                            pos.subAccount.realizedPnl = (pos.subAccount.realizedPnl || 0) + pos.unrealizedPnl;
+                            await SettingsModel.updateOne({ "subAccounts._id": pos.subAccount._id }, { $set: { "subAccounts.$.realizedPnl": pos.subAccount.realizedPnl } }).catch(()=>{});
+                        } catch (e) { console.error(`Realized PNL Cleanup Error:`, e.message); }
+                    }
+                    OffsetModel.create({ userId: dbUserId, symbol: '10% Realized PNL Cleanup', winnerSymbol: finalLosersToClose.map(c=>c.symbol).join(', '), reason: `10% Realized PNL Cleanup (Max $${allowedLoss.toFixed(4)})`, netProfit: accumulatedLoss }).catch(()=>{});
+                    offsetExecuted = true;
                 }
             }
 
