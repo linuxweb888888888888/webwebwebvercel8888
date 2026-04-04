@@ -1477,7 +1477,13 @@ app.get('/', (req, res) => {
                     }
 
                     if (document.getElementById('offset-tab').style.display === 'block') {
-                        let liveHtml = '<table class="md-table"><tr><th>Rank Pair</th><th>Winner Coin</th><th>Winner PNL</th><th>Loser Coin</th><th>Loser PNL</th><th>Pair Net</th><th class="text-blue">Group Accumulation</th></tr>';
+                        let pairNets = [];
+                        for (let i = 0; i < totalPairs; i++) {
+                            pairNets.push(activeCandidates[i].pnl + activeCandidates[totalCoins - totalPairs + i].pnl);
+                        }
+                        let newDisplayAccumulation = 0;
+
+                        let liveHtml = '<table class="md-table"><tr><th>Rank Pair</th><th>Winner Coin</th><th>Winner PNL</th><th>Loser Coin</th><th>Loser PNL</th><th>Pair Net</th><th class="text-blue">Group Accumulation</th><th>Rev Pair Net</th><th>W + Rev Net</th><th style="color:#9C27B0;">New Accumulation</th></tr>';
                         let topStatusMessage = ''; let executingPeak = false; 
 
                         if (targetV1 > 0 && peakAccumulation >= targetV1 && peakAccumulation >= 0.0001 && peakRowIndex >= 0) { topStatusMessage = '<span class="text-green" style="font-weight:bold;">🔥 Harvesting Peak Profit ($' + peakAccumulation.toFixed(4) + ') at Row ' + (peakRowIndex + 1) + '!</span>'; executingPeak = true; } 
@@ -1491,6 +1497,10 @@ app.get('/', (req, res) => {
                             const wIndex = i; const lIndex = totalCoins - totalPairs + i;
                             const w = activeCandidates[wIndex]; const l = activeCandidates[lIndex];
                             const net = w.pnl + l.pnl; displayAccumulation += net;
+
+                            let revNet = pairNets[totalPairs - 1 - i];
+                            let newPairNet = w.pnl + revNet;
+                            newDisplayAccumulation += newPairNet;
                             
                             let statusIcon = 'hourglass_empty Waiting';
                             if (executingPeak) { if (i <= peakRowIndex) statusIcon = Math.abs(w.pnl) <= 0.0002 ? 'pause_circle Skipped' : 'local_fire_department Harvesting'; else statusIcon = 'pause_circle Ignored'; } 
@@ -1498,6 +1508,9 @@ app.get('/', (req, res) => {
 
                             const wColor = w.pnl >= 0 ? 'text-green' : 'text-red'; const lColor = l.pnl >= 0 ? 'text-green' : 'text-red';
                             const nColor = net >= 0 ? 'text-green' : 'text-red'; const cColor = displayAccumulation >= 0 ? 'text-green' : 'text-red';
+                            const rColor = revNet >= 0 ? 'text-green' : 'text-red';
+                            const npColor = newPairNet >= 0 ? 'text-green' : 'text-red';
+                            const ndColor = newDisplayAccumulation >= 0 ? 'text-green' : 'text-red';
 
                             let rowClass = (i === peakRowIndex && peakAccumulation >= 0.0001) ? 'peak-row' : '';
 
@@ -1507,6 +1520,9 @@ app.get('/', (req, res) => {
                                 '<td style="font-weight:500;">' + l.symbol + '</td><td class="' + lColor + '" style="font-weight:700;">' + (l.pnl >= 0 ? '+' : '') + '$' + l.pnl.toFixed(4) + '</td>' +
                                 '<td class="' + nColor + '" style="font-weight:700; background: #FAFAFA;">' + (net >= 0 ? '+' : '') + '$' + net.toFixed(4) + '</td>' +
                                 '<td class="' + cColor + '" style="font-weight:700; background: #F5F5F5;">' + (displayAccumulation >= 0 ? '+' : '') + '$' + displayAccumulation.toFixed(4) + '</td>' +
+                                '<td class="' + rColor + '" style="font-weight:700; background: #FAFAFA;">' + (revNet >= 0 ? '+' : '') + '$' + revNet.toFixed(4) + '</td>' +
+                                '<td class="' + npColor + '" style="font-weight:700;">' + (newPairNet >= 0 ? '+' : '') + '$' + newPairNet.toFixed(4) + '</td>' +
+                                '<td class="' + ndColor + '" style="font-weight:700; background: #F3E5F5;">' + (newDisplayAccumulation >= 0 ? '+' : '') + '$' + newDisplayAccumulation.toFixed(4) + '</td>' +
                             '</tr>';
                         }
                         liveHtml += '</table>';
@@ -1586,4 +1602,3 @@ app.get('/', (req, res) => {
 // VERCEL EXPORT: Safe Execution Block
 if (require.main === module) { app.listen(PORT, () => console.log(`🚀 Running locally on http://localhost:${PORT}`)); }
 module.exports = app;
---- END OF FILE text/plain ---
