@@ -1,5 +1,3 @@
-//web8888
-
 const express = require('express');
 const ccxt = require('ccxt');
 const mongoose = require('mongoose');
@@ -1642,4 +1640,3 @@ app.get('/', (req, res) => {
 // VERCEL EXPORT: Safe Execution Block
 if (require.main === module) { app.listen(PORT, () => console.log(`🚀 Running locally on http://localhost:${PORT}`)); }
 module.exports = app;
---- END OF FILE text/plain ---
