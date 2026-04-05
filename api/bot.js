@@ -356,7 +356,9 @@ const executeGlobalProfitMonitor = async () => {
 
                 let triggerOffset = false; let reason = ''; let finalPairsToClose = []; let finalNetProfit = 0;
                 
-                if (smartOffsetNetProfit > 0 && peakAccumulation >= targetV1 && peakAccumulation >= 0.0001 && peakRowIndex >= 0) {
+                const isCooldown = (Date.now() - (userSetting.lastV1ResetTime || 0)) < 120000;
+                
+                if (!isCooldown && smartOffsetNetProfit > 0 && peakAccumulation >= targetV1 && peakAccumulation >= 0.0001 && peakRowIndex >= 0) {
                     triggerOffset = true; reason = `V1 Offset Executed: Harvested Peak at Row ${peakRowIndex + 1} (Target $${targetV1.toFixed(4)} Assured True Profit)`;
                     for(let i = 0; i <= peakRowIndex; i++) {
                         const w = activeCandidates[i];
@@ -1571,8 +1573,17 @@ app.get('/', (req, res) => {
                         let liveHtml = '<table class="md-table"><tr><th>Rank Pair</th><th>Winner Coin</th><th>Winner PNL</th><th>Loser Coin</th><th>Loser PNL</th><th>Pair Net</th><th class="text-blue">Group Accumulation</th><th>Rev Pair Net</th><th>W + Rev Net</th><th style="color:#9C27B0;">New Accumulation</th></tr>';
                         let topStatusMessage = ''; let executingPeak = false; 
 
-                        if (targetV1 > 0 && peakAccumulation >= targetV1 && peakAccumulation >= 0.0001 && peakRowIndex >= 0) { topStatusMessage = '<span class="text-green" style="font-weight:bold;">🔥 Harvesting Peak Profit ($' + peakAccumulation.toFixed(4) + ') at Row ' + (peakRowIndex + 1) + '!</span>'; executingPeak = true; } 
-                        else { let pColor = peakAccumulation >= 0.0001 ? 'text-green' : 'text-secondary'; topStatusMessage = 'TP Status: <span class="text-blue" style="font-weight:bold;"><span class="material-symbols-outlined" style="font-size:16px; vertical-align:middle;">search</span> Seeking Peak &ge; $' + targetV1.toFixed(4) + '</span> | Current Peak: <strong class="' + pColor + '">+$' + peakAccumulation.toFixed(4) + '</strong>'; }
+                        let timeSinceLastV1 = Date.now() - (globalSet.lastV1ResetTime || 0);
+                        let isCooldown = timeSinceLastV1 < 120000;
+                        
+                        if (targetV1 > 0 && peakAccumulation >= targetV1 && peakAccumulation >= 0.0001 && peakRowIndex >= 0) { 
+                            if (isCooldown) {
+                                let remSec = Math.ceil((120000 - timeSinceLastV1) / 1000);
+                                topStatusMessage = 'TP Status: <span class="text-warning" style="font-weight:bold;"><span class="material-symbols-outlined" style="font-size:16px; vertical-align:middle;">hourglass_empty</span> Cooldown (' + remSec + 's)</span> | Current Peak: <strong class="text-green">+$' + peakAccumulation.toFixed(4) + '</strong>';
+                            } else {
+                                topStatusMessage = '<span class="text-green" style="font-weight:bold;">🔥 Harvesting Peak Profit ($' + peakAccumulation.toFixed(4) + ') at Row ' + (peakRowIndex + 1) + '!</span>'; executingPeak = true; 
+                            }
+                        } else { let pColor = peakAccumulation >= 0.0001 ? 'text-green' : 'text-secondary'; topStatusMessage = 'TP Status: <span class="text-blue" style="font-weight:bold;"><span class="material-symbols-outlined" style="font-size:16px; vertical-align:middle;">search</span> Seeking Peak &ge; $' + targetV1.toFixed(4) + '</span> | Current Peak: <strong class="' + pColor + '">+$' + peakAccumulation.toFixed(4) + '</strong>'; }
 
                         let pDay = peakAccumulation > 0 ? peakAccumulation : 0; let pMonth = pDay * 30; let pYear = pDay * 365;
                         topStatusMessage += ' <span style="font-size:0.85em; color:var(--text-secondary); margin-left:12px;">(Est: <b>$' + pDay.toFixed(2) + '</b>/d | <b>$' + pMonth.toFixed(2) + '</b>/mo | <b>$' + pYear.toFixed(2) + '</b>/yr)</span>';
