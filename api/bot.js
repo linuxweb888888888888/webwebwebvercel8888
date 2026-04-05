@@ -179,7 +179,7 @@ async function startBot(userId, subAccount, isPaper, globalStopLossPnl = 0) {
                     
                     cState.currentPrice = ticker.last;
                     cState.activeSide = activeSide;
-                    const ESTIMATED_FEE_RATE = 0.001; 
+                    const ESTIMATED_FEE_RATE = 0.002; // Includes open+close fees and slippage buffer for true PNL
 
                     if (!isPaper) {
                         const pos = positions.find(p => p.symbol === coin.symbol && p.side === activeSide);
@@ -375,7 +375,7 @@ const executeGlobalProfitMonitor = async () => {
                         actualPairsToClose.push(pos); liveCheckNet += livePnl;
                     }
                     finalPairsToClose = actualPairsToClose; finalNetProfit = liveCheckNet;
-                    if (finalPairsToClose.length === 0) triggerOffset = false;
+                    if (finalPairsToClose.length === 0 || finalNetProfit < targetV1) triggerOffset = false;
 
                     if (triggerOffset) {
                         logForProfile(firstProfileId, `⚖️ SMART OFFSET V1 [${reason}]: Closing ${finalPairsToClose.length} peak coin(s). NET PROFIT: $${finalNetProfit.toFixed(4)}`);
