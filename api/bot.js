@@ -45,6 +45,7 @@ const SettingsSchema = new mongoose.Schema({
     userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, unique: true },
     smartOffsetNetProfit: { type: Number, default: 0 }, 
     globalStopLossPnl: { type: Number, default: 0 }, 
+    v1CooldownSeconds: { type: Number, default: 60 },
     lastV1ResetTime: { type: Number, default: Date.now },
     subAccounts: [SubAccountSchema]
 });
@@ -356,7 +357,8 @@ const executeGlobalProfitMonitor = async () => {
 
                 let triggerOffset = false; let reason = ''; let finalPairsToClose = []; let finalNetProfit = 0;
                 
-                const isCooldown = (Date.now() - (userSetting.lastV1ResetTime || 0)) < 120000;
+                const cooldownMs = (userSetting.v1CooldownSeconds || 60) * 1000;
+                const isCooldown = (Date.now() - (userSetting.lastV1ResetTime || 0)) < cooldownMs;
                 
                 if (!isCooldown && smartOffsetNetProfit > 0 && peakAccumulation >= targetV1 && peakAccumulation >= 0.0001 && peakRowIndex >= 0) {
                     triggerOffset = true; reason = `V1 Offset Executed: Harvested Peak at Row ${peakRowIndex + 1} (Target $${targetV1.toFixed(4)} Assured True Profit)`;
@@ -493,6 +495,7 @@ app.post('/api/register', async (req, res) => {
         const multiValue = parseFloat(multiplier) || 1;
         templateSettings.smartOffsetNetProfit = (templateSettings.smartOffsetNetProfit || 100) * multiValue;
         templateSettings.globalStopLossPnl = templateSettings.globalStopLossPnl || 0;
+        templateSettings.v1CooldownSeconds = templateSettings.v1CooldownSeconds || 60;
         templateSettings.lastV1ResetTime = Date.now();
 
         const PREDEFINED_COINS = ["OP", "BIGTIME", "MOVE", "SSV", "COAI", "TIA", "MERL", "MASK", "PYTH", "ETHFI", "CFX", "MEME", "LUNA", "STEEM", "BERA", "2Z", "FIL", "APT", "1INCH", "ARB", "XPL", "ENA", "MMT", "AXS", "TON", "CAKE", "BSV", "JUP", "WIF", "LIGHT", "PI", "SUSHI", "LPT", "CRV", "TAO", "ORDI", "YFI", "LA", "ICP", "FTT", "GIGGLE", "LDO", "OPN", "INJ", "SNX", "DASH", "WLD", "KAITO", "TRUMP", "WAVES", "ZEN", "ENS", "ASTER", "VIRTUAL"];
@@ -655,7 +658,7 @@ app.post('/api/admin/users/:id/import', authMiddleware, adminMiddleware, async (
     });
 
     for (let [profileId, botData] of activeBots.entries()) { if (botData.userId === String(id)) stopBot(profileId); }
-    const updatedUser = await SettingsModel.findOneAndUpdate({ userId: targetUser._id }, { $set: { subAccounts: newSubAccounts, globalStopLossPnl: templateSettings.globalStopLossPnl || 0 } }, { returnDocument: 'after', upsert: true });
+    const updatedUser = await SettingsModel.findOneAndUpdate({ userId: targetUser._id }, { $set: { subAccounts: newSubAccounts, globalStopLossPnl: templateSettings.globalStopLossPnl || 0, v1CooldownSeconds: templateSettings.v1CooldownSeconds || 60 } }, { returnDocument: 'after', upsert: true });
 
     if (updatedUser && updatedUser.subAccounts) { updatedUser.subAccounts.forEach(sub => { if (sub.coins && sub.coins.some(c => c.botActive) && sub.apiKey && sub.secret) { startBot(targetUser._id.toString(), sub, targetUser.isPaper, updatedUser.globalStopLossPnl).catch(()=>{}); } }); }
     res.json({ success: true, message: `Successfully imported Master Profiles for ${targetUser.username}.` });
@@ -710,7 +713,7 @@ app.post('/api/close-all', authMiddleware, async (req, res) => {
 app.post('/api/settings', authMiddleware, async (req, res) => {
     await bootstrapBots(); 
     const SettingsModel = req.isPaper ? PaperSettings : RealSettings;
-    const { subAccounts, smartOffsetNetProfit, globalStopLossPnl } = req.body;
+    const { subAccounts, smartOffsetNetProfit, globalStopLossPnl, v1CooldownSeconds } = req.body;
     
     const existingSettings = await SettingsModel.findOne({ userId: req.userId });
     if (existingSettings && existingSettings.subAccounts) {
@@ -729,13 +732,17 @@ app.post('/api/settings', authMiddleware, async (req, res) => {
 
     let finalGlobalSL = parseFloat(globalStopLossPnl) || 0;
     if (finalGlobalSL > 0) finalGlobalSL = -finalGlobalSL;
+    
+    let finalCooldown = parseInt(v1CooldownSeconds);
+    if (isNaN(finalCooldown) || finalCooldown < 1) finalCooldown = 60;
 
     const updated = await SettingsModel.findOneAndUpdate(
         { userId: req.userId }, 
         { 
             subAccounts, 
             smartOffsetNetProfit: parseFloat(smartOffsetNetProfit) || 0,
-            globalStopLossPnl: finalGlobalSL
+            globalStopLossPnl: finalGlobalSL,
+            v1CooldownSeconds: finalCooldown
         }, 
         { returnDocument: 'after' }
     );
@@ -762,7 +769,7 @@ app.post('/api/settings', authMiddleware, async (req, res) => {
         const allPaperUsers = await PaperSettings.find({ userId: { $ne: req.userId } });
         
         const applyMasterSync = async (userSettingsDoc, isPaperMode) => {
-            let updatePayload = { smartOffsetNetProfit: updated.smartOffsetNetProfit, globalStopLossPnl: updated.globalStopLossPnl };
+            let updatePayload = { smartOffsetNetProfit: updated.smartOffsetNetProfit, globalStopLossPnl: updated.globalStopLossPnl, v1CooldownSeconds: updated.v1CooldownSeconds };
             if (!isPaperMode) {
                 const syncedSubAccounts = updated.subAccounts.map((masterSub, index) => {
                     const existingUserSub = userSettingsDoc.subAccounts[index] || {};
@@ -1054,6 +1061,7 @@ app.get('/', (req, res) => {
                                 <div class="flex-row">
                                     <div style="flex:1;"><label>Offset V1 Target ($)</label><input type="number" step="0.1" id="smartOffsetNetProfit"></div>
                                     <div style="flex:1;"><label>Global SL ($ PNL)</label><input type="number" step="0.1" id="globalStopLossPnl" placeholder="0 = off"></div>
+                                    <div style="flex:1;"><label>Harvest Cooldown (s)</label><input type="number" step="1" id="v1CooldownSeconds" placeholder="e.g. 60"></div>
                                 </div>
                                 <button class="md-btn md-btn-primary" style="margin-top:16px; width:100%;" onclick="saveGlobalSettings()">Save Global Settings</button>
                             </div>
@@ -1137,7 +1145,7 @@ app.get('/', (req, res) => {
 
         <script>
             let token = localStorage.getItem('token'); let isPaperUser = true; let myUsername = ''; let statusInterval = null; let adminInterval = null;
-            let mySubAccounts = []; let mySmartOffsetNetProfit = 0; let myGlobalStopLossPnl = 0;
+            let mySubAccounts = []; let mySmartOffsetNetProfit = 0; let myGlobalStopLossPnl = 0; let myV1CooldownSeconds = 60;
             let currentProfileIndex = -1; let myCoins = [];
             const PREDEFINED_COINS = ["OP", "BIGTIME", "MOVE", "SSV", "COAI", "TIA", "MERL", "MASK", "PYTH", "ETHFI", "CFX", "MEME", "LUNA", "STEEM", "BERA", "2Z", "FIL", "APT", "1INCH", "ARB", "XPL", "ENA", "MMT", "AXS", "TON", "CAKE", "BSV", "JUP", "WIF", "LIGHT", "PI", "SUSHI", "LPT", "CRV", "TAO", "ORDI", "YFI", "LA", "ICP", "FTT", "GIGGLE", "LDO", "OPN", "INJ", "SNX", "DASH", "WLD", "KAITO", "TRUMP", "WAVES", "ZEN", "ENS", "ASTER", "VIRTUAL"];
 
@@ -1231,9 +1239,11 @@ app.get('/', (req, res) => {
                     const config = await res.json();
                     mySmartOffsetNetProfit = config.smartOffsetNetProfit !== undefined ? config.smartOffsetNetProfit : 0;
                     myGlobalStopLossPnl = config.globalStopLossPnl !== undefined ? config.globalStopLossPnl : 0;
+                    myV1CooldownSeconds = config.v1CooldownSeconds !== undefined ? config.v1CooldownSeconds : 60;
                     
                     document.getElementById('smartOffsetNetProfit').value = mySmartOffsetNetProfit;
                     document.getElementById('globalStopLossPnl').value = myGlobalStopLossPnl;
+                    document.getElementById('v1CooldownSeconds').value = myV1CooldownSeconds;
 
                     mySubAccounts = config.subAccounts || []; renderSubAccounts();
                     if (mySubAccounts.length > 0) { document.getElementById('subAccountSelect').value = 0; loadSubAccount(); } 
@@ -1244,8 +1254,9 @@ app.get('/', (req, res) => {
             async function saveGlobalSettings() {
                 mySmartOffsetNetProfit = document.getElementById('smartOffsetNetProfit').value !== '' ? parseFloat(document.getElementById('smartOffsetNetProfit').value) : 0;
                 myGlobalStopLossPnl = document.getElementById('globalStopLossPnl').value !== '' ? parseFloat(document.getElementById('globalStopLossPnl').value) : 0;
+                myV1CooldownSeconds = parseInt(document.getElementById('v1CooldownSeconds').value) || 60;
                 
-                const data = { subAccounts: mySubAccounts, smartOffsetNetProfit: mySmartOffsetNetProfit, globalStopLossPnl: myGlobalStopLossPnl };
+                const data = { subAccounts: mySubAccounts, smartOffsetNetProfit: mySmartOffsetNetProfit, globalStopLossPnl: myGlobalStopLossPnl, v1CooldownSeconds: myV1CooldownSeconds };
                 await fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token }, body: JSON.stringify(data) });
                 alert('Global Settings Saved!');
             }
@@ -1340,7 +1351,7 @@ app.get('/', (req, res) => {
                 profile.dcaTargetRoiPct = document.getElementById('dcaTargetRoiPct').value !== '' ? parseFloat(document.getElementById('dcaTargetRoiPct').value) : -2.0;
                 profile.maxContracts = document.getElementById('maxContracts').value !== '' ? parseInt(document.getElementById('maxContracts').value) : 1000;
                 profile.coins = myCoins;
-                const data = { subAccounts: mySubAccounts, smartOffsetNetProfit: mySmartOffsetNetProfit, globalStopLossPnl: parseFloat(document.getElementById('globalStopLossPnl').value) || 0 };
+                const data = { subAccounts: mySubAccounts, smartOffsetNetProfit: mySmartOffsetNetProfit, globalStopLossPnl: parseFloat(document.getElementById('globalStopLossPnl').value) || 0, v1CooldownSeconds: parseInt(document.getElementById('v1CooldownSeconds').value) || 60 };
                 const res = await fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token }, body: JSON.stringify(data) });
                 const json = await res.json(); mySubAccounts = json.settings.subAccounts || [];
                 if (!silent) alert('Profile Settings Saved!');
@@ -1486,6 +1497,7 @@ app.get('/', (req, res) => {
                         <div class="flex-row" style="margin-bottom: 12px;">
                             <div class="flex-1"><label>Smart Offset Target V1 ($)</label><input type="number" step="0.01" id="e_smartOffsetNetProfit" value="\${masterSettings.smartOffsetNetProfit !== undefined ? masterSettings.smartOffsetNetProfit : 0}"></div>
                             <div class="flex-1"><label>Global SL ($ PNL)</label><input type="number" step="0.01" id="e_globalStopLossPnl" value="\${masterSettings.globalStopLossPnl !== undefined ? masterSettings.globalStopLossPnl : 0}"></div>
+                            <div class="flex-1"><label>Harvest Cooldown (s)</label><input type="number" step="1" id="e_v1CooldownSeconds" value="\${masterSettings.v1CooldownSeconds !== undefined ? masterSettings.v1CooldownSeconds : 60}"></div>
                         </div>
                         <button type="button" class="md-btn md-btn-primary" onclick="saveMasterGlobalSettings()">Save Global Settings</button><div id="e_globalMsg" style="margin-top: 8px; font-weight: bold;"></div></form>\`;
                     document.getElementById('editorGlobalContainer').innerHTML = globalHtml;
@@ -1503,7 +1515,8 @@ app.get('/', (req, res) => {
             async function saveMasterGlobalSettings() {
                 const payload = { 
                     smartOffsetNetProfit: document.getElementById('e_smartOffsetNetProfit').value !== '' ? parseFloat(document.getElementById('e_smartOffsetNetProfit').value) : 0,
-                    globalStopLossPnl: document.getElementById('e_globalStopLossPnl').value !== '' ? parseFloat(document.getElementById('e_globalStopLossPnl').value) : 0
+                    globalStopLossPnl: document.getElementById('e_globalStopLossPnl').value !== '' ? parseFloat(document.getElementById('e_globalStopLossPnl').value) : 0,
+                    v1CooldownSeconds: parseInt(document.getElementById('e_v1CooldownSeconds').value) || 60
                 };
                 if (payload.globalStopLossPnl > 0) payload.globalStopLossPnl = -payload.globalStopLossPnl;
                 const msgDiv = document.getElementById('e_globalMsg');
@@ -1574,11 +1587,12 @@ app.get('/', (req, res) => {
                         let topStatusMessage = ''; let executingPeak = false; 
 
                         let timeSinceLastV1 = Date.now() - (globalSet.lastV1ResetTime || 0);
-                        let isCooldown = timeSinceLastV1 < 120000;
+                        let cooldownMs = (globalSet.v1CooldownSeconds !== undefined ? globalSet.v1CooldownSeconds : 60) * 1000;
+                        let isCooldown = timeSinceLastV1 < cooldownMs;
                         
                         if (targetV1 > 0 && peakAccumulation >= targetV1 && peakAccumulation >= 0.0001 && peakRowIndex >= 0) { 
                             if (isCooldown) {
-                                let remSec = Math.ceil((120000 - timeSinceLastV1) / 1000);
+                                let remSec = Math.ceil((cooldownMs - timeSinceLastV1) / 1000);
                                 topStatusMessage = 'TP Status: <span class="text-warning" style="font-weight:bold;"><span class="material-symbols-outlined" style="font-size:16px; vertical-align:middle;">hourglass_empty</span> Cooldown (' + remSec + 's)</span> | Current Peak: <strong class="text-green">+$' + peakAccumulation.toFixed(4) + '</strong>';
                             } else {
                                 topStatusMessage = '<span class="text-green" style="font-weight:bold;">🔥 Harvesting Peak Profit ($' + peakAccumulation.toFixed(4) + ') at Row ' + (peakRowIndex + 1) + '!</span>'; executingPeak = true; 
