@@ -377,12 +377,10 @@ const executeGlobalProfitMonitor = async () => {
                     }
                     finalPairsToClose = actualPairsToClose; finalNetProfit = liveCheckNet;
                     
-                    // TRUE PROFIT SAFETY BUFFER: 
-                    // Ensures the estimated final net profit surpasses the user's target 
-                    // by an extra $0.001 per coin being closed, guaranteeing market slippage doesn't cause a micro-loss.
-                    const slippageBuffer = finalPairsToClose.length * 0.001;
-
-                    if (finalPairsToClose.length === 0 || finalNetProfit < (targetV1 + slippageBuffer)) triggerOffset = false;
+                    // TRUE PROFIT SAFETY CHECK:
+                    // The unrealizedPnl already has a 0.25% fee+slippage deduction baked in. 
+                    // We just need to make sure the live re-calculated PNL hasn't dropped below the targetV1 in the last few milliseconds.
+                    if (finalPairsToClose.length === 0 || finalNetProfit < targetV1) triggerOffset = false;
 
                     if (triggerOffset) {
                         logForProfile(firstProfileId, `⚖️ SMART OFFSET V1 [${reason}]: Closing ${finalPairsToClose.length} peak coin(s). EST NET: $${finalNetProfit.toFixed(4)}`);
