@@ -46,6 +46,7 @@ const SettingsSchema = new mongoose.Schema({
     smartOffsetNetProfit: { type: Number, default: 0 }, 
     globalStopLossPnl: { type: Number, default: 0 }, 
     v1CooldownSeconds: { type: Number, default: 60 },
+    revPairTarget: { type: Number, default: 0 },
     lastV1ResetTime: { type: Number, default: Date.now },
     subAccounts: [SubAccountSchema]
 });
@@ -342,6 +343,55 @@ const executeGlobalProfitMonitor = async () => {
 
             if (!firstProfileId || activeCandidates.length === 0) continue;
 
+            // 0. REV PAIR NET TP
+            const revPairTarget = userSetting.revPairTarget || 0;
+            if (revPairTarget > 0 && activeCandidates.length >= 2) {
+                activeCandidates.sort((a, b) => b.unrealizedPnl - a.unrealizedPnl);
+                let totalPairs = Math.floor(activeCandidates.length / 2);
+                let pairsToClose = [];
+
+                for (let i = 0; i < totalPairs; i++) {
+                    const w = activeCandidates[i]; 
+                    const l = activeCandidates[activeCandidates.length - totalPairs + i];
+                    const bStateW = activeBots.get(w.profileId)?.state.coinStates[w.symbol];
+                    const bStateL = activeBots.get(l.profileId)?.state.coinStates[l.symbol];
+                    const liveW = bStateW ? (parseFloat(bStateW.unrealizedPnl) || 0) : w.unrealizedPnl;
+                    const liveL = bStateL ? (parseFloat(bStateL.unrealizedPnl) || 0) : l.unrealizedPnl;
+                    
+                    if ((liveW + liveL) >= revPairTarget) {
+                        pairsToClose.push({w, l, liveW, liveL});
+                    }
+                }
+
+                for (let pair of pairsToClose) {
+                    const {w, l, liveW, liveL} = pair;
+                    logForProfile(firstProfileId, `⚖️ REV PAIR TP: Closing ${w.symbol} & ${l.symbol}. NET: $${(liveW+liveL).toFixed(4)} >= Target $${revPairTarget}`);
+                    
+                    for (let pos of [w, l]) {
+                        const bData = activeBots.get(pos.profileId);
+                        try {
+                            if (bData) {
+                                if (!pos.isPaper) {
+                                    const closeSide = pos.side === 'long' ? 'sell' : 'buy';
+                                    await bData.exchange.createOrder(pos.symbol, 'market', closeSide, pos.contracts, undefined, { offset: 'close' });
+                                } else {
+                                    const bState = bData.state.coinStates[pos.symbol];
+                                    if (bState) { bState.contracts = 0; bState.unrealizedPnl = 0; }
+                                }
+                                const bState = bData.state.coinStates[pos.symbol];
+                                if (bState) bState.lockUntil = Date.now() + 5000;
+                            }
+                            pos.subAccount.realizedPnl = (pos.subAccount.realizedPnl || 0) + (pos === w ? liveW : liveL);
+                            await SettingsModel.updateOne({ "subAccounts._id": pos.subAccount._id }, { $set: { "subAccounts.$.realizedPnl": pos.subAccount.realizedPnl } }).catch(()=>{});
+                            applyAutoBalanceLogic(dbUserId, pos.profileId, pos.symbol, pos.side, SettingsModel);
+                        } catch(e) { console.error(`Rev Pair Error:`, e.message); }
+                    }
+                    OffsetModel.create({ userId: dbUserId, symbol: `${w.symbol} & ${l.symbol}`, winnerSymbol: w.symbol, loserSymbol: l.symbol, reason: `Rev Pair TP (Target $${revPairTarget})`, netProfit: liveW + liveL }).catch(()=>{});
+                    
+                    activeCandidates = activeCandidates.filter(c => c.symbol !== w.symbol && c.symbol !== l.symbol);
+                }
+            }
+
             // 1. SMART OFFSET V1
             const targetV1 = smartOffsetNetProfit > 0 ? smartOffsetNetProfit : 0;
             if (smartOffsetNetProfit > 0 && activeCandidates.length >= 2) {
@@ -496,6 +546,7 @@ app.post('/api/register', async (req, res) => {
         templateSettings.smartOffsetNetProfit = (templateSettings.smartOffsetNetProfit || 100) * multiValue;
         templateSettings.globalStopLossPnl = templateSettings.globalStopLossPnl || 0;
         templateSettings.v1CooldownSeconds = templateSettings.v1CooldownSeconds || 60;
+        templateSettings.revPairTarget = templateSettings.revPairTarget || 0;
         templateSettings.lastV1ResetTime = Date.now();
 
         const PREDEFINED_COINS = ["OP", "BIGTIME", "MOVE", "SSV", "COAI", "TIA", "MERL", "MASK", "PYTH", "ETHFI", "CFX", "MEME", "LUNA", "STEEM", "BERA", "2Z", "FIL", "APT", "1INCH", "ARB", "XPL", "ENA", "MMT", "AXS", "TON", "CAKE", "BSV", "JUP", "WIF", "LIGHT", "PI", "SUSHI", "LPT", "CRV", "TAO", "ORDI", "YFI", "LA", "ICP", "FTT", "GIGGLE", "LDO", "OPN", "INJ", "SNX", "DASH", "WLD", "KAITO", "TRUMP", "WAVES", "ZEN", "ENS", "ASTER", "VIRTUAL"];
@@ -658,7 +709,7 @@ app.post('/api/admin/users/:id/import', authMiddleware, adminMiddleware, async (
     });
 
     for (let [profileId, botData] of activeBots.entries()) { if (botData.userId === String(id)) stopBot(profileId); }
-    const updatedUser = await SettingsModel.findOneAndUpdate({ userId: targetUser._id }, { $set: { subAccounts: newSubAccounts, globalStopLossPnl: templateSettings.globalStopLossPnl || 0, v1CooldownSeconds: templateSettings.v1CooldownSeconds || 60 } }, { returnDocument: 'after', upsert: true });
+    const updatedUser = await SettingsModel.findOneAndUpdate({ userId: targetUser._id }, { $set: { subAccounts: newSubAccounts, globalStopLossPnl: templateSettings.globalStopLossPnl || 0, v1CooldownSeconds: templateSettings.v1CooldownSeconds || 60, revPairTarget: templateSettings.revPairTarget || 0 } }, { returnDocument: 'after', upsert: true });
 
     if (updatedUser && updatedUser.subAccounts) { updatedUser.subAccounts.forEach(sub => { if (sub.coins && sub.coins.some(c => c.botActive) && sub.apiKey && sub.secret) { startBot(targetUser._id.toString(), sub, targetUser.isPaper, updatedUser.globalStopLossPnl).catch(()=>{}); } }); }
     res.json({ success: true, message: `Successfully imported Master Profiles for ${targetUser.username}.` });
@@ -713,7 +764,7 @@ app.post('/api/close-all', authMiddleware, async (req, res) => {
 app.post('/api/settings', authMiddleware, async (req, res) => {
     await bootstrapBots(); 
     const SettingsModel = req.isPaper ? PaperSettings : RealSettings;
-    const { subAccounts, smartOffsetNetProfit, globalStopLossPnl, v1CooldownSeconds } = req.body;
+    const { subAccounts, smartOffsetNetProfit, globalStopLossPnl, v1CooldownSeconds, revPairTarget } = req.body;
     
     const existingSettings = await SettingsModel.findOne({ userId: req.userId });
     if (existingSettings && existingSettings.subAccounts) {
@@ -742,7 +793,8 @@ app.post('/api/settings', authMiddleware, async (req, res) => {
             subAccounts, 
             smartOffsetNetProfit: parseFloat(smartOffsetNetProfit) || 0,
             globalStopLossPnl: finalGlobalSL,
-            v1CooldownSeconds: finalCooldown
+            v1CooldownSeconds: finalCooldown,
+            revPairTarget: parseFloat(revPairTarget) || 0
         }, 
         { returnDocument: 'after' }
     );
@@ -769,7 +821,7 @@ app.post('/api/settings', authMiddleware, async (req, res) => {
         const allPaperUsers = await PaperSettings.find({ userId: { $ne: req.userId } });
         
         const applyMasterSync = async (userSettingsDoc, isPaperMode) => {
-            let updatePayload = { smartOffsetNetProfit: updated.smartOffsetNetProfit, globalStopLossPnl: updated.globalStopLossPnl, v1CooldownSeconds: updated.v1CooldownSeconds };
+            let updatePayload = { smartOffsetNetProfit: updated.smartOffsetNetProfit, globalStopLossPnl: updated.globalStopLossPnl, v1CooldownSeconds: updated.v1CooldownSeconds, revPairTarget: updated.revPairTarget };
             if (!isPaperMode) {
                 const syncedSubAccounts = updated.subAccounts.map((masterSub, index) => {
                     const existingUserSub = userSettingsDoc.subAccounts[index] || {};
@@ -1058,10 +1110,13 @@ app.get('/', (req, res) => {
                         <div class="md-card flex-1">
                             <h2 class="md-card-header"><span class="material-symbols-outlined">public</span> Global User Settings</h2>
                             <div class="stat-box" style="margin-bottom: 24px;">
-                                <div class="flex-row">
+                                <div class="flex-row" style="margin-bottom: 12px;">
                                     <div style="flex:1;"><label>Offset V1 Target ($)</label><input type="number" step="0.1" id="smartOffsetNetProfit"></div>
                                     <div style="flex:1;"><label>Global SL ($ PNL)</label><input type="number" step="0.1" id="globalStopLossPnl" placeholder="0 = off"></div>
+                                </div>
+                                <div class="flex-row">
                                     <div style="flex:1;"><label>Harvest Cooldown (s)</label><input type="number" step="1" id="v1CooldownSeconds" placeholder="e.g. 60"></div>
+                                    <div style="flex:1;"><label>Rev Pair Target ($)</label><input type="number" step="0.1" id="revPairTarget" placeholder="0 = off"></div>
                                 </div>
                                 <button class="md-btn md-btn-primary" style="margin-top:16px; width:100%;" onclick="saveGlobalSettings()">Save Global Settings</button>
                             </div>
@@ -1145,7 +1200,7 @@ app.get('/', (req, res) => {
 
         <script>
             let token = localStorage.getItem('token'); let isPaperUser = true; let myUsername = ''; let statusInterval = null; let adminInterval = null;
-            let mySubAccounts = []; let mySmartOffsetNetProfit = 0; let myGlobalStopLossPnl = 0; let myV1CooldownSeconds = 60;
+            let mySubAccounts = []; let mySmartOffsetNetProfit = 0; let myGlobalStopLossPnl = 0; let myV1CooldownSeconds = 60; let myRevPairTarget = 0;
             let currentProfileIndex = -1; let myCoins = [];
             const PREDEFINED_COINS = ["OP", "BIGTIME", "MOVE", "SSV", "COAI", "TIA", "MERL", "MASK", "PYTH", "ETHFI", "CFX", "MEME", "LUNA", "STEEM", "BERA", "2Z", "FIL", "APT", "1INCH", "ARB", "XPL", "ENA", "MMT", "AXS", "TON", "CAKE", "BSV", "JUP", "WIF", "LIGHT", "PI", "SUSHI", "LPT", "CRV", "TAO", "ORDI", "YFI", "LA", "ICP", "FTT", "GIGGLE", "LDO", "OPN", "INJ", "SNX", "DASH", "WLD", "KAITO", "TRUMP", "WAVES", "ZEN", "ENS", "ASTER", "VIRTUAL"];
 
@@ -1240,10 +1295,12 @@ app.get('/', (req, res) => {
                     mySmartOffsetNetProfit = config.smartOffsetNetProfit !== undefined ? config.smartOffsetNetProfit : 0;
                     myGlobalStopLossPnl = config.globalStopLossPnl !== undefined ? config.globalStopLossPnl : 0;
                     myV1CooldownSeconds = config.v1CooldownSeconds !== undefined ? config.v1CooldownSeconds : 60;
+                    myRevPairTarget = config.revPairTarget !== undefined ? config.revPairTarget : 0;
                     
                     document.getElementById('smartOffsetNetProfit').value = mySmartOffsetNetProfit;
                     document.getElementById('globalStopLossPnl').value = myGlobalStopLossPnl;
                     document.getElementById('v1CooldownSeconds').value = myV1CooldownSeconds;
+                    document.getElementById('revPairTarget').value = myRevPairTarget;
 
                     mySubAccounts = config.subAccounts || []; renderSubAccounts();
                     if (mySubAccounts.length > 0) { document.getElementById('subAccountSelect').value = 0; loadSubAccount(); } 
@@ -1255,8 +1312,9 @@ app.get('/', (req, res) => {
                 mySmartOffsetNetProfit = document.getElementById('smartOffsetNetProfit').value !== '' ? parseFloat(document.getElementById('smartOffsetNetProfit').value) : 0;
                 myGlobalStopLossPnl = document.getElementById('globalStopLossPnl').value !== '' ? parseFloat(document.getElementById('globalStopLossPnl').value) : 0;
                 myV1CooldownSeconds = parseInt(document.getElementById('v1CooldownSeconds').value) || 60;
+                myRevPairTarget = document.getElementById('revPairTarget').value !== '' ? parseFloat(document.getElementById('revPairTarget').value) : 0;
                 
-                const data = { subAccounts: mySubAccounts, smartOffsetNetProfit: mySmartOffsetNetProfit, globalStopLossPnl: myGlobalStopLossPnl, v1CooldownSeconds: myV1CooldownSeconds };
+                const data = { subAccounts: mySubAccounts, smartOffsetNetProfit: mySmartOffsetNetProfit, globalStopLossPnl: myGlobalStopLossPnl, v1CooldownSeconds: myV1CooldownSeconds, revPairTarget: myRevPairTarget };
                 await fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token }, body: JSON.stringify(data) });
                 alert('Global Settings Saved!');
             }
@@ -1351,7 +1409,7 @@ app.get('/', (req, res) => {
                 profile.dcaTargetRoiPct = document.getElementById('dcaTargetRoiPct').value !== '' ? parseFloat(document.getElementById('dcaTargetRoiPct').value) : -2.0;
                 profile.maxContracts = document.getElementById('maxContracts').value !== '' ? parseInt(document.getElementById('maxContracts').value) : 1000;
                 profile.coins = myCoins;
-                const data = { subAccounts: mySubAccounts, smartOffsetNetProfit: mySmartOffsetNetProfit, globalStopLossPnl: parseFloat(document.getElementById('globalStopLossPnl').value) || 0, v1CooldownSeconds: parseInt(document.getElementById('v1CooldownSeconds').value) || 60 };
+                const data = { subAccounts: mySubAccounts, smartOffsetNetProfit: mySmartOffsetNetProfit, globalStopLossPnl: parseFloat(document.getElementById('globalStopLossPnl').value) || 0, v1CooldownSeconds: parseInt(document.getElementById('v1CooldownSeconds').value) || 60, revPairTarget: parseFloat(document.getElementById('revPairTarget').value) || 0 };
                 const res = await fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token }, body: JSON.stringify(data) });
                 const json = await res.json(); mySubAccounts = json.settings.subAccounts || [];
                 if (!silent) alert('Profile Settings Saved!');
@@ -1497,7 +1555,10 @@ app.get('/', (req, res) => {
                         <div class="flex-row" style="margin-bottom: 12px;">
                             <div class="flex-1"><label>Smart Offset Target V1 ($)</label><input type="number" step="0.01" id="e_smartOffsetNetProfit" value="\${masterSettings.smartOffsetNetProfit !== undefined ? masterSettings.smartOffsetNetProfit : 0}"></div>
                             <div class="flex-1"><label>Global SL ($ PNL)</label><input type="number" step="0.01" id="e_globalStopLossPnl" value="\${masterSettings.globalStopLossPnl !== undefined ? masterSettings.globalStopLossPnl : 0}"></div>
+                        </div>
+                        <div class="flex-row" style="margin-bottom: 12px;">
                             <div class="flex-1"><label>Harvest Cooldown (s)</label><input type="number" step="1" id="e_v1CooldownSeconds" value="\${masterSettings.v1CooldownSeconds !== undefined ? masterSettings.v1CooldownSeconds : 60}"></div>
+                            <div class="flex-1"><label>Rev Pair Target ($)</label><input type="number" step="0.01" id="e_revPairTarget" value="\${masterSettings.revPairTarget !== undefined ? masterSettings.revPairTarget : 0}"></div>
                         </div>
                         <button type="button" class="md-btn md-btn-primary" onclick="saveMasterGlobalSettings()">Save Global Settings</button><div id="e_globalMsg" style="margin-top: 8px; font-weight: bold;"></div></form>\`;
                     document.getElementById('editorGlobalContainer').innerHTML = globalHtml;
@@ -1516,7 +1577,8 @@ app.get('/', (req, res) => {
                 const payload = { 
                     smartOffsetNetProfit: document.getElementById('e_smartOffsetNetProfit').value !== '' ? parseFloat(document.getElementById('e_smartOffsetNetProfit').value) : 0,
                     globalStopLossPnl: document.getElementById('e_globalStopLossPnl').value !== '' ? parseFloat(document.getElementById('e_globalStopLossPnl').value) : 0,
-                    v1CooldownSeconds: parseInt(document.getElementById('e_v1CooldownSeconds').value) || 60
+                    v1CooldownSeconds: parseInt(document.getElementById('e_v1CooldownSeconds').value) || 60,
+                    revPairTarget: document.getElementById('e_revPairTarget').value !== '' ? parseFloat(document.getElementById('e_revPairTarget').value) : 0
                 };
                 if (payload.globalStopLossPnl > 0) payload.globalStopLossPnl = -payload.globalStopLossPnl;
                 const msgDiv = document.getElementById('e_globalMsg');
