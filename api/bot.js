@@ -86,40 +86,21 @@ function calculateDcaQty(side, P0, Pc, C0, leverage, targetRoiPct) {
     return Math.ceil(Cn); 
 }
 
-function applyAutoBalanceLogic(userId, profileId, symbol, closedSide, SettingsModel) {
-    let userActiveLongs = 0; let userActiveShorts = 0;
-    for (let [pId, bData] of activeBots.entries()) {
-        if (bData.userId === String(userId)) {
-            for (let sym in bData.state.coinStates) {
-                let cs = bData.state.coinStates[sym];
-                if (pId === profileId && sym === symbol) continue; 
-                if (cs.contracts > 0) {
-                    if (cs.activeSide === 'long') userActiveLongs++;
-                    else if (cs.activeSide === 'short') userActiveShorts++;
-                }
-            }
-        }
-    }
-    
+function flipCoinSideOnStopLoss(profileId, symbol, SettingsModel) {
     let bData = activeBots.get(profileId);
     if (!bData) return;
     let coinObj = bData.settings.coins.find(c => c.symbol === symbol);
     if (!coinObj) return;
     
-    let sideChanged = false;
-    if (closedSide === 'long' && userActiveLongs > userActiveShorts) {
-        coinObj.side = 'short'; sideChanged = true;
-    } else if (closedSide === 'short' && userActiveShorts > userActiveLongs) {
-        coinObj.side = 'long'; sideChanged = true;
-    }
+    const oldSide = coinObj.side || bData.settings.side || 'long';
+    const newSide = oldSide === 'long' ? 'short' : 'long';
+    coinObj.side = newSide;
     
-    if (sideChanged) {
-        logForProfile(profileId, `⚖️ Auto-Balance: Flipped ${symbol} to ${coinObj.side.toUpperCase()} (Rest of Portfolio - L: ${userActiveLongs}, S: ${userActiveShorts})`);
-        SettingsModel.updateOne(
-            { "subAccounts._id": bData.settings._id },
-            { $set: { "subAccounts.$.coins": bData.settings.coins } }
-        ).catch(()=>{});
-    }
+    logForProfile(profileId, `🔄 Stop Loss Hit: Flipped ${symbol} direction from ${oldSide.toUpperCase()} to ${newSide.toUpperCase()}`);
+    SettingsModel.updateOne(
+        { "subAccounts._id": bData.settings._id },
+        { $set: { "subAccounts.$.coins": bData.settings.coins } }
+    ).catch(()=>{});
 }
 
 async function startBot(userId, subAccount, isPaper, globalStopLossPnl = 0) {
@@ -254,7 +235,10 @@ async function startBot(userId, subAccount, isPaper, globalStopLossPnl = 0) {
 
                         if (isPaper) { cState.contracts = 0; cState.unrealizedPnl = 0; cState.currentRoi = 0; cState.avgEntry = 0; }
                         SettingsModel.updateOne({ "subAccounts._id": currentSettings._id }, { $set: { "subAccounts.$.realizedPnl": currentSettings.realizedPnl } }).catch(()=>{});
-                        applyAutoBalanceLogic(userId, profileId, coin.symbol, activeSide, SettingsModel);
+                        
+                        if (isStopLossPct || isStopLossPnl) {
+                            flipCoinSideOnStopLoss(profileId, coin.symbol, SettingsModel);
+                        }
                         continue; 
                     }
 
@@ -383,7 +367,6 @@ const executeGlobalProfitMonitor = async () => {
                             }
                             pos.subAccount.realizedPnl = (pos.subAccount.realizedPnl || 0) + (pos === w ? liveW : liveL);
                             await SettingsModel.updateOne({ "subAccounts._id": pos.subAccount._id }, { $set: { "subAccounts.$.realizedPnl": pos.subAccount.realizedPnl } }).catch(()=>{});
-                            applyAutoBalanceLogic(dbUserId, pos.profileId, pos.symbol, pos.side, SettingsModel);
                         } catch(e) { console.error(`Rev Pair Error:`, e.message); }
                     }
                     OffsetModel.create({ userId: dbUserId, symbol: `${w.symbol} & ${l.symbol}`, winnerSymbol: w.symbol, loserSymbol: l.symbol, reason: `Rev Pair TP (Target $${revPairTarget})`, netProfit: liveW + liveL }).catch(()=>{});
@@ -454,7 +437,6 @@ const executeGlobalProfitMonitor = async () => {
                                 }
                                 pos.subAccount.realizedPnl = (pos.subAccount.realizedPnl || 0) + pos.unrealizedPnl;
                                 await SettingsModel.updateOne({ "subAccounts._id": pos.subAccount._id }, { $set: { "subAccounts.$.realizedPnl": pos.subAccount.realizedPnl } }).catch(()=>{});
-                                applyAutoBalanceLogic(dbUserId, pos.profileId, pos.symbol, pos.side, SettingsModel);
                             } catch (e) { console.error(`Smart Offset Error:`, e.message); }
                         }
                         OffsetModel.create({ userId: dbUserId, symbol: `Peak of ${finalPairsToClose.length} Coins`, winnerSymbol: `Peak of ${finalPairsToClose.length} Coins`, reason: reason, netProfit: finalNetProfit }).catch(()=>{});
@@ -753,7 +735,6 @@ app.post('/api/close-all', authMiddleware, async (req, res) => {
                     let closedPnl = 0;
                     if (botData.state.coinStates[pos.symbol]) { closedPnl = parseFloat(botData.state.coinStates[pos.symbol].unrealizedPnl) || 0; botData.state.coinStates[pos.symbol].lockUntil = Date.now() + 5000; }
                     OffsetModel.create({ userId: req.userId, symbol: pos.symbol, winnerSymbol: pos.symbol, reason: 'Emergency Panic Close', netProfit: closedPnl }).catch(()=>{});
-                    applyAutoBalanceLogic(req.userId.toString(), profileId, pos.symbol, pos.side, RealSettings);
                 }
             }
         }
@@ -1110,7 +1091,7 @@ app.get('/', (req, res) => {
                         <div class="md-card flex-1">
                             <h2 class="md-card-header"><span class="material-symbols-outlined">public</span> Global User Settings</h2>
                             <div class="stat-box" style="margin-bottom: 24px;">
-                                <div class="flex-row" style="margin-bottom: 12px;">
+                                <div class="flex-row">
                                     <div style="flex:1;"><label>Offset V1 Target ($)</label><input type="number" step="0.1" id="smartOffsetNetProfit"></div>
                                     <div style="flex:1;"><label>Global SL ($ PNL)</label><input type="number" step="0.1" id="globalStopLossPnl" placeholder="0 = off"></div>
                                 </div>
