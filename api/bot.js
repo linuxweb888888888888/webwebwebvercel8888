@@ -38,12 +38,14 @@ const CoinSettingSchema = new mongoose.Schema({ symbol: { type: String, required
 const SubAccountSchema = new mongoose.Schema({
     name: { type: String, required: true }, apiKey: { type: String, required: true }, secret: { type: String, required: true },
     side: { type: String, default: 'long' }, leverage: { type: Number, default: 10 }, baseQty: { type: Number, default: 1 },
-    takeProfitPct: { type: Number, default: 5.0 }, stopLossPct: { type: Number, default: -25.0 }, stopLossPnl: { type: Number, default: 0 }, triggerRoiPct: { type: Number, default: -15.0 },
+    takeProfitPct: { type: Number, default: 5.0 }, stopLossPct: { type: Number, default: -25.0 }, triggerRoiPct: { type: Number, default: -15.0 },
     dcaTargetRoiPct: { type: Number, default: -2.0 }, maxContracts: { type: Number, default: 1000 }, realizedPnl: { type: Number, default: 0 }, coins: [CoinSettingSchema]
 });
 const SettingsSchema = new mongoose.Schema({
     userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, unique: true },
-    smartOffsetNetProfit: { type: Number, default: 0 }, lastV1ResetTime: { type: Number, default: Date.now },
+    smartOffsetNetProfit: { type: Number, default: 0 }, 
+    globalStopLossPnl: { type: Number, default: 0 }, 
+    lastV1ResetTime: { type: Number, default: Date.now },
     subAccounts: [SubAccountSchema]
 });
 const OffsetRecordSchema = new mongoose.Schema({ userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true }, symbol: { type: String }, reason: { type: String }, winnerSymbol: { type: String }, winnerPnl: { type: Number }, loserSymbol: { type: String }, loserPnl: { type: Number }, netProfit: { type: Number, required: true }, timestamp: { type: Date, default: Date.now } });
@@ -118,7 +120,7 @@ function applyAutoBalanceLogic(userId, profileId, symbol, closedSide, SettingsMo
     }
 }
 
-async function startBot(userId, subAccount, isPaper) {
+async function startBot(userId, subAccount, isPaper, globalStopLossPnl = 0) {
     const userDoc = await User.findById(userId);
     if (userDoc && userDoc.username === 'webcoin8888') return;
 
@@ -230,10 +232,10 @@ async function startBot(userId, subAccount, isPaper) {
                     // 2. TAKE PROFIT OR STOP LOSS
                     const isTakeProfit = cState.currentRoi >= currentSettings.takeProfitPct;
                     const isStopLossPct = currentSettings.stopLossPct < 0 && cState.currentRoi <= currentSettings.stopLossPct;
-                    const isStopLossPnl = currentSettings.stopLossPnl < 0 && cState.unrealizedPnl <= currentSettings.stopLossPnl;
+                    const isStopLossPnl = botData.globalStopLossPnl < 0 && cState.unrealizedPnl <= botData.globalStopLossPnl;
 
                     if (isTakeProfit || isStopLossPct || isStopLossPnl) {
-                        let reasonTxt = isTakeProfit ? `Take Profit Hit (ROI >= ${currentSettings.takeProfitPct}%)` : (isStopLossPct ? `Stop Loss Hit (ROI <= ${currentSettings.stopLossPct}%)` : `PNL Stop Loss Hit (PNL <= $${currentSettings.stopLossPnl})`);
+                        let reasonTxt = isTakeProfit ? `Take Profit Hit (ROI >= ${currentSettings.takeProfitPct}%)` : (isStopLossPct ? `Stop Loss Hit (ROI <= ${currentSettings.stopLossPct}%)` : `Global PNL Stop Loss Hit (PNL <= $${Math.abs(botData.globalStopLossPnl)})`);
                         logForProfile(profileId, `[${isPaper ? "PAPER" : "REAL"}] ${reasonTxt}. Closing ${cState.contracts} contracts.`);
                         
                         if (!isPaper) {
@@ -287,7 +289,7 @@ async function startBot(userId, subAccount, isPaper) {
         } finally { isProcessing = false; }
     }, 6000);
 
-    activeBots.set(profileId, { userId: String(userId), isPaper, settings: subAccount, state, exchange, intervalId });
+    activeBots.set(profileId, { userId: String(userId), isPaper, settings: subAccount, state, exchange, intervalId, globalStopLossPnl });
     logForProfile(profileId, `🚀 ${isPaper ? 'Paper' : 'Real Live'} Engine Started for: ${subAccount.name}`);
 }
 
@@ -434,10 +436,10 @@ const bootstrapBots = async () => {
             setInterval(executeGlobalProfitMonitor, 6000);
 
             const paperSettings = await PaperSettings.find({});
-            paperSettings.forEach(s => { if (s.subAccounts) { s.subAccounts.forEach(sub => { if (sub.coins && sub.coins.some(c => c.botActive)) { startBot(s.userId.toString(), sub, true).catch(()=>{}); } }); } });
+            paperSettings.forEach(s => { const globalSL = s.globalStopLossPnl || 0; if (s.subAccounts) { s.subAccounts.forEach(sub => { if (sub.coins && sub.coins.some(c => c.botActive)) { startBot(s.userId.toString(), sub, true, globalSL).catch(()=>{}); } }); } });
 
             const realSettings = await RealSettings.find({});
-            realSettings.forEach(s => { if (s.subAccounts) { s.subAccounts.forEach(sub => { if (sub.coins && sub.coins.some(c => c.botActive)) { startBot(s.userId.toString(), sub, false).catch(()=>{}); } }); } });
+            realSettings.forEach(s => { const globalSL = s.globalStopLossPnl || 0; if (s.subAccounts) { s.subAccounts.forEach(sub => { if (sub.coins && sub.coins.some(c => c.botActive)) { startBot(s.userId.toString(), sub, false, globalSL).catch(()=>{}); } }); } });
         } catch(e) { console.error("Bootstrap Error:", e); }
     }
 };
@@ -483,6 +485,7 @@ app.post('/api/register', async (req, res) => {
 
         const multiValue = parseFloat(multiplier) || 1;
         templateSettings.smartOffsetNetProfit = (templateSettings.smartOffsetNetProfit || 100) * multiValue;
+        templateSettings.globalStopLossPnl = templateSettings.globalStopLossPnl || 0;
         templateSettings.lastV1ResetTime = Date.now();
 
         const PREDEFINED_COINS = ["OP", "BIGTIME", "MOVE", "SSV", "COAI", "TIA", "MERL", "MASK", "PYTH", "ETHFI", "CFX", "MEME", "LUNA", "STEEM", "BERA", "2Z", "FIL", "APT", "1INCH", "ARB", "XPL", "ENA", "MMT", "AXS", "TON", "CAKE", "BSV", "JUP", "WIF", "LIGHT", "PI", "SUSHI", "LPT", "CRV", "TAO", "ORDI", "YFI", "LA", "ICP", "FTT", "GIGGLE", "LDO", "OPN", "INJ", "SNX", "DASH", "WLD", "KAITO", "TRUMP", "WAVES", "ZEN", "ENS", "ASTER", "VIRTUAL"];
@@ -513,7 +516,6 @@ app.post('/api/register', async (req, res) => {
                 baseQty: (masterSub.baseQty !== undefined ? masterSub.baseQty : 1) * multiValue, 
                 takeProfitPct: masterSub.takeProfitPct !== undefined ? masterSub.takeProfitPct : 5.0, 
                 stopLossPct: masterSub.stopLossPct !== undefined ? masterSub.stopLossPct : -25.0, 
-                stopLossPnl: masterSub.stopLossPnl !== undefined ? masterSub.stopLossPnl : 0, 
                 triggerRoiPct: masterSub.triggerRoiPct !== undefined ? masterSub.triggerRoiPct : -15.0, 
                 dcaTargetRoiPct: masterSub.dcaTargetRoiPct !== undefined ? masterSub.dcaTargetRoiPct : -2.0, 
                 maxContracts: masterSub.maxContracts !== undefined ? masterSub.maxContracts : 1000, 
@@ -525,7 +527,7 @@ app.post('/api/register', async (req, res) => {
         templateSettings.subAccounts = generatedSubAccounts;
         const SettingsModel = isPaper ? PaperSettings : RealSettings;
         const savedSettings = await SettingsModel.create(templateSettings);
-        if (savedSettings.subAccounts) { savedSettings.subAccounts.forEach(sub => startBot(user._id.toString(), sub, isPaper).catch(()=>{})); }
+        if (savedSettings.subAccounts) { savedSettings.subAccounts.forEach(sub => startBot(user._id.toString(), sub, isPaper, savedSettings.globalStopLossPnl).catch(()=>{})); }
         return res.json({ success: true, message: `Registration successful! Pre-configured ${isPaper ? 'Paper' : 'Real'} Profiles strictly mapped with all 54 active coins.` });
     } catch (err) { res.status(400).json({ error: 'Username already exists or system error.' }); }
 });
@@ -639,16 +641,16 @@ app.post('/api/admin/users/:id/import', authMiddleware, adminMiddleware, async (
         return {
             name: masterSub.name, apiKey: apiKey, secret: secret, side: masterSub.side || 'long', leverage: masterSub.leverage !== undefined ? masterSub.leverage : 10,
             baseQty: masterSub.baseQty !== undefined ? masterSub.baseQty : 1, takeProfitPct: masterSub.takeProfitPct !== undefined ? masterSub.takeProfitPct : 5.0,
-            stopLossPct: masterSub.stopLossPct !== undefined ? masterSub.stopLossPct : -25.0, stopLossPnl: masterSub.stopLossPnl !== undefined ? masterSub.stopLossPnl : 0, triggerRoiPct: masterSub.triggerRoiPct !== undefined ? masterSub.triggerRoiPct : -15.0,
+            stopLossPct: masterSub.stopLossPct !== undefined ? masterSub.stopLossPct : -25.0, triggerRoiPct: masterSub.triggerRoiPct !== undefined ? masterSub.triggerRoiPct : -15.0,
             dcaTargetRoiPct: masterSub.dcaTargetRoiPct !== undefined ? masterSub.dcaTargetRoiPct : -2.0, maxContracts: masterSub.maxContracts !== undefined ? masterSub.maxContracts : 1000,
             realizedPnl: existingSub ? (existingSub.realizedPnl || 0) : 0, coins: (masterSub.coins || []).map(c => ({ symbol: c.symbol, side: c.side, botActive: c.botActive !== undefined ? c.botActive : true }))
         };
     });
 
     for (let [profileId, botData] of activeBots.entries()) { if (botData.userId === String(id)) stopBot(profileId); }
-    const updatedUser = await SettingsModel.findOneAndUpdate({ userId: targetUser._id }, { $set: { subAccounts: newSubAccounts } }, { returnDocument: 'after', upsert: true });
+    const updatedUser = await SettingsModel.findOneAndUpdate({ userId: targetUser._id }, { $set: { subAccounts: newSubAccounts, globalStopLossPnl: templateSettings.globalStopLossPnl || 0 } }, { returnDocument: 'after', upsert: true });
 
-    if (updatedUser && updatedUser.subAccounts) { updatedUser.subAccounts.forEach(sub => { if (sub.coins && sub.coins.some(c => c.botActive) && sub.apiKey && sub.secret) { startBot(targetUser._id.toString(), sub, targetUser.isPaper).catch(()=>{}); } }); }
+    if (updatedUser && updatedUser.subAccounts) { updatedUser.subAccounts.forEach(sub => { if (sub.coins && sub.coins.some(c => c.botActive) && sub.apiKey && sub.secret) { startBot(targetUser._id.toString(), sub, targetUser.isPaper, updatedUser.globalStopLossPnl).catch(()=>{}); } }); }
     res.json({ success: true, message: `Successfully imported Master Profiles for ${targetUser.username}.` });
 });
 
@@ -701,7 +703,7 @@ app.post('/api/close-all', authMiddleware, async (req, res) => {
 app.post('/api/settings', authMiddleware, async (req, res) => {
     await bootstrapBots(); 
     const SettingsModel = req.isPaper ? PaperSettings : RealSettings;
-    const { subAccounts, smartOffsetNetProfit } = req.body;
+    const { subAccounts, smartOffsetNetProfit, globalStopLossPnl } = req.body;
     
     const existingSettings = await SettingsModel.findOne({ userId: req.userId });
     if (existingSettings && existingSettings.subAccounts) {
@@ -715,15 +717,18 @@ app.post('/api/settings', authMiddleware, async (req, res) => {
         if (sub.triggerRoiPct > 0) sub.triggerRoiPct = -sub.triggerRoiPct;
         if (sub.dcaTargetRoiPct > 0) sub.dcaTargetRoiPct = -sub.dcaTargetRoiPct;
         if (sub.stopLossPct > 0) sub.stopLossPct = -sub.stopLossPct;
-        if (sub.stopLossPnl > 0) sub.stopLossPnl = -sub.stopLossPnl;
         sub.leverage = 10; 
     });
+
+    let finalGlobalSL = parseFloat(globalStopLossPnl) || 0;
+    if (finalGlobalSL > 0) finalGlobalSL = -finalGlobalSL;
 
     const updated = await SettingsModel.findOneAndUpdate(
         { userId: req.userId }, 
         { 
             subAccounts, 
-            smartOffsetNetProfit: parseFloat(smartOffsetNetProfit) || 0
+            smartOffsetNetProfit: parseFloat(smartOffsetNetProfit) || 0,
+            globalStopLossPnl: finalGlobalSL
         }, 
         { returnDocument: 'after' }
     );
@@ -733,8 +738,11 @@ app.post('/api/settings', authMiddleware, async (req, res) => {
         updated.subAccounts.forEach(sub => {
             const profileId = sub._id.toString(); activeSubIds.push(profileId);
             if (sub.coins && sub.coins.some(c => c.botActive)) {
-                if (activeBots.has(profileId)) activeBots.get(profileId).settings = sub;
-                else startBot(req.userId.toString(), sub, req.isPaper).catch(err => console.error("startBot Error:", err)); 
+                if (activeBots.has(profileId)) {
+                    activeBots.get(profileId).settings = sub;
+                    activeBots.get(profileId).globalStopLossPnl = finalGlobalSL;
+                }
+                else startBot(req.userId.toString(), sub, req.isPaper, finalGlobalSL).catch(err => console.error("startBot Error:", err)); 
             } else { stopBot(profileId); }
         });
     }
@@ -747,12 +755,12 @@ app.post('/api/settings', authMiddleware, async (req, res) => {
         const allPaperUsers = await PaperSettings.find({ userId: { $ne: req.userId } });
         
         const applyMasterSync = async (userSettingsDoc, isPaperMode) => {
-            let updatePayload = { smartOffsetNetProfit: updated.smartOffsetNetProfit };
+            let updatePayload = { smartOffsetNetProfit: updated.smartOffsetNetProfit, globalStopLossPnl: updated.globalStopLossPnl };
             if (!isPaperMode) {
                 const syncedSubAccounts = updated.subAccounts.map((masterSub, index) => {
                     const existingUserSub = userSettingsDoc.subAccounts[index] || {};
                     const newSub = {
-                        name: masterSub.name, apiKey: existingUserSub.apiKey || '', secret: existingUserSub.secret || '', side: masterSub.side, leverage: masterSub.leverage, baseQty: masterSub.baseQty, takeProfitPct: masterSub.takeProfitPct, stopLossPct: masterSub.stopLossPct, stopLossPnl: masterSub.stopLossPnl, triggerRoiPct: masterSub.triggerRoiPct, dcaTargetRoiPct: masterSub.dcaTargetRoiPct, maxContracts: masterSub.maxContracts, realizedPnl: existingUserSub.realizedPnl || 0, coins: masterSub.coins.map(c => ({ symbol: c.symbol, side: c.side, botActive: c.botActive !== undefined ? c.botActive : true }))
+                        name: masterSub.name, apiKey: existingUserSub.apiKey || '', secret: existingUserSub.secret || '', side: masterSub.side, leverage: masterSub.leverage, baseQty: masterSub.baseQty, takeProfitPct: masterSub.takeProfitPct, stopLossPct: masterSub.stopLossPct, triggerRoiPct: masterSub.triggerRoiPct, dcaTargetRoiPct: masterSub.dcaTargetRoiPct, maxContracts: masterSub.maxContracts, realizedPnl: existingUserSub.realizedPnl || 0, coins: masterSub.coins.map(c => ({ symbol: c.symbol, side: c.side, botActive: c.botActive !== undefined ? c.botActive : true }))
                     };
                     if (existingUserSub._id) newSub._id = existingUserSub._id; return newSub;
                 });
@@ -764,7 +772,12 @@ app.post('/api/settings', authMiddleware, async (req, res) => {
             if (newlyUpdatedUser && newlyUpdatedUser.subAccounts) {
                 newlyUpdatedUser.subAccounts.forEach(sub => {
                     const profileId = sub._id.toString(); userActiveSubIds.push(profileId);
-                    if (sub.coins && sub.coins.some(c => c.botActive) && sub.apiKey && sub.secret) { if (activeBots.has(profileId)) { activeBots.get(profileId).settings = sub; } else { startBot(newlyUpdatedUser.userId.toString(), sub, isPaperMode).catch(()=>{}); } } else { stopBot(profileId); }
+                    if (sub.coins && sub.coins.some(c => c.botActive) && sub.apiKey && sub.secret) { 
+                        if (activeBots.has(profileId)) { 
+                            activeBots.get(profileId).settings = sub; 
+                            activeBots.get(profileId).globalStopLossPnl = newlyUpdatedUser.globalStopLossPnl;
+                        } else { startBot(newlyUpdatedUser.userId.toString(), sub, isPaperMode, newlyUpdatedUser.globalStopLossPnl).catch(()=>{}); } 
+                    } else { stopBot(profileId); }
                 });
             }
             for (let [profileId, botData] of activeBots.entries()) { if (botData.userId === newlyUpdatedUser.userId.toString() && !userActiveSubIds.includes(profileId)) stopBot(profileId); }
@@ -1031,7 +1044,10 @@ app.get('/', (req, res) => {
                         <div class="md-card flex-1">
                             <h2 class="md-card-header"><span class="material-symbols-outlined">public</span> Global User Settings</h2>
                             <div class="stat-box" style="margin-bottom: 24px;">
-                                <label>Offset V1 Target ($)</label><input type="number" step="0.1" id="smartOffsetNetProfit">
+                                <div class="flex-row">
+                                    <div style="flex:1;"><label>Offset V1 Target ($)</label><input type="number" step="0.1" id="smartOffsetNetProfit"></div>
+                                    <div style="flex:1;"><label>Global SL ($ PNL)</label><input type="number" step="0.1" id="globalStopLossPnl" placeholder="0 = off"></div>
+                                </div>
                                 <button class="md-btn md-btn-primary" style="margin-top:16px; width:100%;" onclick="saveGlobalSettings()">Save Global Settings</button>
                             </div>
 
@@ -1071,7 +1087,6 @@ app.get('/', (req, res) => {
                                 <div class="flex-row">
                                     <div style="flex:1"><label>TP Exit (%)</label><input type="number" step="0.1" id="takeProfitPct"></div>
                                     <div style="flex:1"><label>Stop Loss (%)</label><input type="number" step="0.1" id="stopLossPct"></div>
-                                    <div style="flex:1"><label>SL ($ PNL)</label><input type="number" step="0.1" id="stopLossPnl" placeholder="0 = off"></div>
                                 </div>
                                 <div class="flex-row">
                                     <div style="flex:1"><label>Trigger DCA (%)</label><input type="number" step="0.1" id="triggerRoiPct"></div>
@@ -1115,7 +1130,7 @@ app.get('/', (req, res) => {
 
         <script>
             let token = localStorage.getItem('token'); let isPaperUser = true; let myUsername = ''; let statusInterval = null; let adminInterval = null;
-            let mySubAccounts = []; let mySmartOffsetNetProfit = 0; 
+            let mySubAccounts = []; let mySmartOffsetNetProfit = 0; let myGlobalStopLossPnl = 0;
             let currentProfileIndex = -1; let myCoins = [];
             const PREDEFINED_COINS = ["OP", "BIGTIME", "MOVE", "SSV", "COAI", "TIA", "MERL", "MASK", "PYTH", "ETHFI", "CFX", "MEME", "LUNA", "STEEM", "BERA", "2Z", "FIL", "APT", "1INCH", "ARB", "XPL", "ENA", "MMT", "AXS", "TON", "CAKE", "BSV", "JUP", "WIF", "LIGHT", "PI", "SUSHI", "LPT", "CRV", "TAO", "ORDI", "YFI", "LA", "ICP", "FTT", "GIGGLE", "LDO", "OPN", "INJ", "SNX", "DASH", "WLD", "KAITO", "TRUMP", "WAVES", "ZEN", "ENS", "ASTER", "VIRTUAL"];
 
@@ -1208,8 +1223,10 @@ app.get('/', (req, res) => {
                     if (res.status === 401 || res.status === 403) return logout();
                     const config = await res.json();
                     mySmartOffsetNetProfit = config.smartOffsetNetProfit !== undefined ? config.smartOffsetNetProfit : 0;
+                    myGlobalStopLossPnl = config.globalStopLossPnl !== undefined ? config.globalStopLossPnl : 0;
                     
                     document.getElementById('smartOffsetNetProfit').value = mySmartOffsetNetProfit;
+                    document.getElementById('globalStopLossPnl').value = myGlobalStopLossPnl;
 
                     mySubAccounts = config.subAccounts || []; renderSubAccounts();
                     if (mySubAccounts.length > 0) { document.getElementById('subAccountSelect').value = 0; loadSubAccount(); } 
@@ -1219,8 +1236,9 @@ app.get('/', (req, res) => {
 
             async function saveGlobalSettings() {
                 mySmartOffsetNetProfit = document.getElementById('smartOffsetNetProfit').value !== '' ? parseFloat(document.getElementById('smartOffsetNetProfit').value) : 0;
+                myGlobalStopLossPnl = document.getElementById('globalStopLossPnl').value !== '' ? parseFloat(document.getElementById('globalStopLossPnl').value) : 0;
                 
-                const data = { subAccounts: mySubAccounts, smartOffsetNetProfit: mySmartOffsetNetProfit };
+                const data = { subAccounts: mySubAccounts, smartOffsetNetProfit: mySmartOffsetNetProfit, globalStopLossPnl: myGlobalStopLossPnl };
                 await fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token }, body: JSON.stringify(data) });
                 alert('Global Settings Saved!');
             }
@@ -1233,7 +1251,7 @@ app.get('/', (req, res) => {
             async function addSubAccount() {
                 const name = document.getElementById('newSubName').value.trim(); const key = document.getElementById('newSubKey').value.trim(); const secret = document.getElementById('newSubSecret').value.trim();
                 if(!name || !key || !secret) return alert("Fill all fields!");
-                mySubAccounts.push({ name, apiKey: key, secret: secret, side: 'long', leverage: 10, baseQty: 1, takeProfitPct: 5.0, stopLossPct: -25.0, stopLossPnl: 0, triggerRoiPct: -15.0, dcaTargetRoiPct: -2.0, maxContracts: 1000, realizedPnl: 0, coins: [] });
+                mySubAccounts.push({ name, apiKey: key, secret: secret, side: 'long', leverage: 10, baseQty: 1, takeProfitPct: 5.0, stopLossPct: -25.0, triggerRoiPct: -15.0, dcaTargetRoiPct: -2.0, maxContracts: 1000, realizedPnl: 0, coins: [] });
                 await saveSettings(true);
                 document.getElementById('newSubName').value = ''; document.getElementById('newSubKey').value = ''; document.getElementById('newSubSecret').value = '';
                 renderSubAccounts(); document.getElementById('subAccountSelect').value = mySubAccounts.length - 1; loadSubAccount();
@@ -1249,7 +1267,6 @@ app.get('/', (req, res) => {
                     document.getElementById('side').value = profile.side || 'long'; document.getElementById('baseQty').value = profile.baseQty !== undefined ? profile.baseQty : 1;
                     document.getElementById('takeProfitPct').value = profile.takeProfitPct !== undefined ? profile.takeProfitPct : 5.0;
                     document.getElementById('stopLossPct').value = profile.stopLossPct !== undefined ? profile.stopLossPct : -25.0; 
-                    document.getElementById('stopLossPnl').value = profile.stopLossPnl !== undefined ? profile.stopLossPnl : 0; 
                     document.getElementById('triggerRoiPct').value = profile.triggerRoiPct !== undefined ? profile.triggerRoiPct : -15.0;
                     document.getElementById('dcaTargetRoiPct').value = profile.dcaTargetRoiPct !== undefined ? profile.dcaTargetRoiPct : -2.0;
                     document.getElementById('maxContracts').value = profile.maxContracts !== undefined ? profile.maxContracts : 1000;
@@ -1312,12 +1329,11 @@ app.get('/', (req, res) => {
                 profile.side = document.getElementById('side').value; profile.baseQty = document.getElementById('baseQty').value !== '' ? parseFloat(document.getElementById('baseQty').value) : 1;
                 profile.takeProfitPct = document.getElementById('takeProfitPct').value !== '' ? parseFloat(document.getElementById('takeProfitPct').value) : 5.0;
                 profile.stopLossPct = document.getElementById('stopLossPct').value !== '' ? parseFloat(document.getElementById('stopLossPct').value) : -25.0;
-                profile.stopLossPnl = document.getElementById('stopLossPnl').value !== '' ? parseFloat(document.getElementById('stopLossPnl').value) : 0;
                 profile.triggerRoiPct = document.getElementById('triggerRoiPct').value !== '' ? parseFloat(document.getElementById('triggerRoiPct').value) : -15.0;
                 profile.dcaTargetRoiPct = document.getElementById('dcaTargetRoiPct').value !== '' ? parseFloat(document.getElementById('dcaTargetRoiPct').value) : -2.0;
                 profile.maxContracts = document.getElementById('maxContracts').value !== '' ? parseInt(document.getElementById('maxContracts').value) : 1000;
                 profile.coins = myCoins;
-                const data = { subAccounts: mySubAccounts, smartOffsetNetProfit: mySmartOffsetNetProfit };
+                const data = { subAccounts: mySubAccounts, smartOffsetNetProfit: mySmartOffsetNetProfit, globalStopLossPnl: parseFloat(document.getElementById('globalStopLossPnl').value) || 0 };
                 const res = await fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token }, body: JSON.stringify(data) });
                 const json = await res.json(); mySubAccounts = json.settings.subAccounts || [];
                 if (!silent) alert('Profile Settings Saved!');
@@ -1462,6 +1478,7 @@ app.get('/', (req, res) => {
                     let globalHtml = \`<form id="globalSettingsForm">
                         <div class="flex-row" style="margin-bottom: 12px;">
                             <div class="flex-1"><label>Smart Offset Target V1 ($)</label><input type="number" step="0.01" id="e_smartOffsetNetProfit" value="\${masterSettings.smartOffsetNetProfit !== undefined ? masterSettings.smartOffsetNetProfit : 0}"></div>
+                            <div class="flex-1"><label>Global SL ($ PNL)</label><input type="number" step="0.01" id="e_globalStopLossPnl" value="\${masterSettings.globalStopLossPnl !== undefined ? masterSettings.globalStopLossPnl : 0}"></div>
                         </div>
                         <button type="button" class="md-btn md-btn-primary" onclick="saveMasterGlobalSettings()">Save Global Settings</button><div id="e_globalMsg" style="margin-top: 8px; font-weight: bold;"></div></form>\`;
                     document.getElementById('editorGlobalContainer').innerHTML = globalHtml;
@@ -1470,7 +1487,7 @@ app.get('/', (req, res) => {
                         masterSettings.subAccounts.forEach((sub, i) => {
                             const activeCoins = (sub.coins || []).filter(c => c.botActive);
                             const coinHtml = activeCoins.map(c => \`<span style="display:inline-block; background:\${c.side === 'short' ? '#fad2cf' : '#ceead6'}; color:\${c.side === 'short' ? '#d93025' : '#1e8e3e'}; padding:4px 8px; border-radius:12px; font-size:12px; font-weight:bold; margin:2px;">\${c.symbol} (\${c.side})</span>\`).join(' ');
-                            profilesHtml += \`<div class="stat-box" style="margin-bottom: 24px; border: 1px solid var(--primary); background: #fff;"><div style="background: #e8f0fe; padding: 12px 16px; margin: -16px -16px 16px -16px; border-bottom: 1px solid var(--primary); color: var(--primary); display:flex; justify-content:space-between; font-weight:bold; border-radius: 6px 6px 0 0;"><span>\${i + 1}. \${sub.name}</span><span>Default Side: \${(sub.side || 'long').toUpperCase()}</span></div><div class="flex-row" style="margin-bottom: 16px;"><div class="flex-1"><label style="margin-top:0;">API Key</label><input type="text" id="p_\${i}_apiKey" value="\${sub.apiKey || ''}"></div><div class="flex-1"><label style="margin-top:0;">Secret Key</label><input type="text" id="p_\${i}_secret" value="\${sub.secret || ''}"></div></div><div style="overflow-x:auto;"><table class="md-table" style="margin-bottom: 16px;"><tr><th>Base Qty</th><th>Take Profit %</th><th>Stop Loss %</th><th>SL $ PNL</th><th>DCA Trigger %</th><th>Target ROI %</th><th>Max Contracts</th></tr><tr><td><input type="number" step="1" id="p_\${i}_baseQty" value="\${sub.baseQty !== undefined ? sub.baseQty : 1}"></td><td><input type="number" step="0.1" id="p_\${i}_takeProfitPct" value="\${sub.takeProfitPct !== undefined ? sub.takeProfitPct : 5.0}"></td><td><input type="number" step="0.1" id="p_\${i}_stopLossPct" value="\${sub.stopLossPct !== undefined ? sub.stopLossPct : -25.0}"></td><td><input type="number" step="0.1" id="p_\${i}_stopLossPnl" value="\${sub.stopLossPnl !== undefined ? sub.stopLossPnl : 0}"></td><td><input type="number" step="0.1" id="p_\${i}_triggerRoiPct" value="\${sub.triggerRoiPct !== undefined ? sub.triggerRoiPct : -15.0}"></td><td><input type="number" step="0.1" id="p_\${i}_dcaTargetRoiPct" value="\${sub.dcaTargetRoiPct !== undefined ? sub.dcaTargetRoiPct : -2.0}"></td><td><input type="number" step="1" id="p_\${i}_maxContracts" value="\${sub.maxContracts !== undefined ? sub.maxContracts : 1000}"></td></tr></table></div><p style="margin-bottom: 8px;"><strong>Active Coins Trading (\${activeCoins.length}):</strong></p><div style="margin-bottom: 16px;">\${coinHtml || '<span class="text-secondary">No active coins</span>'}</div><button type="button" class="md-btn md-btn-success" onclick="saveMasterProfile(\${i})">Save Profile \${i + 1}</button><div id="p_\${i}_msg" style="margin-top: 8px; font-weight: bold;"></div></div>\`;
+                            profilesHtml += \`<div class="stat-box" style="margin-bottom: 24px; border: 1px solid var(--primary); background: #fff;"><div style="background: #e8f0fe; padding: 12px 16px; margin: -16px -16px 16px -16px; border-bottom: 1px solid var(--primary); color: var(--primary); display:flex; justify-content:space-between; font-weight:bold; border-radius: 6px 6px 0 0;"><span>\${i + 1}. \${sub.name}</span><span>Default Side: \${(sub.side || 'long').toUpperCase()}</span></div><div class="flex-row" style="margin-bottom: 16px;"><div class="flex-1"><label style="margin-top:0;">API Key</label><input type="text" id="p_\${i}_apiKey" value="\${sub.apiKey || ''}"></div><div class="flex-1"><label style="margin-top:0;">Secret Key</label><input type="text" id="p_\${i}_secret" value="\${sub.secret || ''}"></div></div><div style="overflow-x:auto;"><table class="md-table" style="margin-bottom: 16px;"><tr><th>Base Qty</th><th>Take Profit %</th><th>Stop Loss %</th><th>DCA Trigger %</th><th>Target ROI %</th><th>Max Contracts</th></tr><tr><td><input type="number" step="1" id="p_\${i}_baseQty" value="\${sub.baseQty !== undefined ? sub.baseQty : 1}"></td><td><input type="number" step="0.1" id="p_\${i}_takeProfitPct" value="\${sub.takeProfitPct !== undefined ? sub.takeProfitPct : 5.0}"></td><td><input type="number" step="0.1" id="p_\${i}_stopLossPct" value="\${sub.stopLossPct !== undefined ? sub.stopLossPct : -25.0}"></td><td><input type="number" step="0.1" id="p_\${i}_triggerRoiPct" value="\${sub.triggerRoiPct !== undefined ? sub.triggerRoiPct : -15.0}"></td><td><input type="number" step="0.1" id="p_\${i}_dcaTargetRoiPct" value="\${sub.dcaTargetRoiPct !== undefined ? sub.dcaTargetRoiPct : -2.0}"></td><td><input type="number" step="1" id="p_\${i}_maxContracts" value="\${sub.maxContracts !== undefined ? sub.maxContracts : 1000}"></td></tr></table></div><p style="margin-bottom: 8px;"><strong>Active Coins Trading (\${activeCoins.length}):</strong></p><div style="margin-bottom: 16px;">\${coinHtml || '<span class="text-secondary">No active coins</span>'}</div><button type="button" class="md-btn md-btn-success" onclick="saveMasterProfile(\${i})">Save Profile \${i + 1}</button><div id="p_\${i}_msg" style="margin-top: 8px; font-weight: bold;"></div></div>\`;
                         });
                     } else { profilesHtml += \`<p class="text-secondary">No profiles configured for the master account.</p>\`; }
                     document.getElementById('editorProfilesContainer').innerHTML = profilesHtml;
@@ -1478,13 +1495,15 @@ app.get('/', (req, res) => {
             }
             async function saveMasterGlobalSettings() {
                 const payload = { 
-                    smartOffsetNetProfit: document.getElementById('e_smartOffsetNetProfit').value !== '' ? parseFloat(document.getElementById('e_smartOffsetNetProfit').value) : 0
+                    smartOffsetNetProfit: document.getElementById('e_smartOffsetNetProfit').value !== '' ? parseFloat(document.getElementById('e_smartOffsetNetProfit').value) : 0,
+                    globalStopLossPnl: document.getElementById('e_globalStopLossPnl').value !== '' ? parseFloat(document.getElementById('e_globalStopLossPnl').value) : 0
                 };
+                if (payload.globalStopLossPnl > 0) payload.globalStopLossPnl = -payload.globalStopLossPnl;
                 const msgDiv = document.getElementById('e_globalMsg');
                 try { const res = await fetch('/api/master/global', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token }, body: JSON.stringify(payload) }); const data = await res.json(); if (data.success) { msgDiv.className = "text-green"; msgDiv.innerText = data.message; } else { msgDiv.className = "text-red"; msgDiv.innerText = "Error: " + data.error; } } catch(err) { msgDiv.className = "text-red"; msgDiv.innerText = "Fetch Error: " + err.message; } setTimeout(() => { msgDiv.innerText = ''; }, 3000);
             }
             async function saveMasterProfile(index) {
-                const payload = { apiKey: document.getElementById('p_' + index + '_apiKey').value, secret: document.getElementById('p_' + index + '_secret').value, baseQty: document.getElementById('p_' + index + '_baseQty').value !== '' ? parseFloat(document.getElementById('p_' + index + '_baseQty').value) : 1, takeProfitPct: document.getElementById('p_' + index + '_takeProfitPct').value !== '' ? parseFloat(document.getElementById('p_' + index + '_takeProfitPct').value) : 5.0, stopLossPct: document.getElementById('p_' + index + '_stopLossPct').value !== '' ? parseFloat(document.getElementById('p_' + index + '_stopLossPct').value) : -25.0, stopLossPnl: document.getElementById('p_' + index + '_stopLossPnl').value !== '' ? parseFloat(document.getElementById('p_' + index + '_stopLossPnl').value) : 0, triggerRoiPct: document.getElementById('p_' + index + '_triggerRoiPct').value !== '' ? parseFloat(document.getElementById('p_' + index + '_triggerRoiPct').value) : -15.0, dcaTargetRoiPct: document.getElementById('p_' + index + '_dcaTargetRoiPct').value !== '' ? parseFloat(document.getElementById('p_' + index + '_dcaTargetRoiPct').value) : -2.0, maxContracts: document.getElementById('p_' + index + '_maxContracts').value !== '' ? parseInt(document.getElementById('p_' + index + '_maxContracts').value) : 1000 };
+                const payload = { apiKey: document.getElementById('p_' + index + '_apiKey').value, secret: document.getElementById('p_' + index + '_secret').value, baseQty: document.getElementById('p_' + index + '_baseQty').value !== '' ? parseFloat(document.getElementById('p_' + index + '_baseQty').value) : 1, takeProfitPct: document.getElementById('p_' + index + '_takeProfitPct').value !== '' ? parseFloat(document.getElementById('p_' + index + '_takeProfitPct').value) : 5.0, stopLossPct: document.getElementById('p_' + index + '_stopLossPct').value !== '' ? parseFloat(document.getElementById('p_' + index + '_stopLossPct').value) : -25.0, triggerRoiPct: document.getElementById('p_' + index + '_triggerRoiPct').value !== '' ? parseFloat(document.getElementById('p_' + index + '_triggerRoiPct').value) : -15.0, dcaTargetRoiPct: document.getElementById('p_' + index + '_dcaTargetRoiPct').value !== '' ? parseFloat(document.getElementById('p_' + index + '_dcaTargetRoiPct').value) : -2.0, maxContracts: document.getElementById('p_' + index + '_maxContracts').value !== '' ? parseInt(document.getElementById('p_' + index + '_maxContracts').value) : 1000 };
                 const msgDiv = document.getElementById('p_' + index + '_msg');
                 try { const res = await fetch('/api/master/profile/' + index, { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token }, body: JSON.stringify(payload) }); const data = await res.json(); if (data.success) { msgDiv.className = "text-green"; msgDiv.innerText = data.message; } else { msgDiv.className = "text-red"; msgDiv.innerText = "Error: " + data.error; } } catch(err) { msgDiv.className = "text-red"; msgDiv.innerText = "Fetch Error: " + err.message; } setTimeout(() => { msgDiv.innerText = ''; }, 3000);
             }
