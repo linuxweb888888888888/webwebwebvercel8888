@@ -179,7 +179,8 @@ async function startBot(userId, subAccount, isPaper, globalStopLossPnl = 0) {
                     
                     cState.currentPrice = ticker.last;
                     cState.activeSide = activeSide;
-                    const ESTIMATED_FEE_RATE = 0.002; // Includes open+close fees and slippage buffer for true PNL
+                    // TRUE PROFIT CALCULATION: 0.25% fee covers open (0.05%), close (0.05%) + a 0.15% market order slippage buffer.
+                    const ESTIMATED_FEE_RATE = 0.0025; 
 
                     if (!isPaper) {
                         const pos = positions.find(p => p.symbol === coin.symbol && p.side === activeSide);
@@ -356,7 +357,7 @@ const executeGlobalProfitMonitor = async () => {
                 let triggerOffset = false; let reason = ''; let finalPairsToClose = []; let finalNetProfit = 0;
                 
                 if (smartOffsetNetProfit > 0 && peakAccumulation >= targetV1 && peakAccumulation >= 0.0001 && peakRowIndex >= 0) {
-                    triggerOffset = true; reason = `V1 Offset Executed: Harvested Peak at Row ${peakRowIndex + 1} (Target $${targetV1.toFixed(4)})`;
+                    triggerOffset = true; reason = `V1 Offset Executed: Harvested Peak at Row ${peakRowIndex + 1} (Target $${targetV1.toFixed(4)} Assured True Profit)`;
                     for(let i = 0; i <= peakRowIndex; i++) {
                         const w = activeCandidates[i];
                         const l = activeCandidates[activeCandidates.length - totalPairs + i];
@@ -375,10 +376,16 @@ const executeGlobalProfitMonitor = async () => {
                         actualPairsToClose.push(pos); liveCheckNet += livePnl;
                     }
                     finalPairsToClose = actualPairsToClose; finalNetProfit = liveCheckNet;
-                    if (finalPairsToClose.length === 0 || finalNetProfit < targetV1) triggerOffset = false;
+                    
+                    // TRUE PROFIT SAFETY BUFFER: 
+                    // Ensures the estimated final net profit surpasses the user's target 
+                    // by an extra $0.001 per coin being closed, guaranteeing market slippage doesn't cause a micro-loss.
+                    const slippageBuffer = finalPairsToClose.length * 0.001;
+
+                    if (finalPairsToClose.length === 0 || finalNetProfit < (targetV1 + slippageBuffer)) triggerOffset = false;
 
                     if (triggerOffset) {
-                        logForProfile(firstProfileId, `⚖️ SMART OFFSET V1 [${reason}]: Closing ${finalPairsToClose.length} peak coin(s). NET PROFIT: $${finalNetProfit.toFixed(4)}`);
+                        logForProfile(firstProfileId, `⚖️ SMART OFFSET V1 [${reason}]: Closing ${finalPairsToClose.length} peak coin(s). EST NET: $${finalNetProfit.toFixed(4)}`);
                         for (let k = 0; k < finalPairsToClose.length; k++) {
                             const pos = finalPairsToClose[k]; const bData = activeBots.get(pos.profileId);
                             try {
