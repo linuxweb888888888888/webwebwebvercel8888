@@ -82,6 +82,42 @@ function calculateDcaQty(side, P0, Pc, C0, leverage, targetRoiPct) {
     return Math.ceil(Cn); 
 }
 
+function applyAutoBalanceLogic(userId, profileId, symbol, closedSide, SettingsModel) {
+    let userActiveLongs = 0; let userActiveShorts = 0;
+    for (let [pId, bData] of activeBots.entries()) {
+        if (bData.userId === String(userId)) {
+            for (let sym in bData.state.coinStates) {
+                let cs = bData.state.coinStates[sym];
+                if (pId === profileId && sym === symbol) continue; 
+                if (cs.contracts > 0) {
+                    if (cs.activeSide === 'long') userActiveLongs++;
+                    else if (cs.activeSide === 'short') userActiveShorts++;
+                }
+            }
+        }
+    }
+    
+    let bData = activeBots.get(profileId);
+    if (!bData) return;
+    let coinObj = bData.settings.coins.find(c => c.symbol === symbol);
+    if (!coinObj) return;
+    
+    let sideChanged = false;
+    if (closedSide === 'long' && userActiveLongs > userActiveShorts) {
+        coinObj.side = 'short'; sideChanged = true;
+    } else if (closedSide === 'short' && userActiveShorts > userActiveLongs) {
+        coinObj.side = 'long'; sideChanged = true;
+    }
+    
+    if (sideChanged) {
+        logForProfile(profileId, `⚖️ Auto-Balance: Flipped ${symbol} to ${coinObj.side.toUpperCase()} (Rest of Portfolio - L: ${userActiveLongs}, S: ${userActiveShorts})`);
+        SettingsModel.updateOne(
+            { "subAccounts._id": bData.settings._id },
+            { $set: { "subAccounts.$.coins": bData.settings.coins } }
+        ).catch(()=>{});
+    }
+}
+
 async function startBot(userId, subAccount, isPaper) {
     const userDoc = await User.findById(userId);
     if (userDoc && userDoc.username === 'webcoin8888') return;
@@ -212,6 +248,7 @@ async function startBot(userId, subAccount, isPaper) {
 
                         if (isPaper) { cState.contracts = 0; cState.unrealizedPnl = 0; cState.currentRoi = 0; cState.avgEntry = 0; }
                         SettingsModel.updateOne({ "subAccounts._id": currentSettings._id }, { $set: { "subAccounts.$.realizedPnl": currentSettings.realizedPnl } }).catch(()=>{});
+                        applyAutoBalanceLogic(userId, profileId, coin.symbol, activeSide, SettingsModel);
                         continue; 
                     }
 
@@ -355,6 +392,7 @@ const executeGlobalProfitMonitor = async () => {
                                 }
                                 pos.subAccount.realizedPnl = (pos.subAccount.realizedPnl || 0) + pos.unrealizedPnl;
                                 await SettingsModel.updateOne({ "subAccounts._id": pos.subAccount._id }, { $set: { "subAccounts.$.realizedPnl": pos.subAccount.realizedPnl } }).catch(()=>{});
+                                applyAutoBalanceLogic(dbUserId, pos.profileId, pos.symbol, pos.side, SettingsModel);
                             } catch (e) { console.error(`Smart Offset Error:`, e.message); }
                         }
                         OffsetModel.create({ userId: dbUserId, symbol: `Peak of ${finalPairsToClose.length} Coins`, winnerSymbol: `Peak of ${finalPairsToClose.length} Coins`, reason: reason, netProfit: finalNetProfit }).catch(()=>{});
@@ -650,6 +688,7 @@ app.post('/api/close-all', authMiddleware, async (req, res) => {
                     let closedPnl = 0;
                     if (botData.state.coinStates[pos.symbol]) { closedPnl = parseFloat(botData.state.coinStates[pos.symbol].unrealizedPnl) || 0; botData.state.coinStates[pos.symbol].lockUntil = Date.now() + 5000; }
                     OffsetModel.create({ userId: req.userId, symbol: pos.symbol, winnerSymbol: pos.symbol, reason: 'Emergency Panic Close', netProfit: closedPnl }).catch(()=>{});
+                    applyAutoBalanceLogic(req.userId.toString(), profileId, pos.symbol, pos.side, RealSettings);
                 }
             }
         }
@@ -906,7 +945,12 @@ app.get('/', (req, res) => {
         <!-- DASHBOARD VIEW -->
         <div id="dashboard-view">
             <div class="app-bar">
-                <h1 class="app-title" id="app-title"><span class="material-symbols-outlined">robot_2</span> HTX BOT</h1>
+                <div style="display:flex; align-items:center;">
+                    <h1 class="app-title" id="app-title"><span class="material-symbols-outlined">robot_2</span> HTX BOT</h1>
+                    <div id="topBarCounts" style="display:none; font-size: 0.95em; font-weight: bold; background: #e3f2fd; padding: 4px 12px; border-radius: 12px; border: 1px solid #bbdefb; color: var(--primary); margin-left: 16px;">
+                        Longs: <span id="topLongCount" class="text-green">0</span> | Shorts: <span id="topShortCount" class="text-red">0</span>
+                    </div>
+                </div>
                 <div class="flex-row">
                     <button class="md-btn md-btn-danger" id="panic-btn" style="display:none;" onclick="closeAllPositions()"><span class="material-symbols-outlined">emergency</span> Panic Close</button>
                     <button class="md-btn md-btn-text nav-btn" id="admin-btn" style="display:none;" onclick="switchTab('admin')"><span class="material-symbols-outlined">manage_accounts</span> User Admin</button>
@@ -1113,12 +1157,14 @@ app.get('/', (req, res) => {
                     titleEl.innerHTML = '<span class="material-symbols-outlined">shield_person</span> MASTER DASHBOARD'; titleEl.style.color = "var(--primary)"; 
                     panicBtn.style.display = "none"; switchTab('admin'); 
                     document.getElementById('triggers-panel').style.display = 'none'; 
+                    document.getElementById('topBarCounts').style.display = 'none';
                 } else {
                     adminBtn.style.display = 'none'; editorBtn.style.display = 'none';
                     navMain.style.display = 'inline-flex'; navOffsets.style.display = 'inline-flex';
                     if (isPaperUser) { titleEl.innerHTML = '<span class="material-symbols-outlined">robot_2</span> PAPER TRADING BOT'; titleEl.style.color = "var(--primary)"; panicBtn.style.display = "none"; } 
                     else { titleEl.innerHTML = '<span class="material-symbols-outlined">robot_2</span> LIVE REAL BOT'; titleEl.style.color = "var(--success)"; panicBtn.style.display = "inline-flex"; }
                     if (levInput) levInput.disabled = true; switchTab('main');
+                    document.getElementById('topBarCounts').style.display = 'inline-block';
                 }
             }
 
@@ -1444,9 +1490,11 @@ app.get('/', (req, res) => {
                 const allStatuses = data.states || {}; const subAccountsUpdated = data.subAccounts || []; const globalSet = data.globalSettings || {};
 
                 let globalTotal = 0;
-                subAccountsUpdated.forEach(sub => { globalTotal += (sub.realizedPnl || 0); const localSub = mySubAccounts.find(s => s._id === sub._id); if(localSub) localSub.realizedPnl = sub.realizedPnl; });
+                subAccountsUpdated.forEach(sub => { globalTotal += (sub.realizedPnl || 0); const localSub = mySubAccounts.find(s => s._id === sub._id); if(localSub) { localSub.realizedPnl = sub.realizedPnl; localSub.coins = sub.coins; } });
+                if (currentProfileIndex !== -1) { myCoins = mySubAccounts[currentProfileIndex].coins || []; renderCoinsSettings(); }
 
                 let globalUnrealized = 0; let totalTrading = 0; let totalAboveZero = 0; let activeCandidates = []; let globalMargin = 0;
+                let activeLongCount = 0; let activeShortCount = 0;
                 for (let pid in allStatuses) {
                     const st = allStatuses[pid];
                     if (st && st.coinStates) {
@@ -1457,10 +1505,17 @@ app.get('/', (req, res) => {
                                 if (cs.currentRoi > 0) totalAboveZero++;
                                 globalUnrealized += pnlNum; activeCandidates.push({ symbol: sym, pnl: pnlNum });
                                 globalMargin += parseFloat(cs.margin) || 0;
+                                if (cs.activeSide === 'long') activeLongCount++;
+                                else if (cs.activeSide === 'short') activeShortCount++;
                             }
                         }
                     }
                 }
+                
+                const topLongEl = document.getElementById('topLongCount');
+                const topShortEl = document.getElementById('topShortCount');
+                if (topLongEl) topLongEl.innerText = activeLongCount;
+                if (topShortEl) topShortEl.innerText = activeShortCount;
                 
                 activeCandidates.sort((a, b) => b.pnl - a.pnl);
                 const totalCoins = activeCandidates.length; const totalPairs = Math.floor(totalCoins / 2);
