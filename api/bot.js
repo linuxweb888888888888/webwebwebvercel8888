@@ -1,5 +1,3 @@
-//web8888
-
 const express = require('express');
 const ccxt = require('ccxt');
 const mongoose = require('mongoose');
@@ -547,7 +545,23 @@ const authMiddleware = async (req, res, next) => {
 };
 const adminMiddleware = async (req, res, next) => { if (req.username !== 'webcoin8888') return res.status(403).json({ error: 'Admin access required.' }); next(); };
 
-app.get('/api/ping', async (req, res) => { await connectDB(); await bootstrapBots(); res.status(200).json({ success: true, message: 'Bot is awake', activeProfiles: activeBots.size }); });
+// ---- THIS IS THE MAGIC CRON-JOB TRICK ----
+app.get('/api/ping', async (req, res) => { 
+    await connectDB(); 
+    await bootstrapBots(); 
+
+    // Hold the connection open for exactly 25 seconds.
+    // This gives your bot enough time to run 4 full 6-second trading loops,
+    // while safely avoiding cron-job.org's 30-second timeout limit!
+    await new Promise(resolve => setTimeout(resolve, 25000));
+    
+    res.status(200).json({ 
+        success: true, 
+        message: 'Bot successfully traded for 25 seconds.', 
+        activeProfiles: activeBots.size 
+    }); 
+});
+// ------------------------------------------
 
 app.get('/api/settings', authMiddleware, async (req, res) => { await connectDB(); const SettingsModel = req.isPaper ? PaperSettings : RealSettings; const settings = await SettingsModel.findOne({ userId: req.userId }).lean(); res.json(settings || {}); });
 
