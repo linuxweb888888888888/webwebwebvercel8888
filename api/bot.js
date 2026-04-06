@@ -217,7 +217,10 @@ async function startBot(userId, subAccount, isPaper, globalStopLossPnl = 0) {
 
                     // 1. OPEN BASE POSITION
                     if (cState.contracts <= 0) {
-                        const safeBaseQty = Math.max(1, Math.floor(currentSettings.baseQty));
+                        let safeBaseQty = Math.max(1, Math.floor(currentSettings.baseQty));
+                        const notional = safeBaseQty * contractSize * cState.currentPrice;
+                        if (!isPaper && notional < 5.0) { safeBaseQty = Math.ceil(5.0 / (contractSize * cState.currentPrice)); }
+                        
                         logForProfile(profileId, `[${isPaper ? "PAPER" : "REAL"}] 🛒 Opening base position of ${safeBaseQty} contracts (${activeSide}) at ~${cState.currentPrice}.`);
                         
                         if (!isPaper) {
@@ -256,7 +259,25 @@ async function startBot(userId, subAccount, isPaper, globalStopLossPnl = 0) {
                         if (isPaper) { cState.contracts = 0; cState.unrealizedPnl = 0; cState.currentRoi = 0; cState.avgEntry = 0; }
                         SettingsModel.updateOne({ "subAccounts._id": currentSettings._id }, { $set: { "subAccounts.$.realizedPnl": currentSettings.realizedPnl } }).catch(()=>{});
                         
-                        if (isStopLossPct || isStopLossPnl) {
+                        let longsCount = 0; let shortsCount = 0;
+                        currentSettings.coins.forEach(c => {
+                            if (c.botActive) {
+                                let s = c.side || currentSettings.side || 'long';
+                                if (s === 'long') longsCount++; else shortsCount++;
+                            }
+                        });
+                        let flippedForBalance = false;
+                        if (activeSide === 'long' && longsCount > shortsCount) {
+                            let coinObj = currentSettings.coins.find(c => c.symbol === coin.symbol);
+                            if (coinObj) { coinObj.side = 'short'; flippedForBalance = true; logForProfile(profileId, `⚖️ Auto-Balance: Flipped ${coin.symbol} to SHORT.`); }
+                        } else if (activeSide === 'short' && shortsCount > longsCount) {
+                            let coinObj = currentSettings.coins.find(c => c.symbol === coin.symbol);
+                            if (coinObj) { coinObj.side = 'long'; flippedForBalance = true; logForProfile(profileId, `⚖️ Auto-Balance: Flipped ${coin.symbol} to LONG.`); }
+                        }
+                        
+                        if (flippedForBalance) {
+                            SettingsModel.updateOne({ "subAccounts._id": currentSettings._id }, { $set: { "subAccounts.$.coins": currentSettings.coins } }).catch(()=>{});
+                        } else if (isStopLossPct || isStopLossPnl) {
                             flipCoinSideOnStopLoss(profileId, coin.symbol, SettingsModel);
                         }
                         continue; 
@@ -264,7 +285,12 @@ async function startBot(userId, subAccount, isPaper, globalStopLossPnl = 0) {
 
                     // 3. DCA TRIGGER
                     if (cState.currentRoi <= currentSettings.triggerRoiPct && (Date.now() - (cState.lastDcaTime || 0) > 12000)) {
-                        const reqQty = calculateDcaQty(activeSide, cState.avgEntry, cState.currentPrice, cState.contracts, activeLeverage, currentSettings.dcaTargetRoiPct);
+                        let reqQty = calculateDcaQty(activeSide, cState.avgEntry, cState.currentPrice, cState.contracts, activeLeverage, currentSettings.dcaTargetRoiPct);
+                        
+                        if (reqQty > 0 && !isPaper) {
+                            const dcaNotional = reqQty * contractSize * cState.currentPrice;
+                            if (dcaNotional < 5.0) { reqQty = Math.ceil(5.0 / (contractSize * cState.currentPrice)); }
+                        }
 
                         if (reqQty <= 0) { cState.lastDcaTime = Date.now(); } 
                         else if ((cState.contracts + reqQty) > currentSettings.maxContracts) {
