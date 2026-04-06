@@ -142,13 +142,7 @@ async function startBot(userId, subAccount, isPaper, globalStopLossPnl = 0) {
 
             if (Date.now() - global.lastTickerFetch >= 30000) {
                 if (!global.tickerFetchPromise) {
-                    let allSymbols = new Set();
-                    for (let [pid, bData] of activeBots.entries()) {
-                        if (bData.settings && bData.settings.coins) {
-                            bData.settings.coins.filter(c => c.botActive).forEach(c => allSymbols.add(c.symbol));
-                        }
-                    }
-                    global.tickerFetchPromise = exchange.fetchTickers(Array.from(allSymbols)).then(res => {
+                    global.tickerFetchPromise = exchange.fetchTickers().then(res => {
                         global.sharedTickers = res;
                         global.lastTickerFetch = Date.now();
                         global.tickerFetchPromise = null;
@@ -217,10 +211,7 @@ async function startBot(userId, subAccount, isPaper, globalStopLossPnl = 0) {
 
                     // 1. OPEN BASE POSITION
                     if (cState.contracts <= 0) {
-                        let safeBaseQty = Math.max(1, Math.floor(currentSettings.baseQty));
-                        const notional = safeBaseQty * contractSize * cState.currentPrice;
-                        if (!isPaper && notional < 5.0) { safeBaseQty = Math.ceil(5.0 / (contractSize * cState.currentPrice)); }
-                        
+                        const safeBaseQty = Math.max(1, Math.floor(currentSettings.baseQty));
                         logForProfile(profileId, `[${isPaper ? "PAPER" : "REAL"}] 🛒 Opening base position of ${safeBaseQty} contracts (${activeSide}) at ~${cState.currentPrice}.`);
                         
                         if (!isPaper) {
@@ -285,12 +276,7 @@ async function startBot(userId, subAccount, isPaper, globalStopLossPnl = 0) {
 
                     // 3. DCA TRIGGER
                     if (cState.currentRoi <= currentSettings.triggerRoiPct && (Date.now() - (cState.lastDcaTime || 0) > 12000)) {
-                        let reqQty = calculateDcaQty(activeSide, cState.avgEntry, cState.currentPrice, cState.contracts, activeLeverage, currentSettings.dcaTargetRoiPct);
-                        
-                        if (reqQty > 0 && !isPaper) {
-                            const dcaNotional = reqQty * contractSize * cState.currentPrice;
-                            if (dcaNotional < 5.0) { reqQty = Math.ceil(5.0 / (contractSize * cState.currentPrice)); }
-                        }
+                        const reqQty = calculateDcaQty(activeSide, cState.avgEntry, cState.currentPrice, cState.contracts, activeLeverage, currentSettings.dcaTargetRoiPct);
 
                         if (reqQty <= 0) { cState.lastDcaTime = Date.now(); } 
                         else if ((cState.contracts + reqQty) > currentSettings.maxContracts) {
