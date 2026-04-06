@@ -136,7 +136,7 @@ async function startBot(userId, subAccount, isPaper, globalStopLossPnl = 0) {
             const symbolsToFetch = activeCoins.map(c => c.symbol);
             let positions = []; let allTickers = {};
 
-            // --- NEW GLOBAL TICKER CACHE EVERY 30 SECONDS ---
+            // --- GLOBAL TICKER CACHE EVERY 30 SECONDS ---
             global.sharedTickers = global.sharedTickers || {};
             global.lastTickerFetch = global.lastTickerFetch || 0;
 
@@ -162,7 +162,7 @@ async function startBot(userId, subAccount, isPaper, globalStopLossPnl = 0) {
 
             for (let coin of activeCoins) {
                 try {
-                    const activeLeverage = 10;
+                    let activeLeverage = currentSettings.leverage || 10;
                     const activeSide = coin.side || currentSettings.side;
                     const market = exchange.markets[coin.symbol];
                     const contractSize = (market && market.contractSize) ? market.contractSize : 1;
@@ -181,6 +181,13 @@ async function startBot(userId, subAccount, isPaper, globalStopLossPnl = 0) {
 
                     if (!isPaper) {
                         const pos = positions.find(p => p.symbol === coin.symbol && p.side === activeSide);
+                        
+                        // Extract Real Leverage Directly from Exchange if in position!
+                        if (pos) {
+                            if (pos.leverage) activeLeverage = pos.leverage;
+                            else if (pos.info && pos.info.lever_rate) activeLeverage = parseFloat(pos.info.lever_rate);
+                        }
+
                         cState.contracts = pos ? pos.contracts : 0;
                         cState.avgEntry = pos ? pos.entryPrice : 0;
                         let grossPnl = 0;
@@ -212,7 +219,7 @@ async function startBot(userId, subAccount, isPaper, globalStopLossPnl = 0) {
                     // 1. OPEN BASE POSITION
                     if (cState.contracts <= 0) {
                         const safeBaseQty = Math.max(1, Math.floor(currentSettings.baseQty));
-                        logForProfile(profileId, `[${isPaper ? "PAPER" : "REAL"}] 🛒 Opening base position of ${safeBaseQty} contracts (${activeSide}) at ~${cState.currentPrice}.`);
+                        logForProfile(profileId, `[${isPaper ? "PAPER" : "REAL"}] 🛒 Opening base position of ${safeBaseQty} contracts (${activeSide}) at ~${cState.currentPrice} with ${activeLeverage}x leverage.`);
                         
                         if (!isPaper) {
                             const orderSide = activeSide === 'long' ? 'buy' : 'sell';
@@ -283,7 +290,7 @@ async function startBot(userId, subAccount, isPaper, globalStopLossPnl = 0) {
                             logForProfile(profileId, `[${isPaper ? 'PAPER' : 'REAL'}] 🛡️ DCA Safety Triggered. Max contracts reached.`);
                             cState.lastDcaTime = Date.now(); 
                         } else {
-                            logForProfile(profileId, `[${isPaper ? 'PAPER' : 'REAL'}] ⚡ Executing DCA: Buying ${reqQty} contracts at ~${cState.currentPrice}`);
+                            logForProfile(profileId, `[${isPaper ? 'PAPER' : 'REAL'}] ⚡ Executing DCA: Buying ${reqQty} contracts at ~${cState.currentPrice} with ${activeLeverage}x leverage.`);
                             
                             if (!isPaper) {
                                 const orderSide = activeSide === 'long' ? 'buy' : 'sell';
@@ -791,7 +798,7 @@ app.post('/api/settings', authMiddleware, async (req, res) => {
         if (sub.triggerRoiPct > 0) sub.triggerRoiPct = -sub.triggerRoiPct;
         if (sub.dcaTargetRoiPct > 0) sub.dcaTargetRoiPct = -sub.dcaTargetRoiPct;
         if (sub.stopLossPct > 0) sub.stopLossPct = -sub.stopLossPct;
-        sub.leverage = 10; 
+        if (!sub.leverage || sub.leverage < 1) sub.leverage = 10;
     });
 
     let finalGlobalSL = parseFloat(globalStopLossPnl) || 0;
@@ -1164,7 +1171,7 @@ app.get('/', (req, res) => {
 
                                 <div class="flex-row">
                                     <div style="flex:1"><label>Side</label><select id="side"><option value="long">Long</option><option value="short">Short</option></select></div>
-                                    <div style="flex:1"><label>Leverage</label><input type="number" id="leverage" disabled value="10"></div>
+                                    <div style="flex:1"><label>Leverage</label><input type="number" id="leverage" value="10"></div>
                                 </div>
                                 <label>Base Contracts Qty</label><input type="number" id="baseQty">
                                 <div class="flex-row">
@@ -1249,7 +1256,7 @@ app.get('/', (req, res) => {
 
             function updateUIMode() {
                 const titleEl = document.getElementById('app-title'); const panicBtn = document.getElementById('panic-btn');
-                const levInput = document.getElementById('leverage'); const adminBtn = document.getElementById('admin-btn');
+                const adminBtn = document.getElementById('admin-btn');
                 const editorBtn = document.getElementById('editor-btn'); const navMain = document.getElementById('nav-main');
                 const navOffsets = document.getElementById('nav-offsets');
                 
@@ -1265,7 +1272,7 @@ app.get('/', (req, res) => {
                     navMain.style.display = 'inline-flex'; navOffsets.style.display = 'inline-flex';
                     if (isPaperUser) { titleEl.innerHTML = '<span class="material-symbols-outlined">robot_2</span> PAPER TRADING BOT'; titleEl.style.color = "var(--primary)"; panicBtn.style.display = "none"; } 
                     else { titleEl.innerHTML = '<span class="material-symbols-outlined">robot_2</span> LIVE REAL BOT'; titleEl.style.color = "var(--success)"; panicBtn.style.display = "inline-flex"; }
-                    if (levInput) levInput.disabled = true; switchTab('main');
+                    switchTab('main');
                     document.getElementById('topBarCounts').style.display = 'inline-block';
                 }
             }
@@ -1353,7 +1360,9 @@ app.get('/', (req, res) => {
                     document.getElementById('settingsContainer').style.display = 'block';
                     document.getElementById('apiKey').value = profile.apiKey || ''; document.getElementById('secret').value = profile.secret || '';
                     const cb = document.getElementById('showActiveKeysCheckbox'); if(cb) { cb.checked = false; toggleActiveKeys(cb); }
-                    document.getElementById('side').value = profile.side || 'long'; document.getElementById('baseQty').value = profile.baseQty !== undefined ? profile.baseQty : 1;
+                    document.getElementById('side').value = profile.side || 'long';
+                    document.getElementById('leverage').value = profile.leverage !== undefined ? profile.leverage : 10;
+                    document.getElementById('baseQty').value = profile.baseQty !== undefined ? profile.baseQty : 1;
                     document.getElementById('takeProfitPct').value = profile.takeProfitPct !== undefined ? profile.takeProfitPct : 5.0;
                     document.getElementById('stopLossPct').value = profile.stopLossPct !== undefined ? profile.stopLossPct : -25.0; 
                     document.getElementById('triggerRoiPct').value = profile.triggerRoiPct !== undefined ? profile.triggerRoiPct : -15.0;
@@ -1415,7 +1424,9 @@ app.get('/', (req, res) => {
                 if(currentProfileIndex === -1) return alert("Load a profile first!");
                 const profile = mySubAccounts[currentProfileIndex];
                 profile.apiKey = document.getElementById('apiKey').value; profile.secret = document.getElementById('secret').value;
-                profile.side = document.getElementById('side').value; profile.baseQty = document.getElementById('baseQty').value !== '' ? parseFloat(document.getElementById('baseQty').value) : 1;
+                profile.side = document.getElementById('side').value;
+                profile.leverage = document.getElementById('leverage').value !== '' ? parseInt(document.getElementById('leverage').value) : 10;
+                profile.baseQty = document.getElementById('baseQty').value !== '' ? parseFloat(document.getElementById('baseQty').value) : 1;
                 profile.takeProfitPct = document.getElementById('takeProfitPct').value !== '' ? parseFloat(document.getElementById('takeProfitPct').value) : 5.0;
                 profile.stopLossPct = document.getElementById('stopLossPct').value !== '' ? parseFloat(document.getElementById('stopLossPct').value) : -25.0;
                 profile.triggerRoiPct = document.getElementById('triggerRoiPct').value !== '' ? parseFloat(document.getElementById('triggerRoiPct').value) : -15.0;
@@ -1580,7 +1591,7 @@ app.get('/', (req, res) => {
                         masterSettings.subAccounts.forEach((sub, i) => {
                             const activeCoins = (sub.coins || []).filter(c => c.botActive);
                             const coinHtml = activeCoins.map(c => \`<span style="display:inline-block; background:\${c.side === 'short' ? '#fad2cf' : '#ceead6'}; color:\${c.side === 'short' ? '#d93025' : '#1e8e3e'}; padding:4px 8px; border-radius:12px; font-size:12px; font-weight:bold; margin:2px;">\${c.symbol} (\${c.side})</span>\`).join(' ');
-                            profilesHtml += \`<div class="stat-box" style="margin-bottom: 24px; border: 1px solid var(--primary); background: #fff;"><div style="background: #e8f0fe; padding: 12px 16px; margin: -16px -16px 16px -16px; border-bottom: 1px solid var(--primary); color: var(--primary); display:flex; justify-content:space-between; font-weight:bold; border-radius: 6px 6px 0 0;"><span>\${i + 1}. \${sub.name}</span><span>Default Side: \${(sub.side || 'long').toUpperCase()}</span></div><div class="flex-row" style="margin-bottom: 16px;"><div class="flex-1"><label style="margin-top:0;">API Key</label><input type="text" id="p_\${i}_apiKey" value="\${sub.apiKey || ''}"></div><div class="flex-1"><label style="margin-top:0;">Secret Key</label><input type="text" id="p_\${i}_secret" value="\${sub.secret || ''}"></div></div><div style="overflow-x:auto;"><table class="md-table" style="margin-bottom: 16px;"><tr><th>Base Qty</th><th>Take Profit %</th><th>Stop Loss %</th><th>DCA Trigger %</th><th>Target ROI %</th><th>Max Contracts</th></tr><tr><td><input type="number" step="1" id="p_\${i}_baseQty" value="\${sub.baseQty !== undefined ? sub.baseQty : 1}"></td><td><input type="number" step="0.1" id="p_\${i}_takeProfitPct" value="\${sub.takeProfitPct !== undefined ? sub.takeProfitPct : 5.0}"></td><td><input type="number" step="0.1" id="p_\${i}_stopLossPct" value="\${sub.stopLossPct !== undefined ? sub.stopLossPct : -25.0}"></td><td><input type="number" step="0.1" id="p_\${i}_triggerRoiPct" value="\${sub.triggerRoiPct !== undefined ? sub.triggerRoiPct : -15.0}"></td><td><input type="number" step="0.1" id="p_\${i}_dcaTargetRoiPct" value="\${sub.dcaTargetRoiPct !== undefined ? sub.dcaTargetRoiPct : -2.0}"></td><td><input type="number" step="1" id="p_\${i}_maxContracts" value="\${sub.maxContracts !== undefined ? sub.maxContracts : 1000}"></td></tr></table></div><p style="margin-bottom: 8px;"><strong>Active Coins Trading (\${activeCoins.length}):</strong></p><div style="margin-bottom: 16px;">\${coinHtml || '<span class="text-secondary">No active coins</span>'}</div><button type="button" class="md-btn md-btn-success" onclick="saveMasterProfile(\${i})">Save Profile \${i + 1}</button><div id="p_\${i}_msg" style="margin-top: 8px; font-weight: bold;"></div></div>\`;
+                            profilesHtml += \`<div class="stat-box" style="margin-bottom: 24px; border: 1px solid var(--primary); background: #fff;"><div style="background: #e8f0fe; padding: 12px 16px; margin: -16px -16px 16px -16px; border-bottom: 1px solid var(--primary); color: var(--primary); display:flex; justify-content:space-between; font-weight:bold; border-radius: 6px 6px 0 0;"><span>\${i + 1}. \${sub.name}</span><span>Default Side: \${(sub.side || 'long').toUpperCase()}</span></div><div class="flex-row" style="margin-bottom: 16px;"><div class="flex-1"><label style="margin-top:0;">API Key</label><input type="text" id="p_\${i}_apiKey" value="\${sub.apiKey || ''}"></div><div class="flex-1"><label style="margin-top:0;">Secret Key</label><input type="text" id="p_\${i}_secret" value="\${sub.secret || ''}"></div></div><div style="overflow-x:auto;"><table class="md-table" style="margin-bottom: 16px;"><tr><th>Leverage</th><th>Base Qty</th><th>Take Profit %</th><th>Stop Loss %</th><th>DCA Trigger %</th><th>Target ROI %</th><th>Max Contracts</th></tr><tr><td><input type="number" step="1" id="p_\${i}_leverage" value="\${sub.leverage !== undefined ? sub.leverage : 10}"></td><td><input type="number" step="1" id="p_\${i}_baseQty" value="\${sub.baseQty !== undefined ? sub.baseQty : 1}"></td><td><input type="number" step="0.1" id="p_\${i}_takeProfitPct" value="\${sub.takeProfitPct !== undefined ? sub.takeProfitPct : 5.0}"></td><td><input type="number" step="0.1" id="p_\${i}_stopLossPct" value="\${sub.stopLossPct !== undefined ? sub.stopLossPct : -25.0}"></td><td><input type="number" step="0.1" id="p_\${i}_triggerRoiPct" value="\${sub.triggerRoiPct !== undefined ? sub.triggerRoiPct : -15.0}"></td><td><input type="number" step="0.1" id="p_\${i}_dcaTargetRoiPct" value="\${sub.dcaTargetRoiPct !== undefined ? sub.dcaTargetRoiPct : -2.0}"></td><td><input type="number" step="1" id="p_\${i}_maxContracts" value="\${sub.maxContracts !== undefined ? sub.maxContracts : 1000}"></td></tr></table></div><p style="margin-bottom: 8px;"><strong>Active Coins Trading (\${activeCoins.length}):</strong></p><div style="margin-bottom: 16px;">\${coinHtml || '<span class="text-secondary">No active coins</span>'}</div><button type="button" class="md-btn md-btn-success" onclick="saveMasterProfile(\${i})">Save Profile \${i + 1}</button><div id="p_\${i}_msg" style="margin-top: 8px; font-weight: bold;"></div></div>\`;
                         });
                     } else { profilesHtml += \`<p class="text-secondary">No profiles configured for the master account.</p>\`; }
                     document.getElementById('editorProfilesContainer').innerHTML = profilesHtml;
@@ -1598,7 +1609,7 @@ app.get('/', (req, res) => {
                 try { const res = await fetch('/api/master/global', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token }, body: JSON.stringify(payload) }); const data = await res.json(); if (data.success) { msgDiv.className = "text-green"; msgDiv.innerText = data.message; } else { msgDiv.className = "text-red"; msgDiv.innerText = "Error: " + data.error; } } catch(err) { msgDiv.className = "text-red"; msgDiv.innerText = "Fetch Error: " + err.message; } setTimeout(() => { msgDiv.innerText = ''; }, 3000);
             }
             async function saveMasterProfile(index) {
-                const payload = { apiKey: document.getElementById('p_' + index + '_apiKey').value, secret: document.getElementById('p_' + index + '_secret').value, baseQty: document.getElementById('p_' + index + '_baseQty').value !== '' ? parseFloat(document.getElementById('p_' + index + '_baseQty').value) : 1, takeProfitPct: document.getElementById('p_' + index + '_takeProfitPct').value !== '' ? parseFloat(document.getElementById('p_' + index + '_takeProfitPct').value) : 5.0, stopLossPct: document.getElementById('p_' + index + '_stopLossPct').value !== '' ? parseFloat(document.getElementById('p_' + index + '_stopLossPct').value) : -25.0, triggerRoiPct: document.getElementById('p_' + index + '_triggerRoiPct').value !== '' ? parseFloat(document.getElementById('p_' + index + '_triggerRoiPct').value) : -15.0, dcaTargetRoiPct: document.getElementById('p_' + index + '_dcaTargetRoiPct').value !== '' ? parseFloat(document.getElementById('p_' + index + '_dcaTargetRoiPct').value) : -2.0, maxContracts: document.getElementById('p_' + index + '_maxContracts').value !== '' ? parseInt(document.getElementById('p_' + index + '_maxContracts').value) : 1000 };
+                const payload = { apiKey: document.getElementById('p_' + index + '_apiKey').value, secret: document.getElementById('p_' + index + '_secret').value, leverage: document.getElementById('p_' + index + '_leverage').value !== '' ? parseInt(document.getElementById('p_' + index + '_leverage').value) : 10, baseQty: document.getElementById('p_' + index + '_baseQty').value !== '' ? parseFloat(document.getElementById('p_' + index + '_baseQty').value) : 1, takeProfitPct: document.getElementById('p_' + index + '_takeProfitPct').value !== '' ? parseFloat(document.getElementById('p_' + index + '_takeProfitPct').value) : 5.0, stopLossPct: document.getElementById('p_' + index + '_stopLossPct').value !== '' ? parseFloat(document.getElementById('p_' + index + '_stopLossPct').value) : -25.0, triggerRoiPct: document.getElementById('p_' + index + '_triggerRoiPct').value !== '' ? parseFloat(document.getElementById('p_' + index + '_triggerRoiPct').value) : -15.0, dcaTargetRoiPct: document.getElementById('p_' + index + '_dcaTargetRoiPct').value !== '' ? parseFloat(document.getElementById('p_' + index + '_dcaTargetRoiPct').value) : -2.0, maxContracts: document.getElementById('p_' + index + '_maxContracts').value !== '' ? parseInt(document.getElementById('p_' + index + '_maxContracts').value) : 1000 };
                 const msgDiv = document.getElementById('p_' + index + '_msg');
                 try { const res = await fetch('/api/master/profile/' + index, { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token }, body: JSON.stringify(payload) }); const data = await res.json(); if (data.success) { msgDiv.className = "text-green"; msgDiv.innerText = data.message; } else { msgDiv.className = "text-red"; msgDiv.innerText = "Error: " + data.error; } } catch(err) { msgDiv.className = "text-red"; msgDiv.innerText = "Fetch Error: " + err.message; } setTimeout(() => { msgDiv.innerText = ''; }, 3000);
             }
