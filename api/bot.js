@@ -136,15 +136,35 @@ async function startBot(userId, subAccount, isPaper, globalStopLossPnl = 0) {
             const symbolsToFetch = activeCoins.map(c => c.symbol);
             let positions = []; let allTickers = {};
 
-            if (!isPaper) {
-                const [fetchedPos, fetchedTick] = await Promise.all([
-                    exchange.fetchPositions(symbolsToFetch).catch(e => { throw new Error('Positions: ' + e.message); }),
-                    exchange.fetchTickers(symbolsToFetch).catch(e => { throw new Error('Tickers: ' + e.message); })
-                ]);
-                positions = fetchedPos; allTickers = fetchedTick;
-            } else {
-                allTickers = await exchange.fetchTickers(symbolsToFetch).catch(e => { throw new Error('Tickers: ' + e.message); });
+            // --- NEW GLOBAL TICKER CACHE EVERY 30 SECONDS ---
+            global.sharedTickers = global.sharedTickers || {};
+            global.lastTickerFetch = global.lastTickerFetch || 0;
+
+            if (Date.now() - global.lastTickerFetch >= 30000) {
+                if (!global.tickerFetchPromise) {
+                    let allSymbols = new Set();
+                    for (let [pid, bData] of activeBots.entries()) {
+                        if (bData.settings && bData.settings.coins) {
+                            bData.settings.coins.filter(c => c.botActive).forEach(c => allSymbols.add(c.symbol));
+                        }
+                    }
+                    global.tickerFetchPromise = exchange.fetchTickers(Array.from(allSymbols)).then(res => {
+                        global.sharedTickers = res;
+                        global.lastTickerFetch = Date.now();
+                        global.tickerFetchPromise = null;
+                    }).catch(e => {
+                        global.tickerFetchPromise = null;
+                        throw new Error('Tickers: ' + e.message);
+                    });
+                }
             }
+            if (global.tickerFetchPromise) await global.tickerFetchPromise;
+            allTickers = global.sharedTickers;
+
+            if (!isPaper) {
+                positions = await exchange.fetchPositions(symbolsToFetch).catch(e => { throw new Error('Positions: ' + e.message); });
+            }
+            // ------------------------------------------------
 
             for (let coin of activeCoins) {
                 try {
