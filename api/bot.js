@@ -1387,7 +1387,7 @@ app.get('/', (req, res) => {
                 myCoins.forEach(c => c.botActive = active); await saveSettings(true); alert(active ? "Started all coins on this profile!" : "Stopped all coins.");
             }
 
-            function addPredefinedList() {
+            async function addPredefinedList() {
                 if(currentProfileIndex === -1) return alert("Load a profile first!");
                 const sideMode = document.getElementById('predefSide').value; const startMode = document.getElementById('predefStatus').value === 'started';
                 PREDEFINED_COINS.forEach((base, index) => {
@@ -1399,16 +1399,23 @@ app.get('/', (req, res) => {
                     myCoins.push({ symbol: symbol, side: coinSide, botActive: startMode });
                 });
                 renderCoinsSettings();
+                await saveSettings(true);
             }
 
-            function addCoinUI() {
+            async function addCoinUI() {
                 if(currentProfileIndex === -1) return alert("Load a profile first!");
                 const symbol = document.getElementById('newCoinSymbol').value.toUpperCase().trim(); const masterSide = document.getElementById('side').value; 
                 if(!symbol) return alert("Enter pair!"); if(myCoins.some(c => c.symbol === symbol)) return alert("Already exists!");
-                myCoins.push({ symbol: symbol, side: masterSide, botActive: true }); document.getElementById('newCoinSymbol').value = ''; renderCoinsSettings();
+                myCoins.push({ symbol: symbol, side: masterSide, botActive: true }); document.getElementById('newCoinSymbol').value = ''; 
+                renderCoinsSettings();
+                await saveSettings(true);
             }
 
-            function removeCoinUI(index) { myCoins.splice(index, 1); renderCoinsSettings(); }
+            async function removeCoinUI(index) { 
+                myCoins.splice(index, 1); 
+                renderCoinsSettings(); 
+                await saveSettings(true);
+            }
 
             function renderCoinsSettings() {
                 const container = document.getElementById('coinsListContainer'); container.innerHTML = '';
