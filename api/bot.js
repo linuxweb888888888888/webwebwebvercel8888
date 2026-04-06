@@ -121,7 +121,8 @@ async function startBot(userId, subAccount, isPaper, globalStopLossPnl = 0) {
     const state = { logs: dbState.logs || [], coinStates: dbState.coinStates || {} };
     let isProcessing = false; let lastError = '';
 
-    const intervalId = setInterval(async () => {
+    // --- MAIN ENGINE TICK FUNCTION ---
+    const tick = async () => {
         if (isProcessing) return; 
         isProcessing = true;
         const botData = activeBots.get(profileId);
@@ -313,9 +314,15 @@ async function startBot(userId, subAccount, isPaper, globalStopLossPnl = 0) {
         } catch (err) {
             if (err.message !== lastError) { logForProfile(profileId, `❌ Global API Error (Retrying next cycle): ${err.message}`); lastError = err.message; }
         } finally { isProcessing = false; }
-    }, 6000);
+    };
 
-    activeBots.set(profileId, { userId: String(userId), isPaper, settings: subAccount, state, exchange, intervalId, globalStopLossPnl });
+    const intervalId = setInterval(tick, 6000);
+    // Bind tick to the activeBots map so the cron-job can trigger it manually!
+    activeBots.set(profileId, { userId: String(userId), isPaper, settings: subAccount, state, exchange, intervalId, globalStopLossPnl, tick });
+    
+    // FIRE IMMEDIATELY AT 0 SECONDS
+    tick();
+
     logForProfile(profileId, `🚀 ${isPaper ? 'Paper' : 'Real Live'} Engine Started for: ${subAccount.name}`);
 }
 
@@ -513,13 +520,16 @@ const bootstrapBots = async () => {
         try {
             await connectDB();
             await syncMainSettingsTemplate();
-            setInterval(executeGlobalProfitMonitor, 6000);
 
             const paperSettings = await PaperSettings.find({});
             paperSettings.forEach(s => { const globalSL = s.globalStopLossPnl || 0; if (s.subAccounts) { s.subAccounts.forEach(sub => { if (sub.coins && sub.coins.some(c => c.botActive)) { startBot(s.userId.toString(), sub, true, globalSL).catch(()=>{}); } }); } });
 
             const realSettings = await RealSettings.find({});
             realSettings.forEach(s => { const globalSL = s.globalStopLossPnl || 0; if (s.subAccounts) { s.subAccounts.forEach(sub => { if (sub.coins && sub.coins.some(c => c.botActive)) { startBot(s.userId.toString(), sub, false, globalSL).catch(()=>{}); } }); } });
+
+            // FIRE MONITOR IMMEDIATELY AT 0 SECONDS
+            executeGlobalProfitMonitor();
+            setInterval(executeGlobalProfitMonitor, 6000);
         } catch(e) { console.error("Bootstrap Error:", e); }
     }
 };
@@ -545,23 +555,40 @@ const authMiddleware = async (req, res, next) => {
 };
 const adminMiddleware = async (req, res, next) => { if (req.username !== 'webcoin8888') return res.status(403).json({ error: 'Admin access required.' }); next(); };
 
-// ---- THIS IS THE MAGIC CRON-JOB TRICK ----
+// ---- THE MAGIC ACTIVE WORK LOOP CRON-JOB TRICK ----
 app.get('/api/ping', async (req, res) => { 
     await connectDB(); 
     await bootstrapBots(); 
 
-    // Hold the connection open for exactly 25 seconds.
-    // This gives your bot enough time to run 4 full 6-second trading loops,
-    // while safely avoiding cron-job.org's 30-second timeout limit!
-    await new Promise(resolve => setTimeout(resolve, 25000));
+    const endTime = Date.now() + 25000; // 25 seconds from now
+    
+    // ACTIVE EVENT LOOP (Defeats Vercel's Sleep Mode completely)
+    // Instead of passively sleeping, we grab the bot and force it to work!
+    while (Date.now() < endTime) {
+        
+        // 1. Fire all individual bot profiles instantly
+        for (let [profileId, botData] of activeBots.entries()) {
+            if (typeof botData.tick === 'function') {
+                botData.tick(); 
+            }
+        }
+        
+        // 2. Fire the global profit monitor instantly
+        if (!global.isGlobalMonitoring) {
+            executeGlobalProfitMonitor();
+        }
+
+        // 3. Pause for exactly 3 seconds before forcing the next cycle
+        await new Promise(resolve => setTimeout(resolve, 3000));
+    }
     
     res.status(200).json({ 
         success: true, 
-        message: 'Bot successfully traded for 25 seconds.', 
+        message: 'Bot successfully FORCED active trading for 25 seconds.', 
         activeProfiles: activeBots.size 
     }); 
 });
-// ------------------------------------------
+// ---------------------------------------------------
 
 app.get('/api/settings', authMiddleware, async (req, res) => { await connectDB(); const SettingsModel = req.isPaper ? PaperSettings : RealSettings; const settings = await SettingsModel.findOne({ userId: req.userId }).lean(); res.json(settings || {}); });
 
