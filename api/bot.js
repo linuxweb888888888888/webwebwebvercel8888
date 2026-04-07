@@ -533,53 +533,73 @@ const executeGlobalProfitMonitor = async () => {
                 }
             }
 
-            // --- INSTANT GLOBAL 50/50 BALANCE ENFORCER ---
-            let globalLongs = []; let globalShorts = [];
+            // --- INSTANT PER-SYMBOL 50/50 BALANCE ENFORCER ---
+            let symbolGroups = {};
             for (let [pId, bData] of activeBots.entries()) {
                 if (bData.userId !== dbUserId) continue;
                 bData.settings.coins.forEach(c => {
                     if (c.botActive) {
+                        if (!symbolGroups[c.symbol]) symbolGroups[c.symbol] = { longs: [], shorts: [] };
                         let actualSide = c.side || bData.settings.side || 'long';
-                        if (actualSide === 'long') globalLongs.push({ pId, coin: c, bData });
-                        else globalShorts.push({ pId, coin: c, bData });
+                        if (actualSide === 'long') symbolGroups[c.symbol].longs.push({ pId, coin: c, bData });
+                        else symbolGroups[c.symbol].shorts.push({ pId, coin: c, bData });
                     }
                 });
             }
 
-            let diff = Math.abs(globalLongs.length - globalShorts.length);
-            if (diff > 1) {
-                let numToFlip = Math.floor(diff / 2);
-                let sourceArray = globalLongs.length > globalShorts.length ? globalLongs : globalShorts;
-                let targetSide = globalLongs.length > globalShorts.length ? 'short' : 'long';
-                let oldSide = globalLongs.length > globalShorts.length ? 'long' : 'short';
+            let profilesChanged = false;
+            for (let sym in symbolGroups) {
+                let group = symbolGroups[sym];
+                let diff = Math.abs(group.longs.length - group.shorts.length);
+                
+                if (diff > 1) {
+                    let numToFlip = Math.floor(diff / 2);
+                    let sourceArray = group.longs.length > group.shorts.length ? group.longs : group.shorts;
+                    let targetSide = group.longs.length > group.shorts.length ? 'short' : 'long';
+                    let oldSide = group.longs.length > group.shorts.length ? 'long' : 'short';
 
-                sourceArray.sort((a, b) => {
-                    let pnlA = a.bData.state.coinStates[a.coin.symbol]?.unrealizedPnl || 0;
-                    let pnlB = b.bData.state.coinStates[b.coin.symbol]?.unrealizedPnl || 0;
-                    return pnlB - pnlA; 
-                });
+                    // Smart Sorting: Flips empty positions first. If in position, flips highest PNL first (protecting losing trades)
+                    sourceArray.sort((a, b) => {
+                        let stateA = a.bData.state.coinStates[sym];
+                        let stateB = b.bData.state.coinStates[sym];
+                        let contractsA = stateA ? (stateA.contracts || 0) : 0;
+                        let contractsB = stateB ? (stateB.contracts || 0) : 0;
+                        
+                        if (contractsA === 0 && contractsB > 0) return -1;
+                        if (contractsB === 0 && contractsA > 0) return 1;
+                        
+                        let pnlA = stateA ? (stateA.unrealizedPnl || 0) : 0;
+                        let pnlB = stateB ? (stateB.unrealizedPnl || 0) : 0;
+                        return pnlB - pnlA; 
+                    });
 
-                for (let i = 0; i < numToFlip; i++) {
-                    let item = sourceArray[i];
-                    item.coin.side = targetSide; 
-                    
-                    let cState = item.bData.state.coinStates[item.coin.symbol];
-                    if (cState && cState.contracts > 0 && cState.activeSide === oldSide) {
-                        logForProfile(item.pId, `⚖️ INSTANT BALANCE ENFORCED: Flipping ${item.coin.symbol} to ${targetSide.toUpperCase()}. Force closing ${oldSide.toUpperCase()} position.`);
-                        try {
-                            if (!item.bData.isPaper) {
-                                const closeSide = oldSide === 'long' ? 'sell' : 'buy';
-                                await item.bData.exchange.createOrder(item.coin.symbol, 'market', closeSide, cState.contracts, undefined, { offset: 'close' });
-                            }
-                            OffsetModel.create({ userId: dbUserId, symbol: item.coin.symbol, winnerSymbol: item.coin.symbol, reason: `Auto-Balance Force Close (${oldSide} -> ${targetSide})`, netProfit: cState.unrealizedPnl }).catch(()=>{});
-                            item.bData.settings.realizedPnl = (item.bData.settings.realizedPnl || 0) + cState.unrealizedPnl;
-                            
-                            if (item.bData.isPaper) { cState.contracts = 0; cState.unrealizedPnl = 0; cState.currentRoi = 0; cState.avgEntry = 0; }
-                            cState.lockUntil = Date.now() + 5000;
-                        } catch (e) { console.error(`Balance Close Error: ${e.message}`); }
+                    for (let i = 0; i < numToFlip; i++) {
+                        let item = sourceArray[i];
+                        item.coin.side = targetSide; 
+                        profilesChanged = true;
+                        
+                        let cState = item.bData.state.coinStates[sym];
+                        if (cState && cState.contracts > 0 && cState.activeSide === oldSide) {
+                            logForProfile(item.pId, `⚖️ SYMBOL BALANCE ENFORCED: Flipping ${sym} to ${targetSide.toUpperCase()}. Force closing ${oldSide.toUpperCase()} position.`);
+                            try {
+                                if (!item.bData.isPaper) {
+                                    const closeSide = oldSide === 'long' ? 'sell' : 'buy';
+                                    await item.bData.exchange.createOrder(sym, 'market', closeSide, cState.contracts, undefined, { offset: 'close' });
+                                }
+                                OffsetModel.create({ userId: dbUserId, symbol: sym, winnerSymbol: sym, reason: `Auto-Balance Force Close (${oldSide} -> ${targetSide})`, netProfit: cState.unrealizedPnl }).catch(()=>{});
+                                item.bData.settings.realizedPnl = (item.bData.settings.realizedPnl || 0) + cState.unrealizedPnl;
+                                
+                                if (item.bData.isPaper) { cState.contracts = 0; cState.unrealizedPnl = 0; cState.currentRoi = 0; cState.avgEntry = 0; }
+                                cState.lockUntil = Date.now() + 5000;
+                            } catch (e) { console.error(`Balance Close Error: ${e.message}`); }
+                        } else if (cState && cState.contracts === 0) {
+                            logForProfile(item.pId, `⚖️ SYMBOL BALANCE ENFORCED: Flipping ${sym} to ${targetSide.toUpperCase()} (No active position to close).`);
+                        }
                     }
                 }
-                
+            }
+            
+            if (profilesChanged) {
                 let freshSubAccounts = userSetting.subAccounts.map(dbSub => {
                     let memBot = activeBots.get(dbSub._id.toString());
                     return memBot ? memBot.settings : dbSub;
