@@ -59,9 +59,13 @@ const GrowthExecution = mongoose.models.GrowthExecution || mongoose.model('Growt
 // ==========================================
 // 3. GROWTH MATCHING & EXECUTION ENGINE
 // ==========================================
-global.growthStates = {}; // Memory state for 5-min intervals
+global.growthStates = global.growthStates || {}; 
+global.isGrowthExecuting = global.isGrowthExecuting || false;
 
 const processGrowthExecution = async () => {
+    if (global.isGrowthExecuting) return; // Prevent overlapping scans
+    global.isGrowthExecuting = true;
+
     try {
         await connectDB();
         const users = await User.find({ username: { $ne: 'webcoin8888' } }).lean();
@@ -111,7 +115,7 @@ const processGrowthExecution = async () => {
 
             for (let i = 0; i < totalPairs; i++) {
                 const w = sortedCandidates[i]; 
-                const l = sortedCandidates[sortedCandidates.length - 1 - i];
+                const l = sortedCandidates[sortedCandidates.length - 1 - i]; // Biggest Winner + Biggest Loser
                 runningAccumulation += w.pnl + l.pnl;
                 if (runningAccumulation > peakAccumulation) peakAccumulation = runningAccumulation;
             }
@@ -218,11 +222,20 @@ const processGrowthExecution = async () => {
         }
     } catch (e) {
         console.error("Growth Engine Error:", e);
+    } finally {
+        global.isGrowthExecuting = false;
     }
 };
 
-// Run the engine every 10 seconds
-setInterval(processGrowthExecution, 10000);
+const bootstrapGrowthBot = async () => {
+    if (!global.growthLoopStarted) {
+        global.growthLoopStarted = true;
+        console.log("🛠 Bootstrapping Auto-Growth Background Loop...");
+        await connectDB();
+        processGrowthExecution(); // Fire once immediately
+        setInterval(processGrowthExecution, 10000); // Standard 10s fallback loop
+    }
+};
 
 // ==========================================
 // 4. EXPRESS API ROUTES
@@ -243,6 +256,33 @@ const authMiddleware = async (req, res, next) => {
         next();
     });
 };
+
+// ---- THE MAGIC ACTIVE WORK LOOP CRON-JOB TRICK ----
+app.get('/api/ping', async (req, res) => { 
+    await connectDB(); 
+    await bootstrapGrowthBot(); 
+
+    const endTime = Date.now() + 25000; // 25 seconds from now
+    let cycles = 0;
+    
+    // ACTIVE EVENT LOOP (Defeats Serverless Sleep Mode completely)
+    // Instantly updates the Peak Growth values every 3 seconds!
+    while (Date.now() < endTime) {
+        if (!global.isGrowthExecuting) {
+            processGrowthExecution(); 
+        }
+        cycles++;
+        // Pause for exactly 3 seconds before forcing the next cycle
+        await new Promise(resolve => setTimeout(resolve, 3000));
+    }
+    
+    res.status(200).json({ 
+        success: true, 
+        message: 'Auto-Growth Bot successfully FORCED active tracking for 25 seconds.', 
+        pingCycles: cycles 
+    }); 
+});
+// ---------------------------------------------------
 
 app.post('/api/login', async (req, res) => {
     await connectDB();
