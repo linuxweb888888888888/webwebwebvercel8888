@@ -33,11 +33,10 @@ const connectDB = async () => {
 const UserSchema = new mongoose.Schema({ username: { type: String, required: true, unique: true }, password: { type: String, required: true }, isPaper: { type: Boolean, default: true } });
 const User = mongoose.models.User || mongoose.model('User', UserSchema);
 
-// strict: false ensures we don't accidentally overwrite the main bot's complex settings
 const SettingsSchema = new mongoose.Schema({ 
     userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' }, 
     subAccounts: Array,
-    growthWindowMinutes: { type: Number, default: 1 } // Configurable Window
+    growthWindowMinutes: { type: Number, default: 1 } 
 }, { strict: false });
 const PaperSettings = mongoose.models.PaperSettings || mongoose.model('PaperSettings', SettingsSchema, 'paper_settings');
 const RealSettings = mongoose.models.Settings || mongoose.model('Settings', SettingsSchema, 'settings');
@@ -50,7 +49,6 @@ const OffsetRecordSchema = new mongoose.Schema({ userId: { type: mongoose.Schema
 const RealOffsetRecord = mongoose.models.OffsetRecord || mongoose.model('OffsetRecord', OffsetRecordSchema, 'offset_records');
 const PaperOffsetRecord = mongoose.models.PaperOffsetRecord || mongoose.model('PaperOffsetRecord', OffsetRecordSchema, 'paper_offset_records');
 
-// Dedicated History for the Growth Bot UI
 const GrowthExecutionSchema = new mongoose.Schema({
     userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
     isPaper: { type: Boolean },
@@ -68,7 +66,7 @@ global.growthStates = global.growthStates || {};
 global.isGrowthExecuting = global.isGrowthExecuting || false;
 
 const processGrowthExecution = async () => {
-    if (global.isGrowthExecuting) return; // Prevent overlapping scans
+    if (global.isGrowthExecuting) return; 
     global.isGrowthExecuting = true;
 
     try {
@@ -83,7 +81,6 @@ const processGrowthExecution = async () => {
             const settings = await SettingsModel.findOne({ userId: u._id }).lean();
             if (!settings || !settings.subAccounts) continue;
 
-            // Fetch configurable window (default to 1 minute)
             const windowMinutes = settings.growthWindowMinutes || 1;
             const windowMs = windowMinutes * 60 * 1000;
 
@@ -92,7 +89,6 @@ const processGrowthExecution = async () => {
 
             let activeCandidates = [];
 
-            // Gather all active trades with Full Metadata for CCXT execution
             userStates.forEach(st => {
                 const subAcc = settings.subAccounts.find(s => s._id.toString() === st.profileId.toString());
                 if (!subAcc) return;
@@ -117,19 +113,17 @@ const processGrowthExecution = async () => {
 
             if (activeCandidates.length < 2) continue;
 
-            // 1. Calculate the current absolute Peak
             let sortedCandidates = [...activeCandidates].sort((a, b) => b.pnl - a.pnl);
             const totalPairs = Math.floor(sortedCandidates.length / 2);
             let peakAccumulation = 0; let runningAccumulation = 0;
 
             for (let i = 0; i < totalPairs; i++) {
                 const w = sortedCandidates[i]; 
-                const l = sortedCandidates[sortedCandidates.length - 1 - i]; // Biggest Winner + Biggest Loser
+                const l = sortedCandidates[sortedCandidates.length - 1 - i]; 
                 runningAccumulation += w.pnl + l.pnl;
                 if (runningAccumulation > peakAccumulation) peakAccumulation = runningAccumulation;
             }
 
-            // 2. State & Timer Management
             let userIdStr = u._id.toString();
             if (!global.growthStates[userIdStr]) {
                 const lastExec = await GrowthExecution.findOne({ userId: u._id }).sort({ timestamp: -1 });
@@ -146,20 +140,16 @@ const processGrowthExecution = async () => {
             state.livePeak = peakAccumulation;
             state.nextCloseTime = state.lastTime + windowMs;
 
-            // 3. Trigger Target Search Window
             if (elapsed >= windowMs) {
                 let deltaGrowth = peakAccumulation - state.lastPeak;
                 let symbolsClosed = [];
                 
-                // Only process if delta is a meaningful movement
                 if (Math.abs(deltaGrowth) >= 0.0001) {
-                    
                     let target = deltaGrowth;
                     let bestMatch = null;
                     let smallestDiff = Infinity;
-                    const TOLERANCE = 0.0015; // Must be within $0.0015 of the target value
+                    const TOLERANCE = 0.0015; 
 
-                    // A. Search for Single Coin Matches
                     for (let c of activeCandidates) {
                         let diff = Math.abs(c.pnl - target);
                         if (diff <= TOLERANCE && diff < smallestDiff) {
@@ -167,7 +157,6 @@ const processGrowthExecution = async () => {
                         }
                     }
 
-                    // B. Search for Pair Matches (Groups of 2)
                     for (let i = 0; i < activeCandidates.length; i++) {
                         for (let j = i + 1; j < activeCandidates.length; j++) {
                             let sum = activeCandidates[i].pnl + activeCandidates[j].pnl;
@@ -178,7 +167,6 @@ const processGrowthExecution = async () => {
                         }
                     }
 
-                    // C. Execute if Match Found
                     if (bestMatch && bestMatch.length > 0) {
                         let actualNetClosed = 0;
 
@@ -189,7 +177,6 @@ const processGrowthExecution = async () => {
                                     const closeSide = pos.side === 'long' ? 'sell' : 'buy';
                                     await exchange.createOrder(pos.symbol, 'market', closeSide, pos.contracts, undefined, { offset: 'close' });
                                 } else {
-                                    // Lock paper profile to simulate close
                                     const bState = await StateModel.findOne({ profileId: pos.profileId });
                                     if (bState && bState.coinStates && bState.coinStates[pos.symbol]) {
                                         bState.coinStates[pos.symbol].contracts = 0;
@@ -199,33 +186,23 @@ const processGrowthExecution = async () => {
                                         await bState.save();
                                     }
                                 }
-
                                 actualNetClosed += pos.pnl;
                                 symbolsClosed.push(pos.symbol);
 
-                                // Update Realized PNL locally
                                 pos.subAccount.realizedPnl = (pos.subAccount.realizedPnl || 0) + pos.pnl;
                                 await SettingsModel.updateOne({ "subAccounts._id": pos.subAccount._id }, { $set: { "subAccounts.$.realizedPnl": pos.subAccount.realizedPnl } });
 
-                            } catch (e) { console.error(`Growth Execution CCXT Error: ${e.message}`); }
+                            } catch (e) { console.error(`Growth Execution Error: ${e.message}`); }
                         }
 
-                        // Write to Main Bot Offset History
                         await OffsetModel.create({ userId: u._id, symbol: symbolsClosed.join(' & '), winnerSymbol: 'Growth', loserSymbol: 'Match', reason: `${windowMinutes}-Min Growth Target Met (Target: $${deltaGrowth.toFixed(4)})`, netProfit: actualNetClosed });
-
-                        // Write to Growth Bot Local UI History
                         await GrowthExecution.create({ userId: u._id, isPaper: u.isPaper, deltaGrowth: deltaGrowth, executedPnl: actualNetClosed, coins: symbolsClosed });
-
-                        console.log(`[GROWTH BOT] Executed ${symbolsClosed.length} trades for ${u.username}. Target: $${deltaGrowth.toFixed(4)} | Closed: $${actualNetClosed.toFixed(4)}`);
+                        console.log(`[GROWTH BOT] Executed trades for ${u.username}. Target: $${deltaGrowth.toFixed(4)}`);
                     } else {
-                        // Log that a cycle passed but no math match was found
                         await GrowthExecution.create({ userId: u._id, isPaper: u.isPaper, deltaGrowth: deltaGrowth, executedPnl: 0, coins: ['No Tolerance Match Found'] });
                     }
                 }
 
-                // ==========================================
-                // RECALCULATE BASELINE (Start Growth from 0)
-                // ==========================================
                 let newBaselinePeak = peakAccumulation;
                 
                 if (symbolsClosed.length > 0) {
@@ -242,7 +219,6 @@ const processGrowthExecution = async () => {
                     }
                 }
 
-                // Reset timer and set NEW baseline peak for the next cycle
                 state.lastPeak = newBaselinePeak;
                 state.livePeak = newBaselinePeak; 
                 state.lastTime = now;
@@ -259,10 +235,9 @@ const processGrowthExecution = async () => {
 const bootstrapGrowthBot = async () => {
     if (!global.growthLoopStarted) {
         global.growthLoopStarted = true;
-        console.log("🛠 Bootstrapping Auto-Growth Background Loop...");
         await connectDB();
-        processGrowthExecution(); // Fire once immediately
-        setInterval(processGrowthExecution, 10000); // Standard 10s fallback loop
+        processGrowthExecution(); 
+        setInterval(processGrowthExecution, 10000); 
     }
 };
 
@@ -286,31 +261,18 @@ const authMiddleware = async (req, res, next) => {
     });
 };
 
-// ---- THE MAGIC ACTIVE WORK LOOP CRON-JOB TRICK ----
 app.get('/api/ping', async (req, res) => { 
     await connectDB(); 
     await bootstrapGrowthBot(); 
-
-    const endTime = Date.now() + 25000; // 25 seconds from now
+    const endTime = Date.now() + 25000; 
     let cycles = 0;
-    
-    // ACTIVE EVENT LOOP (Defeats Serverless Sleep Mode completely)
     while (Date.now() < endTime) {
-        if (!global.isGrowthExecuting) {
-            processGrowthExecution(); 
-        }
+        if (!global.isGrowthExecuting) processGrowthExecution(); 
         cycles++;
-        // Pause for exactly 3 seconds before forcing the next cycle
         await new Promise(resolve => setTimeout(resolve, 3000));
     }
-    
-    res.status(200).json({ 
-        success: true, 
-        message: 'Auto-Growth Bot successfully FORCED active tracking for 25 seconds.', 
-        pingCycles: cycles 
-    }); 
+    res.status(200).json({ success: true, pingCycles: cycles }); 
 });
-// ---------------------------------------------------
 
 app.post('/api/login', async (req, res) => {
     await connectDB();
@@ -327,7 +289,6 @@ app.get('/api/growth/live', authMiddleware, async (req, res) => {
     const SettingsModel = req.isPaper ? PaperSettings : RealSettings;
     const settings = await SettingsModel.findOne({ userId: req.userId }).lean();
     const windowMinutes = settings?.growthWindowMinutes || 1;
-
     const state = global.growthStates[req.userId] || { livePeak: 0, nextCloseTime: Date.now() + (windowMinutes * 60000), lastPeak: 0 };
     res.json({ ...state, windowMinutes });
 });
@@ -336,14 +297,10 @@ app.post('/api/growth/settings', authMiddleware, async (req, res) => {
     const SettingsModel = req.isPaper ? PaperSettings : RealSettings;
     let windowMinutes = parseInt(req.body.windowMinutes);
     if (isNaN(windowMinutes) || windowMinutes < 1) windowMinutes = 1;
-
     await SettingsModel.updateOne({ userId: req.userId }, { $set: { growthWindowMinutes: windowMinutes } });
-
     if (global.growthStates[req.userId]) {
-        // Adjust the live countdown instantly
         global.growthStates[req.userId].nextCloseTime = global.growthStates[req.userId].lastTime + (windowMinutes * 60000);
     }
-    
     res.json({ success: true, windowMinutes });
 });
 
@@ -354,7 +311,7 @@ app.get('/api/growth/history', authMiddleware, async (req, res) => {
 });
 
 // ==========================================
-// 5. FRONTEND UI (CYBERPUNK / DARK DESIGN)
+// 5. FRONTEND UI (MATERIAL DESIGN - GREEN BASE)
 // ==========================================
 app.get('/', (req, res) => {
     res.send(`
@@ -363,105 +320,170 @@ app.get('/', (req, res) => {
     <head>
         <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
         <title>Growth Executer Bot</title>
-        <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700;800&family=Inter:wght@400;600;800&display=swap" rel="stylesheet">
+        <!-- Material Icons & Clean Fonts -->
+        <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+        <link href="https://fonts.googleapis.com/icon?family=Material+Icons+Round" rel="stylesheet">
         <style>
             :root { 
-                --bg: #090a0f; --surface: #13151c; --surface-border: #1f222e; 
-                --text: #e2e8f0; --text-muted: #94a3b8;
-                --neon-green: #10b981; --neon-red: #ef4444; 
-                --neon-blue: #0ea5e9; --neon-purple: #8b5cf6; --neon-orange: #f59e0b;
+                /* Material Colors & Green Base */
+                --bg: #f4f7f6; 
+                --surface: #ffffff; 
+                --surface-border: #e0e0e0; 
+                --text: #2c3e50; 
+                --text-muted: #7f8c8d;
+                --primary: #2e7d32;       /* Material Green 800 */
+                --primary-light: #4caf50; /* Material Green 500 */
+                --primary-hover: #1b5e20; /* Material Green 900 */
+                --up-color: #2e7d32;
+                --down-color: #c62828;
+                --warn-color: #f57c00;
+                --shadow-sm: 0 1px 3px rgba(0,0,0,0.05), 0 1px 2px rgba(0,0,0,0.03);
+                --shadow-md: 0 4px 6px rgba(0,0,0,0.05), 0 1px 3px rgba(0,0,0,0.04);
+                --shadow-lg: 0 10px 15px rgba(0,0,0,0.05), 0 4px 6px rgba(0,0,0,0.03);
             }
             body { font-family: 'Inter', sans-serif; background: var(--bg); color: var(--text); margin: 0; padding: 0; }
-            .mono { font-family: 'JetBrains Mono', monospace; }
             
-            .navbar { background: rgba(19, 21, 28, 0.8); backdrop-filter: blur(10px); border-bottom: 1px solid var(--surface-border); padding: 15px 30px; display: flex; justify-content: space-between; align-items: center; position: sticky; top: 0; z-index: 100; }
-            .logo { font-size: 1.5rem; font-weight: 800; color: var(--neon-blue); letter-spacing: -0.5px; text-transform: uppercase; }
-            .logo span { color: var(--neon-orange); }
+            /* Navbar */
+            .navbar { background: var(--surface); border-bottom: 1px solid var(--surface-border); padding: 16px 32px; display: flex; justify-content: space-between; align-items: center; position: sticky; top: 0; z-index: 100; box-shadow: var(--shadow-sm); }
+            .logo { font-size: 1.4rem; font-weight: 700; color: var(--text); display: flex; align-items: center; gap: 8px; letter-spacing: -0.5px; }
+            .logo .material-icons-round { color: var(--primary); font-size: 1.8rem; }
+            .logo span { color: var(--primary); }
             
+            /* Layout */
             .container { max-width: 1200px; margin: 40px auto; padding: 0 20px; }
-            .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 20px; margin-bottom: 30px; }
+            .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 24px; margin-bottom: 32px; }
             
-            .panel { background: var(--surface); border: 1px solid var(--surface-border); border-radius: 12px; padding: 25px; box-shadow: 0 8px 30px rgba(0,0,0,0.5); }
-            .panel h2 { margin: 0 0 15px 0; font-size: 1rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 1px; }
+            /* Panels */
+            .panel { background: var(--surface); border: 1px solid var(--surface-border); border-radius: 12px; padding: 28px; box-shadow: var(--shadow-md); transition: transform 0.2s, box-shadow 0.2s; }
+            .panel:hover { box-shadow: var(--shadow-lg); transform: translateY(-2px); }
+            .panel h2 { margin: 0 0 16px 0; font-size: 0.95rem; font-weight: 600; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; display: flex; align-items: center; gap: 8px; }
+            .panel h2 .material-icons-round { font-size: 1.2rem; color: var(--primary-light); }
             
-            .big-stat { font-size: 2.2rem; font-weight: 800; margin: 0; text-shadow: 0 0 20px rgba(0,0,0,0.5); }
-            .text-up { color: var(--neon-green); text-shadow: 0 0 15px rgba(16, 185, 129, 0.3); }
-            .text-down { color: var(--neon-red); text-shadow: 0 0 15px rgba(239, 68, 68, 0.3); }
-            .text-warn { color: var(--neon-orange); text-shadow: 0 0 15px rgba(245, 158, 11, 0.3); }
+            /* Typography inside Panels */
+            .big-stat { font-size: 2.4rem; font-weight: 700; margin: 0; }
+            .text-up { color: var(--up-color); }
+            .text-down { color: var(--down-color); }
+            .text-warn { color: var(--warn-color); }
             
-            input { width: 100%; padding: 14px; background: #0f1117; border: 1px solid var(--surface-border); color: white; border-radius: 8px; font-family: 'Inter', sans-serif; margin-bottom: 15px; box-sizing: border-box; }
-            input:focus { border-color: var(--neon-blue); outline: none; }
+            /* Inputs */
+            .input-group { position: relative; margin-bottom: 16px; display: flex; align-items: center; }
+            .input-group .material-icons-round { position: absolute; left: 14px; color: var(--text-muted); font-size: 1.2rem; }
+            input { width: 100%; padding: 14px 14px 14px 44px; background: #fafafa; border: 1px solid var(--surface-border); color: var(--text); border-radius: 8px; font-family: 'Inter', sans-serif; font-size: 0.95rem; transition: border-color 0.2s, background 0.2s; box-sizing: border-box; }
+            input:focus { border-color: var(--primary); background: #fff; outline: none; box-shadow: 0 0 0 3px rgba(76, 175, 80, 0.15); }
             
-            .btn { width: 100%; padding: 14px; background: linear-gradient(135deg, var(--neon-orange), var(--neon-red)); border: none; color: white; font-weight: 700; border-radius: 8px; cursor: pointer; transition: transform 0.2s, box-shadow 0.2s; font-size: 1rem; }
-            .btn:hover { transform: translateY(-2px); box-shadow: 0 5px 20px rgba(239, 68, 68, 0.4); }
+            /* Buttons */
+            .btn { width: 100%; padding: 14px; background: var(--primary); border: none; color: white; font-weight: 600; font-size: 0.95rem; border-radius: 8px; cursor: pointer; transition: background 0.2s, transform 0.1s, box-shadow 0.2s; display: flex; justify-content: center; align-items: center; gap: 8px; box-shadow: 0 2px 4px rgba(46, 125, 50, 0.2); }
+            .btn:hover { background: var(--primary-hover); transform: translateY(-1px); box-shadow: 0 4px 8px rgba(46, 125, 50, 0.3); }
+            .btn:active { transform: translateY(0); box-shadow: none; }
             
+            /* Table styling */
             table { width: 100%; border-collapse: collapse; text-align: left; }
-            th { padding: 15px; border-bottom: 1px solid var(--surface-border); color: var(--text-muted); font-size: 0.85rem; text-transform: uppercase; letter-spacing: 1px; }
-            td { padding: 15px; border-bottom: 1px solid var(--surface-border); font-size: 0.95rem; }
+            th { padding: 16px; border-bottom: 2px solid var(--surface-border); color: var(--text-muted); font-size: 0.85rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; }
+            td { padding: 16px; border-bottom: 1px solid var(--surface-border); font-size: 0.95rem; color: var(--text); }
+            tr:hover td { background-color: #f9fbf9; }
             
-            .coin-badge { display: inline-block; background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1); padding: 4px 8px; border-radius: 4px; font-size: 0.75rem; margin: 2px; color: var(--text-muted); }
+            /* Coin badges (Subtle Green) */
+            .coin-badge { display: inline-flex; align-items: center; background: #e8f5e9; border: 1px solid #c8e6c9; padding: 4px 10px; border-radius: 6px; font-size: 0.8rem; font-weight: 600; margin: 2px; color: var(--primary); }
             
-            #auth-view { max-width: 400px; margin: 15vh auto; }
+            /* Timer */
+            .timer-box { font-size: 2.2rem; font-weight: 700; color: var(--text); letter-spacing: 1px; }
+            
+            /* Layout Containers */
+            #auth-view { max-width: 420px; margin: 12vh auto; }
             #dashboard-view { display: none; }
             
-            .timer-box { font-family: 'JetBrains Mono', monospace; font-size: 2rem; color: var(--neon-blue); letter-spacing: 2px; }
+            .flex-center { display: flex; align-items: center; gap: 12px; }
         </style>
     </head>
     <body>
 
         <!-- AUTH SCREEN -->
         <div id="auth-view" class="panel">
-            <div class="logo" style="text-align: center; margin-bottom: 30px;">Auto<span>Growth</span> Bot</div>
-            <input type="text" id="username" placeholder="HTX Bot Username">
-            <input type="password" id="password" placeholder="Password">
-            <button class="btn" onclick="login()">INITIALIZE LINK</button>
-            <p id="auth-msg" style="text-align: center; color: var(--neon-red); font-size: 0.9rem; margin-top: 15px;"></p>
+            <div class="logo" style="justify-content: center; margin-bottom: 32px;">
+                <span class="material-icons-round">eco</span> Auto<span>Growth</span>
+            </div>
+            
+            <div class="input-group">
+                <span class="material-icons-round">person</span>
+                <input type="text" id="username" placeholder="HTX Bot Username">
+            </div>
+            
+            <div class="input-group">
+                <span class="material-icons-round">lock</span>
+                <input type="password" id="password" placeholder="Password">
+            </div>
+
+            <button class="btn" onclick="login()">
+                <span class="material-icons-round" style="font-size: 1.2rem;">login</span> SECURE LOGIN
+            </button>
+            <p id="auth-msg" style="text-align: center; color: var(--down-color); font-size: 0.9rem; margin-top: 16px; font-weight: 500;"></p>
         </div>
 
         <!-- DASHBOARD -->
         <div id="dashboard-view">
             <div class="navbar">
-                <div class="logo">Auto<span>Growth</span> Executer</div>
-                <div><span id="user-display" style="margin-right: 20px; color: var(--text-muted);"></span><a href="#" onclick="logout()" style="color: var(--neon-red); text-decoration: none; font-weight: bold;">DISCONNECT</a></div>
+                <div class="logo">
+                    <span class="material-icons-round">eco</span> Auto<span>Growth</span> Executer
+                </div>
+                <div class="flex-center">
+                    <span id="user-display" style="color: var(--text-muted); font-weight: 500; display: flex; align-items: center; gap: 6px;">
+                        <span class="material-icons-round" style="font-size: 1.2rem;">account_circle</span>
+                    </span>
+                    <a href="#" onclick="logout()" style="color: var(--down-color); text-decoration: none; font-weight: 600; display: flex; align-items: center; gap: 4px; margin-left: 16px;">
+                        <span class="material-icons-round" style="font-size: 1.2rem;">logout</span> Disconnect
+                    </a>
+                </div>
             </div>
 
             <div class="container">
                 <div class="grid">
+                    
+                    <!-- Timer Panel -->
                     <div class="panel">
-                        <h2>Time Until Search Window</h2>
+                        <h2><span class="material-icons-round">schedule</span> Next Search Window</h2>
                         <div class="timer-box" id="countdown">00:00</div>
-                        <div style="margin-top: 15px; display: flex; align-items: center; gap: 10px;">
-                            <input type="number" id="window-input" min="1" step="1" style="width: 80px; margin-bottom: 0; padding: 10px; text-align: center;">
-                            <span style="color: var(--text-muted); font-size: 0.85rem;">Mins</span>
-                            <button class="btn" style="width: auto; padding: 10px 20px; font-size: 0.85rem;" onclick="saveWindowSettings()">SAVE</button>
+                        <div style="margin-top: 20px; display: flex; align-items: center; gap: 12px;">
+                            <div class="input-group" style="margin: 0; width: 120px;">
+                                <span class="material-icons-round" style="font-size: 1.1rem; left: 10px;">timer</span>
+                                <input type="number" id="window-input" min="1" step="1" style="padding-left: 36px; text-align: center; padding-top: 10px; padding-bottom: 10px;">
+                            </div>
+                            <span style="color: var(--text-muted); font-size: 0.9rem; font-weight: 500;">Mins</span>
+                            <button class="btn" style="width: auto; padding: 10px 24px; font-size: 0.85rem;" onclick="saveWindowSettings()">SAVE</button>
                         </div>
                     </div>
+                    
+                    <!-- Target Panel -->
                     <div class="panel">
-                        <h2>Current Peak Growth (Target)</h2>
-                        <div class="big-stat mono text-warn" id="live-delta">$0.0000</div>
-                        <div style="margin-top: 8px; font-size: 0.85rem; color: var(--text-muted);">Delta since last execution</div>
+                        <h2><span class="material-icons-round">track_changes</span> Current Peak Target</h2>
+                        <div class="big-stat text-warn" id="live-delta">$0.0000</div>
+                        <div style="margin-top: 8px; font-size: 0.9rem; color: var(--text-muted); display: flex; align-items: center; gap: 6px;">
+                            <span class="material-icons-round" style="font-size: 1.1rem;">info</span> Growth delta since last cycle
+                        </div>
                     </div>
-                    <div class="panel" style="border-color: var(--neon-orange); box-shadow: 0 0 20px rgba(245,158,11,0.1);">
-                        <h2 style="color: var(--neon-orange);">Total Executed Auto-Growth</h2>
-                        <div class="big-stat mono text-up" id="total-profit">$0.00</div>
+                    
+                    <!-- Profit Panel -->
+                    <div class="panel" style="border: 2px solid var(--primary-light); background: #fcfdfc;">
+                        <h2 style="color: var(--primary);"><span class="material-icons-round">account_balance_wallet</span> Total Auto-Growth</h2>
+                        <div class="big-stat text-up" id="total-profit">$0.00</div>
                     </div>
                 </div>
 
+                <!-- History Table -->
                 <div class="panel">
-                    <h2>Real Market Executions (Cyclic History)</h2>
-                    <div style="overflow-x: auto;">
+                    <h2><span class="material-icons-round">history</span> Real Market Executions</h2>
+                    <div style="overflow-x: auto; margin-top: 10px;">
                         <table id="trades-table">
                             <thead>
                                 <tr>
                                     <th>Date & Time</th>
-                                    <th>Target Growth (Delta)</th>
-                                    <th>Matched & Executed PNL</th>
+                                    <th>Target Growth</th>
+                                    <th>Executed PNL</th>
                                     <th>Status</th>
                                     <th>Coins Closed</th>
                                 </tr>
                             </thead>
                             <tbody id="trades-body">
-                                <tr><td colspan="5" style="text-align: center; color: var(--text-muted);">Waiting for execution data...</td></tr>
+                                <tr><td colspan="5" style="text-align: center; color: var(--text-muted); padding: 30px;">Waiting for execution data...</td></tr>
                             </tbody>
                         </table>
                     </div>
@@ -484,7 +506,14 @@ app.get('/', (req, res) => {
                     const res = await fetch('/api/growth/me', { headers: { 'Authorization': 'Bearer ' + token } });
                     if (!res.ok) throw new Error();
                     const data = await res.json();
-                    document.getElementById('user-display').innerText = "Logged in as: " + data.username + (data.isPaper ? ' (PAPER)' : ' (REAL LIVE)');
+                    
+                    const modeHtml = data.isPaper 
+                        ? '<span style="background: #e0e0e0; color: #616161; padding: 2px 6px; border-radius: 4px; font-size: 0.75rem; margin-left: 8px;">PAPER</span>'
+                        : '<span style="background: #e8f5e9; color: #2e7d32; padding: 2px 6px; border-radius: 4px; font-size: 0.75rem; margin-left: 8px; font-weight: bold;">LIVE</span>';
+                    
+                    document.getElementById('user-display').innerHTML = 
+                        '<span class="material-icons-round" style="font-size: 1.2rem;">account_circle</span> ' + 
+                        data.username + modeHtml;
                     
                     document.getElementById('auth-view').style.display = 'none';
                     document.getElementById('dashboard-view').style.display = 'block';
@@ -505,7 +534,7 @@ app.get('/', (req, res) => {
                     token = data.token; localStorage.setItem('g_token', token);
                     checkAuth();
                 } else {
-                    document.getElementById('auth-msg').innerText = "Invalid credentials.";
+                    document.getElementById('auth-msg').innerText = "Invalid credentials. Please try again.";
                 }
             }
 
@@ -529,11 +558,10 @@ app.get('/', (req, res) => {
                     method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
                     body: JSON.stringify({ windowMinutes: val })
                 });
-                syncData(); // Refresh immediately
+                syncData(); 
             }
 
             async function syncData() {
-                // Fetch Live Target Delta
                 const liveRes = await fetch('/api/growth/live', { headers: { 'Authorization': 'Bearer ' + token } });
                 const liveData = await liveRes.json();
                 
@@ -545,16 +573,15 @@ app.get('/', (req, res) => {
                 let delta = (liveData.livePeak || 0) - (liveData.lastPeak || 0);
                 const deltaEl = document.getElementById('live-delta');
                 deltaEl.innerText = (delta >= 0 ? '+$' : '-$') + Math.abs(delta).toFixed(4);
-                deltaEl.className = 'big-stat mono ' + (delta >= 0 ? 'text-up' : 'text-down');
+                deltaEl.className = 'big-stat ' + (delta >= 0 ? 'text-up' : 'text-down');
 
-                // Fetch Execution History
                 const tradeRes = await fetch('/api/growth/history', { headers: { 'Authorization': 'Bearer ' + token } });
                 const tradeData = await tradeRes.json();
                 
                 const tpEl = document.getElementById('total-profit');
                 let tp = tradeData.totalExecutedProfit || 0;
                 tpEl.innerText = (tp >= 0 ? '+$' : '-$') + Math.abs(tp).toFixed(4);
-                tpEl.className = 'big-stat mono ' + (tp >= 0 ? 'text-up' : 'text-down');
+                tpEl.className = 'big-stat ' + (tp >= 0 ? 'text-up' : 'text-down');
 
                 renderTable(tradeData.history);
             }
@@ -562,7 +589,7 @@ app.get('/', (req, res) => {
             function renderTable(history) {
                 const tbody = document.getElementById('trades-body');
                 if (!history || history.length === 0) {
-                    tbody.innerHTML = '<tr><td colspan="5" style="text-align: center; color: var(--text-muted);">No executions recorded. Engine is actively scanning.</td></tr>';
+                    tbody.innerHTML = '<tr><td colspan="5" style="text-align: center; color: var(--text-muted); padding: 30px;"><span class="material-icons-round" style="font-size: 2rem; color: #e0e0e0; display: block; margin-bottom: 8px;">manage_search</span> Engine is actively scanning. No executions yet.</td></tr>';
                     return;
                 }
 
@@ -576,18 +603,18 @@ app.get('/', (req, res) => {
                     let execSign = t.executedPnl >= 0 ? '+' : '';
                     
                     let coinHtml = t.coins.map(c => {
-                        if (c === 'No Tolerance Match Found') return '<span style="color: var(--neon-red); font-size:0.8rem;">No Open Positions Matched Value</span>';
+                        if (c === 'No Tolerance Match Found') return '<span style="color: var(--down-color); font-size: 0.85rem; font-weight: 500;"><span class="material-icons-round" style="font-size:1rem; vertical-align:middle; margin-right:4px;">warning</span>No Math Match</span>';
                         return '<span class="coin-badge">' + c.split('/')[0] + '</span>';
                     }).join('');
 
                     let status = t.executedPnl === 0 && t.coins[0] === 'No Tolerance Match Found' 
-                        ? '<span style="color:var(--neon-red); font-weight:bold;">SKIPPED</span>' 
-                        : '<span style="color:var(--neon-green); font-weight:bold;">EXECUTED</span>';
+                        ? '<span style="color: var(--text-muted); font-weight: 600; display:flex; align-items:center; gap:4px;"><span class="material-icons-round" style="font-size:1.1rem;">skip_next</span> SKIPPED</span>' 
+                        : '<span style="color: var(--up-color); font-weight: 600; display:flex; align-items:center; gap:4px;"><span class="material-icons-round" style="font-size:1.1rem;">check_circle</span> EXECUTED</span>';
 
                     html += '<tr>' +
-                        '<td style="color: var(--text-muted);">' + d.toLocaleDateString() + ' ' + d.toLocaleTimeString() + '</td>' +
-                        '<td class="mono ' + targetClass + '">' + targetSign + '$' + t.deltaGrowth.toFixed(4) + '</td>' +
-                        '<td class="mono ' + execClass + '" style="font-weight:bold;">' + execSign + '$' + t.executedPnl.toFixed(4) + '</td>' +
+                        '<td style="color: var(--text-muted); font-size: 0.85rem;">' + d.toLocaleDateString() + ' <br><strong style="color: var(--text);">' + d.toLocaleTimeString() + '</strong></td>' +
+                        '<td class="' + targetClass + '" style="font-weight: 600;">' + targetSign + '$' + t.deltaGrowth.toFixed(4) + '</td>' +
+                        '<td class="' + execClass + '" style="font-weight: 700; font-size: 1.05rem;">' + execSign + '$' + t.executedPnl.toFixed(4) + '</td>' +
                         '<td>' + status + '</td>' +
                         '<td>' + coinHtml + '</td>' +
                     '</tr>';
