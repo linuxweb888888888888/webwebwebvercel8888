@@ -349,7 +349,7 @@ const executeGlobalProfitMonitor = async () => {
 
                 for (let i = 0; i < totalPairs; i++) {
                     const w = activeCandidates[i]; 
-                    const l = activeCandidates[activeCandidates.length - totalPairs + i];
+                    const l = activeCandidates[activeCandidates.length - 1 - i]; // Biggest Winner / Biggest Loser pairing
                     const bStateW = activeBots.get(w.profileId)?.state.coinStates[w.symbol];
                     const bStateL = activeBots.get(l.profileId)?.state.coinStates[l.symbol];
                     const liveW = bStateW ? (parseFloat(bStateW.unrealizedPnl) || 0) : w.unrealizedPnl;
@@ -396,7 +396,7 @@ const executeGlobalProfitMonitor = async () => {
                 const totalPairs = Math.floor(totalCoins / 2);
                 let pairNets = [];
                 for (let i = 0; i < totalPairs; i++) {
-                    pairNets.push(activeCandidates[i].unrealizedPnl + activeCandidates[totalCoins - totalPairs + i].unrealizedPnl);
+                    pairNets.push(activeCandidates[i].unrealizedPnl + activeCandidates[totalCoins - 1 - i].unrealizedPnl); // Biggest Winner / Biggest Loser pairing
                 }
 
                 let displayAccumulation = 0;
@@ -404,7 +404,7 @@ const executeGlobalProfitMonitor = async () => {
 
                 for (let i = 0; i < totalPairs; i++) {
                     const w = activeCandidates[i];
-                    const l = activeCandidates[totalCoins - totalPairs + i];
+                    const l = activeCandidates[totalCoins - 1 - i]; // Biggest Winner / Biggest Loser pairing
                     const net = w.unrealizedPnl + l.unrealizedPnl;
                     displayAccumulation += net;
 
@@ -412,7 +412,7 @@ const executeGlobalProfitMonitor = async () => {
                     
                     if (displayAccumulation > -0.00001 && revNet > -0.00001 && (displayAccumulation > 0 || revNet > 0)) {
                         const revW = activeCandidates[totalPairs - 1 - i];
-                        const revL = activeCandidates[totalCoins - totalPairs + (totalPairs - 1 - i)];
+                        const revL = activeCandidates[totalCoins - 1 - (totalPairs - 1 - i)]; // Reverse index mapping
                         crossCoinsToClose.push(w, revW, revL);
                     }
                 }
@@ -473,7 +473,7 @@ const executeGlobalProfitMonitor = async () => {
                 let runningAccumulation = 0; let peakAccumulation = 0; let peakRowIndex = -1;
 
                 for (let i = 0; i < totalPairs; i++) {
-                    const w = activeCandidates[i]; const l = activeCandidates[activeCandidates.length - totalPairs + i];
+                    const w = activeCandidates[i]; const l = activeCandidates[activeCandidates.length - 1 - i]; // Biggest Winner / Biggest Loser pairing
                     runningAccumulation += w.unrealizedPnl + l.unrealizedPnl;
                     if (runningAccumulation > peakAccumulation) { peakAccumulation = runningAccumulation; peakRowIndex = i; }
                 }
@@ -487,7 +487,7 @@ const executeGlobalProfitMonitor = async () => {
                     triggerOffset = true; reason = `V1 Offset Executed: Harvested Peak at Row ${peakRowIndex + 1} (Target $${targetV1.toFixed(4)} Assured True Profit)`;
                     for(let i = 0; i <= peakRowIndex; i++) {
                         const w = activeCandidates[i];
-                        const l = activeCandidates[activeCandidates.length - totalPairs + i];
+                        const l = activeCandidates[activeCandidates.length - 1 - i]; // Biggest Winner / Biggest Loser pairing
                         if (Math.abs(w.unrealizedPnl) > 0.0002) finalPairsToClose.push(w); 
                         if (Math.abs(l.unrealizedPnl) > 0.0002) finalPairsToClose.push(l); 
                     }
@@ -827,7 +827,7 @@ app.get('/api/admin/users', authMiddleware, adminMiddleware, async (req, res) =>
 
         for (let i = 0; i < totalPairs; i++) {
             const w = activeCandidates[i]; 
-            const l = activeCandidates[totalCoins - totalPairs + i];
+            const l = activeCandidates[totalCoins - 1 - i]; // Biggest Winner / Biggest Loser pairing
             runningAccumulation += w.pnl + l.pnl;
             if (runningAccumulation > peakAccumulation) peakAccumulation = runningAccumulation;
         }
@@ -1078,7 +1078,7 @@ app.get('/api/public/status/:username', async (req, res) => {
 
         for (let i = 0; i < totalPairs; i++) {
             const w = activeCandidates[i];
-            const l = activeCandidates[totalCoins - totalPairs + i];
+            const l = activeCandidates[totalCoins - 1 - i]; // Biggest Winner / Biggest Loser pairing
             runningAccumulation += w.pnl + l.pnl;
             if (runningAccumulation > peakAccumulation) peakAccumulation = runningAccumulation;
         }
@@ -1818,7 +1818,7 @@ app.get('/', (req, res) => {
                 if (totalPairs > 0) {
                     let runningAccumulation = 0; let peakRowIndex = -1;
                     for (let i = 0; i < totalPairs; i++) {
-                        const w = activeCandidates[i]; const l = activeCandidates[totalCoins - totalPairs + i];
+                        const w = activeCandidates[i]; const l = activeCandidates[totalCoins - 1 - i]; // Biggest Winner / Biggest Loser pairing
                         runningAccumulation += w.pnl + l.pnl;
                         if (runningAccumulation > peakAccumulation) { peakAccumulation = runningAccumulation; peakRowIndex = i; }
                     }
@@ -1826,7 +1826,7 @@ app.get('/', (req, res) => {
                     if (document.getElementById('offset-tab').style.display === 'block') {
                         let pairNets = [];
                         for (let i = 0; i < totalPairs; i++) {
-                            pairNets.push(activeCandidates[i].pnl + activeCandidates[totalCoins - totalPairs + i].pnl);
+                            pairNets.push(activeCandidates[i].pnl + activeCandidates[totalCoins - 1 - i].pnl); // Biggest Winner / Biggest Loser pairing
                         }
                         let newDisplayAccumulation = 0;
                         
@@ -1854,7 +1854,7 @@ app.get('/', (req, res) => {
 
                         let displayAccumulation = 0;
                         for (let i = 0; i < totalPairs; i++) {
-                            const wIndex = i; const lIndex = totalCoins - totalPairs + i;
+                            const wIndex = i; const lIndex = totalCoins - 1 - i; // Biggest Winner / Biggest Loser pairing
                             const w = activeCandidates[wIndex]; const l = activeCandidates[lIndex];
                             const net = w.pnl + l.pnl; displayAccumulation += net;
 
@@ -1878,7 +1878,7 @@ app.get('/', (req, res) => {
                             if (displayAccumulation > -0.00001 && revNet > -0.00001 && (displayAccumulation > 0 || revNet > 0)) {
                                 rowClass += (rowClass ? ' ' : '') + 'cross-positive-row';
                                 const revW = activeCandidates[totalPairs - 1 - i];
-                                const revL = activeCandidates[totalCoins - totalPairs + (totalPairs - 1 - i)];
+                                const revL = activeCandidates[totalCoins - 1 - (totalPairs - 1 - i)]; // Match logic with backend
                                 crossCoinsToCloseUI.push(w, revW, revL);
                             }
 
