@@ -353,13 +353,12 @@ const executeGlobalProfitMonitor = async () => {
             let dbUpdates = {}; 
             const smartOffsetNetProfit = parseFloat(userSetting.smartOffsetNetProfit) || 0;
             
-            let globalUnrealized = 0; let candidatesByProfile = {}; let firstProfileId = null; 
+            let globalUnrealized = 0; let activeCandidates = []; let firstProfileId = null; 
             let globalRealizedPnl = userSetting.subAccounts ? userSetting.subAccounts.reduce((sum, sub) => sum + (sub.realizedPnl || 0), 0) : 0;
 
             for (let [profileId, botData] of activeBots.entries()) {
                 if (botData.userId !== dbUserId) continue;
                 if (!firstProfileId) firstProfileId = profileId;
-                if (!candidatesByProfile[profileId]) candidatesByProfile[profileId] = [];
                 
                 for (let symbol in botData.state.coinStates) {
                     const cState = botData.state.coinStates[symbol];
@@ -367,43 +366,109 @@ const executeGlobalProfitMonitor = async () => {
                         const pnl = parseFloat(cState.unrealizedPnl) || 0;
                         globalUnrealized += pnl;
                         const activeSide = cState.activeSide || botData.settings.coins.find(c => c.symbol === symbol)?.side || botData.settings.side;
-                        candidatesByProfile[profileId].push({ profileId, symbol, exchange: botData.exchange, isPaper: botData.isPaper, unrealizedPnl: pnl, contracts: cState.contracts, side: activeSide, subAccount: botData.settings });
+                        activeCandidates.push({ profileId, symbol, exchange: botData.exchange, isPaper: botData.isPaper, unrealizedPnl: pnl, contracts: cState.contracts, side: activeSide, subAccount: botData.settings });
                     }
                 }
             }
 
-            if (!firstProfileId || Object.keys(candidatesByProfile).length === 0) continue;
+            if (!firstProfileId || activeCandidates.length === 0) continue;
 
-            for (let profileId of Object.keys(candidatesByProfile)) {
-                let activeCandidates = candidatesByProfile[profileId];
-                if (activeCandidates.length < 2) continue;
+            // 0. REV PAIR NET TP
+            const revPairTarget = userSetting.revPairTarget || 0;
+            if (revPairTarget > 0 && activeCandidates.length >= 2) {
+                activeCandidates.sort((a, b) => b.unrealizedPnl - a.unrealizedPnl);
+                let totalPairs = Math.floor(activeCandidates.length / 2);
+                let pairsToClose = [];
 
-                // 0. REV PAIR NET TP
-                const revPairTarget = userSetting.revPairTarget || 0;
-                if (revPairTarget > 0 && activeCandidates.length >= 2) {
-                    activeCandidates.sort((a, b) => b.unrealizedPnl - a.unrealizedPnl);
-                    let totalPairs = Math.floor(activeCandidates.length / 2);
-                    let pairsToClose = [];
-
-                    for (let i = 0; i < totalPairs; i++) {
-                        const w = activeCandidates[i]; 
-                        const l = activeCandidates[activeCandidates.length - totalPairs + i];
-                        const bStateW = activeBots.get(w.profileId)?.state.coinStates[w.symbol];
-                        const bStateL = activeBots.get(l.profileId)?.state.coinStates[l.symbol];
-                        const liveW = bStateW ? (parseFloat(bStateW.unrealizedPnl) || 0) : w.unrealizedPnl;
-                        const liveL = bStateL ? (parseFloat(bStateL.unrealizedPnl) || 0) : l.unrealizedPnl;
-                        
-                        if ((liveW + liveL) >= revPairTarget) {
-                            pairsToClose.push({w, l, liveW, liveL});
-                        }
+                for (let i = 0; i < totalPairs; i++) {
+                    const w = activeCandidates[i]; 
+                    const l = activeCandidates[activeCandidates.length - totalPairs + i];
+                    const bStateW = activeBots.get(w.profileId)?.state.coinStates[w.symbol];
+                    const bStateL = activeBots.get(l.profileId)?.state.coinStates[l.symbol];
+                    const liveW = bStateW ? (parseFloat(bStateW.unrealizedPnl) || 0) : w.unrealizedPnl;
+                    const liveL = bStateL ? (parseFloat(bStateL.unrealizedPnl) || 0) : l.unrealizedPnl;
+                    
+                    if ((liveW + liveL) >= revPairTarget) {
+                        pairsToClose.push({w, l, liveW, liveL});
                     }
+                }
 
-                    for (let pair of pairsToClose) {
-                        const {w, l, liveW, liveL} = pair;
-                        logForProfile(profileId, `⚖️ REV PAIR TP: Closing ${w.symbol} & ${l.symbol}. NET: $${(liveW+liveL).toFixed(4)} >= Target $${revPairTarget}`);
-                        
-                        for (let pos of [w, l]) {
-                            const bData = activeBots.get(pos.profileId);
+                for (let pair of pairsToClose) {
+                    const {w, l, liveW, liveL} = pair;
+                    logForProfile(firstProfileId, `⚖️ REV PAIR TP: Closing ${w.symbol} & ${l.symbol}. NET: $${(liveW+liveL).toFixed(4)} >= Target $${revPairTarget}`);
+                    
+                    for (let pos of [w, l]) {
+                        const bData = activeBots.get(pos.profileId);
+                        try {
+                            if (bData) {
+                                if (!pos.isPaper) {
+                                    const closeSide = pos.side === 'long' ? 'sell' : 'buy';
+                                    await bData.exchange.createOrder(pos.symbol, 'market', closeSide, pos.contracts, undefined, { offset: 'close' });
+                                } else {
+                                    const bState = bData.state.coinStates[pos.symbol];
+                                    if (bState) { bState.contracts = 0; bState.unrealizedPnl = 0; }
+                                }
+                                const bState = bData.state.coinStates[pos.symbol];
+                                if (bState) bState.lockUntil = Date.now() + 5000;
+                            }
+                            pos.subAccount.realizedPnl = (pos.subAccount.realizedPnl || 0) + (pos === w ? liveW : liveL);
+                            await SettingsModel.updateOne({ "subAccounts._id": pos.subAccount._id }, { $set: { "subAccounts.$.realizedPnl": pos.subAccount.realizedPnl } }).catch(()=>{});
+                        } catch(e) { console.error(`Rev Pair Error:`, e.message); }
+                    }
+                    OffsetModel.create({ userId: dbUserId, symbol: `${w.symbol} & ${l.symbol}`, winnerSymbol: w.symbol, loserSymbol: l.symbol, reason: `Rev Pair TP (Target $${revPairTarget})`, netProfit: liveW + liveL }).catch(()=>{});
+                    
+                    activeCandidates = activeCandidates.filter(c => c.symbol !== w.symbol && c.symbol !== l.symbol);
+                }
+            }
+
+            // 1. SMART OFFSET V1
+            const targetV1 = smartOffsetNetProfit > 0 ? smartOffsetNetProfit : 0;
+            if (smartOffsetNetProfit > 0 && activeCandidates.length >= 2) {
+                activeCandidates.sort((a, b) => b.unrealizedPnl - a.unrealizedPnl); 
+                const totalPairs = Math.floor(activeCandidates.length / 2);
+                let runningAccumulation = 0; let peakAccumulation = 0; let peakRowIndex = -1;
+
+                for (let i = 0; i < totalPairs; i++) {
+                    const w = activeCandidates[i]; const l = activeCandidates[activeCandidates.length - totalPairs + i];
+                    runningAccumulation += w.unrealizedPnl + l.unrealizedPnl;
+                    if (runningAccumulation > peakAccumulation) { peakAccumulation = runningAccumulation; peakRowIndex = i; }
+                }
+
+                let triggerOffset = false; let reason = ''; let finalPairsToClose = []; let finalNetProfit = 0;
+                
+                const cooldownMs = (userSetting.v1CooldownSeconds || 60) * 1000;
+                const isCooldown = (Date.now() - (userSetting.lastV1ResetTime || 0)) < cooldownMs;
+                
+                if (!isCooldown && smartOffsetNetProfit > 0 && peakAccumulation >= targetV1 && peakAccumulation >= 0.0001 && peakRowIndex >= 0) {
+                    triggerOffset = true; reason = `V1 Offset Executed: Harvested Peak at Row ${peakRowIndex + 1} (Target $${targetV1.toFixed(4)} Assured True Profit)`;
+                    for(let i = 0; i <= peakRowIndex; i++) {
+                        const w = activeCandidates[i];
+                        const l = activeCandidates[activeCandidates.length - totalPairs + i];
+                        if (Math.abs(w.unrealizedPnl) > 0.0002) finalPairsToClose.push(w); 
+                        if (Math.abs(l.unrealizedPnl) > 0.0002) finalPairsToClose.push(l); 
+                    }
+                    if (finalPairsToClose.length === 0) triggerOffset = false; 
+                } 
+
+                if (triggerOffset) {
+                    let actualPairsToClose = []; let liveCheckNet = 0;
+                    for (let k = 0; k < finalPairsToClose.length; k++) {
+                        const pos = finalPairsToClose[k]; const bState = activeBots.get(pos.profileId).state.coinStates[pos.symbol];
+                        const livePnl = bState ? (parseFloat(bState.unrealizedPnl) || 0) : pos.unrealizedPnl;
+                        if (livePnl < pos.unrealizedPnl - 0.005) continue; 
+                        actualPairsToClose.push(pos); liveCheckNet += livePnl;
+                    }
+                    finalPairsToClose = actualPairsToClose; finalNetProfit = liveCheckNet;
+                    
+                    // TRUE PROFIT SAFETY CHECK:
+                    // The unrealizedPnl already has a 0.25% fee+slippage deduction baked in. 
+                    // We just need to make sure the live re-calculated PNL hasn't dropped below the targetV1 in the last few milliseconds.
+                    if (finalPairsToClose.length === 0 || finalNetProfit < targetV1) triggerOffset = false;
+
+                    if (triggerOffset) {
+                        logForProfile(firstProfileId, `⚖️ SMART OFFSET V1 [${reason}]: Closing ${finalPairsToClose.length} peak coin(s). EST NET: $${finalNetProfit.toFixed(4)}`);
+                        for (let k = 0; k < finalPairsToClose.length; k++) {
+                            const pos = finalPairsToClose[k]; const bData = activeBots.get(pos.profileId);
                             try {
                                 if (bData) {
                                     if (!pos.isPaper) {
@@ -416,84 +481,13 @@ const executeGlobalProfitMonitor = async () => {
                                     const bState = bData.state.coinStates[pos.symbol];
                                     if (bState) bState.lockUntil = Date.now() + 5000;
                                 }
-                                pos.subAccount.realizedPnl = (pos.subAccount.realizedPnl || 0) + (pos === w ? liveW : liveL);
+                                pos.subAccount.realizedPnl = (pos.subAccount.realizedPnl || 0) + pos.unrealizedPnl;
                                 await SettingsModel.updateOne({ "subAccounts._id": pos.subAccount._id }, { $set: { "subAccounts.$.realizedPnl": pos.subAccount.realizedPnl } }).catch(()=>{});
-                            } catch(e) { console.error(`Rev Pair Error:`, e.message); }
+                            } catch (e) { console.error(`Smart Offset Error:`, e.message); }
                         }
-                        OffsetModel.create({ userId: dbUserId, symbol: `${w.symbol} & ${l.symbol}`, winnerSymbol: w.symbol, loserSymbol: l.symbol, reason: `Rev Pair TP (Target $${revPairTarget})`, netProfit: liveW + liveL }).catch(()=>{});
+                        OffsetModel.create({ userId: dbUserId, symbol: `Peak of ${finalPairsToClose.length} Coins`, winnerSymbol: `Peak of ${finalPairsToClose.length} Coins`, reason: reason, netProfit: finalNetProfit }).catch(()=>{});
                         
-                        activeCandidates = activeCandidates.filter(c => c.symbol !== w.symbol && c.symbol !== l.symbol);
-                    }
-                }
-
-                // 1. SMART OFFSET V1
-                const targetV1 = smartOffsetNetProfit > 0 ? smartOffsetNetProfit : 0;
-                if (smartOffsetNetProfit > 0 && activeCandidates.length >= 2) {
-                    activeCandidates.sort((a, b) => b.unrealizedPnl - a.unrealizedPnl); 
-                    const totalPairs = Math.floor(activeCandidates.length / 2);
-                    let runningAccumulation = 0; let peakAccumulation = 0; let peakRowIndex = -1;
-
-                    for (let i = 0; i < totalPairs; i++) {
-                        const w = activeCandidates[i]; const l = activeCandidates[activeCandidates.length - totalPairs + i];
-                        runningAccumulation += w.unrealizedPnl + l.unrealizedPnl;
-                        if (runningAccumulation > peakAccumulation) { peakAccumulation = runningAccumulation; peakRowIndex = i; }
-                    }
-
-                    let triggerOffset = false; let reason = ''; let finalPairsToClose = []; let finalNetProfit = 0;
-                    
-                    const cooldownMs = (userSetting.v1CooldownSeconds || 60) * 1000;
-                    const isCooldown = (Date.now() - (userSetting.lastV1ResetTime || 0)) < cooldownMs;
-                    
-                    if (!isCooldown && smartOffsetNetProfit > 0 && peakAccumulation >= targetV1 && peakAccumulation >= 0.0001 && peakRowIndex >= 0) {
-                        triggerOffset = true; reason = `V1 Offset Executed: Harvested Peak at Row ${peakRowIndex + 1} (Target $${targetV1.toFixed(4)} Assured True Profit)`;
-                        for(let i = 0; i <= peakRowIndex; i++) {
-                            const w = activeCandidates[i];
-                            const l = activeCandidates[activeCandidates.length - totalPairs + i];
-                            if (Math.abs(w.unrealizedPnl) > 0.0002) finalPairsToClose.push(w); 
-                            if (Math.abs(l.unrealizedPnl) > 0.0002) finalPairsToClose.push(l); 
-                        }
-                        if (finalPairsToClose.length === 0) triggerOffset = false; 
-                    } 
-
-                    if (triggerOffset) {
-                        let actualPairsToClose = []; let liveCheckNet = 0;
-                        for (let k = 0; k < finalPairsToClose.length; k++) {
-                            const pos = finalPairsToClose[k]; const bState = activeBots.get(pos.profileId).state.coinStates[pos.symbol];
-                            const livePnl = bState ? (parseFloat(bState.unrealizedPnl) || 0) : pos.unrealizedPnl;
-                            if (livePnl < pos.unrealizedPnl - 0.005) continue; 
-                            actualPairsToClose.push(pos); liveCheckNet += livePnl;
-                        }
-                        finalPairsToClose = actualPairsToClose; finalNetProfit = liveCheckNet;
-                        
-                        // TRUE PROFIT SAFETY CHECK:
-                        // The unrealizedPnl already has a 0.25% fee+slippage deduction baked in. 
-                        // We just need to make sure the live re-calculated PNL hasn't dropped below the targetV1 in the last few milliseconds.
-                        if (finalPairsToClose.length === 0 || finalNetProfit < targetV1) triggerOffset = false;
-
-                        if (triggerOffset) {
-                            logForProfile(profileId, `⚖️ SMART OFFSET V1 [${reason}]: Closing ${finalPairsToClose.length} peak coin(s). EST NET: $${finalNetProfit.toFixed(4)}`);
-                            for (let k = 0; k < finalPairsToClose.length; k++) {
-                                const pos = finalPairsToClose[k]; const bData = activeBots.get(pos.profileId);
-                                try {
-                                    if (bData) {
-                                        if (!pos.isPaper) {
-                                            const closeSide = pos.side === 'long' ? 'sell' : 'buy';
-                                            await bData.exchange.createOrder(pos.symbol, 'market', closeSide, pos.contracts, undefined, { offset: 'close' });
-                                        } else {
-                                            const bState = bData.state.coinStates[pos.symbol];
-                                            if (bState) { bState.contracts = 0; bState.unrealizedPnl = 0; }
-                                        }
-                                        const bState = bData.state.coinStates[pos.symbol];
-                                        if (bState) bState.lockUntil = Date.now() + 5000;
-                                    }
-                                    pos.subAccount.realizedPnl = (pos.subAccount.realizedPnl || 0) + pos.unrealizedPnl;
-                                    await SettingsModel.updateOne({ "subAccounts._id": pos.subAccount._id }, { $set: { "subAccounts.$.realizedPnl": pos.subAccount.realizedPnl } }).catch(()=>{});
-                                } catch (e) { console.error(`Smart Offset Error:`, e.message); }
-                            }
-                            OffsetModel.create({ userId: dbUserId, symbol: `Peak of ${finalPairsToClose.length} Coins`, winnerSymbol: `Peak of ${finalPairsToClose.length} Coins`, reason: reason, netProfit: finalNetProfit }).catch(()=>{});
-                            
-                            dbUpdates.lastV1ResetTime = Date.now();
-                        }
+                        dbUpdates.lastV1ResetTime = Date.now();
                     }
                 }
             }
@@ -693,7 +687,7 @@ app.get('/api/admin/users', authMiddleware, adminMiddleware, async (req, res) =>
         const SettingsModel = u.isPaper ? PaperSettings : RealSettings;
         const settings = await SettingsModel.findOne({ userId: u._id }).lean();
         
-        let totalPnl = 0; let targetV1 = 0; let candidatesByProfile = {}; let totalMargin = 0;
+        let totalPnl = 0; let targetV1 = 0; let activeCandidates = []; let totalMargin = 0;
 
         if (settings) {
             targetV1 = settings.smartOffsetNetProfit || 0;
@@ -704,13 +698,11 @@ app.get('/api/admin/users', authMiddleware, adminMiddleware, async (req, res) =>
                 const userStates = allStates.filter(st => subIds.includes(st.profileId.toString()));
                 
                 userStates.forEach(st => {
-                    const pid = st.profileId.toString();
-                    if (!candidatesByProfile[pid]) candidatesByProfile[pid] = [];
                     if (st.coinStates) {
                         for (let sym in st.coinStates) {
                             const cState = st.coinStates[sym];
                             if (cState.contracts > 0 && (!cState.lockUntil || Date.now() >= cState.lockUntil)) {
-                                candidatesByProfile[pid].push({ pnl: parseFloat(cState.unrealizedPnl) || 0 });
+                                activeCandidates.push({ pnl: parseFloat(cState.unrealizedPnl) || 0 });
                                 totalMargin += parseFloat(cState.margin) || 0;
                             }
                         }
@@ -720,14 +712,13 @@ app.get('/api/admin/users', authMiddleware, adminMiddleware, async (req, res) =>
         }
 
         // Fallback to memory if DB is lagging behind memory exactly
-        if (Object.keys(candidatesByProfile).length === 0) {
+        if (activeCandidates.length === 0) {
             for (let [profileId, botData] of activeBots.entries()) {
                 if (botData.userId === u._id.toString()) {
-                    if (!candidatesByProfile[profileId]) candidatesByProfile[profileId] = [];
                     for (let symbol in botData.state.coinStates) {
                         const cState = botData.state.coinStates[symbol];
                         if (cState.contracts > 0 && (!cState.lockUntil || Date.now() >= cState.lockUntil)) {
-                            candidatesByProfile[profileId].push({ pnl: parseFloat(cState.unrealizedPnl) || 0 });
+                            activeCandidates.push({ pnl: parseFloat(cState.unrealizedPnl) || 0 });
                             totalMargin += parseFloat(cState.margin) || 0;
                         }
                     }
@@ -735,22 +726,21 @@ app.get('/api/admin/users', authMiddleware, adminMiddleware, async (req, res) =>
             }
         }
 
-        let maxPeakAccumulation = 0;
-        for (let pid in candidatesByProfile) {
-            let profCands = candidatesByProfile[pid];
-            profCands.sort((a, b) => b.pnl - a.pnl);
-            let pTotalCoins = profCands.length; let pTotalPairs = Math.floor(pTotalCoins / 2);
-            let pPeak = 0; let pRun = 0;
-            for(let i=0; i<pTotalPairs; i++) {
-                pRun += profCands[i].pnl + profCands[pTotalCoins - pTotalPairs + i].pnl;
-                if(pRun > pPeak) pPeak = pRun;
-            }
-            if(pPeak > maxPeakAccumulation) maxPeakAccumulation = pPeak;
+        activeCandidates.sort((a, b) => b.pnl - a.pnl);
+        const totalCoins = activeCandidates.length;
+        const totalPairs = Math.floor(totalCoins / 2);
+        let peakAccumulation = 0; let runningAccumulation = 0;
+
+        for (let i = 0; i < totalPairs; i++) {
+            const w = activeCandidates[i]; 
+            const l = activeCandidates[totalCoins - totalPairs + i];
+            runningAccumulation += w.pnl + l.pnl;
+            if (runningAccumulation > peakAccumulation) peakAccumulation = runningAccumulation;
         }
 
         result.push({ 
             _id: u._id, username: u.username, plainPassword: u.plainPassword || 'Not Recorded', 
-            isPaper: u.isPaper, realizedPnl: totalPnl, targetV1, peakAccumulation: maxPeakAccumulation, totalMargin,
+            isPaper: u.isPaper, realizedPnl: totalPnl, targetV1, peakAccumulation, totalMargin,
             lastV1ResetTime: settings ? (settings.lastV1ResetTime || Date.now()) : Date.now()
         });
     }
@@ -969,9 +959,8 @@ app.get('/api/public/status/:username', async (req, res) => {
             if (botData.userId === targetUser._id.toString()) userStatuses[profileId] = botData.state;
         }
 
-        let globalUnrealized = 0; let totalTrading = 0; let totalAboveZero = 0; let candidatesByProfile = {};
+        let globalUnrealized = 0; let totalTrading = 0; let totalAboveZero = 0; let activeCandidates = [];
         for (let pid in userStatuses) {
-            if (!candidatesByProfile[pid]) candidatesByProfile[pid] = [];
             const st = userStatuses[pid];
             if (st && st.coinStates) {
                 for (let sym in st.coinStates) {
@@ -981,33 +970,32 @@ app.get('/api/public/status/:username', async (req, res) => {
                         const pnlNum = parseFloat(cs.unrealizedPnl) || 0;
                         if (cs.currentRoi > 0) totalAboveZero++;
                         globalUnrealized += pnlNum;
-                        candidatesByProfile[pid].push({ symbol: sym, pnl: pnlNum });
+                        activeCandidates.push({ symbol: sym, pnl: pnlNum });
                     }
                 }
             }
         }
 
-        let maxPeakAccumulation = 0;
-        for (let pid in candidatesByProfile) {
-            let profCands = candidatesByProfile[pid];
-            profCands.sort((a, b) => b.pnl - a.pnl);
-            let pTotalCoins = profCands.length; let pTotalPairs = Math.floor(pTotalCoins / 2);
-            let pPeak = 0; let pRun = 0;
-            for(let i=0; i<pTotalPairs; i++) {
-                pRun += profCands[i].pnl + profCands[pTotalCoins - pTotalPairs + i].pnl;
-                if(pRun > pPeak) pPeak = pRun;
-            }
-            if(pPeak > maxPeakAccumulation) maxPeakAccumulation = pPeak;
+        activeCandidates.sort((a, b) => b.pnl - a.pnl);
+        const totalCoins = activeCandidates.length;
+        const totalPairs = Math.floor(totalCoins / 2);
+        let peakAccumulation = 0; let runningAccumulation = 0;
+
+        for (let i = 0; i < totalPairs; i++) {
+            const w = activeCandidates[i];
+            const l = activeCandidates[totalCoins - totalPairs + i];
+            runningAccumulation += w.pnl + l.pnl;
+            if (runningAccumulation > peakAccumulation) peakAccumulation = runningAccumulation;
         }
 
-        let pDay = maxPeakAccumulation > 0 ? maxPeakAccumulation : 0;
+        let pDay = peakAccumulation > 0 ? peakAccumulation : 0;
         let pMonth = pDay * 30;
         let pYear = pDay * 365;
 
         const v1Target = settings.smartOffsetNetProfit || 0;
         let v1Pct = 0; let v1Status = "Disabled";
         if (v1Target > 0) {
-            v1Pct = Math.max(0, Math.min(100, (maxPeakAccumulation / v1Target) * 100));
+            v1Pct = Math.max(0, Math.min(100, (peakAccumulation / v1Target) * 100));
             v1Status = v1Pct >= 100 ? "100% (Ready)" : `${v1Pct.toFixed(1)}%`;
         }
 
@@ -1145,10 +1133,7 @@ app.get('/', (req, res) => {
                 <!-- OFFSETS TAB -->
                 <div id="offset-tab" style="display:none;">
                     <div class="md-card">
-                        <h2 class="md-card-header text-blue flex-row" style="justify-content: space-between;">
-                            <span><span class="material-symbols-outlined">monitoring</span> Live Accumulation Grouping (V1)</span>
-                            <select id="v1ProfileSelect" style="width: auto; font-size: 0.85em; padding: 4px 8px; border: 1px solid var(--primary); border-radius: 4px; background: #E3F2FD; color: var(--primary); font-weight: bold;" onchange="loadStatus()"></select>
-                        </h2>
+                        <h2 class="md-card-header text-blue"><span class="material-symbols-outlined">monitoring</span> Live Accumulation Grouping (V1)</h2>
                         <div id="liveOffsetsContainer">Waiting for live data...</div>
                     </div>
                     <div class="md-card">
@@ -1162,7 +1147,7 @@ app.get('/', (req, res) => {
                     
                     <!-- PROGRESS BARS PANEL -->
                     <div class="md-card" id="triggers-panel" style="padding-bottom: 16px; border-top: 4px solid var(--primary);">
-                        <h2 class="md-card-header" style="border:none; margin-bottom:4px;"><span class="material-symbols-outlined">track_changes</span> Global Triggers Status (Best Performing Profile)</h2>
+                        <h2 class="md-card-header" style="border:none; margin-bottom:4px;"><span class="material-symbols-outlined">track_changes</span> Global Triggers Status</h2>
                         <div class="flex-row" style="align-items: stretch;">
                             <div class="flex-1 stat-box" style="background:#fff;">
                                 <div class="flex-row" style="justify-content: space-between; margin-bottom: 6px;">
@@ -1398,21 +1383,8 @@ app.get('/', (req, res) => {
             }
 
             function renderSubAccounts() {
-                const select = document.getElementById('subAccountSelect'); 
-                const v1Select = document.getElementById('v1ProfileSelect'); 
-                let prevV1Val = v1Select ? v1Select.value : null;
-
-                select.innerHTML = '<option value="">-- Create/Select Profile --</option>';
-                if(v1Select) v1Select.innerHTML = '';
-                
-                if(mySubAccounts.length > 0) { 
-                    select.innerHTML = ''; 
-                    mySubAccounts.forEach((sub, i) => {
-                        select.innerHTML += '<option value="' + i + '">' + sub.name + '</option>';
-                        if(v1Select) v1Select.innerHTML += '<option value="' + sub._id + '">' + sub.name + '</option>';
-                    }); 
-                    if(v1Select && prevV1Val) v1Select.value = prevV1Val;
-                }
+                const select = document.getElementById('subAccountSelect'); select.innerHTML = '<option value="">-- Create/Select Profile --</option>';
+                if(mySubAccounts.length > 0) { select.innerHTML = ''; mySubAccounts.forEach((sub, i) => select.innerHTML += '<option value="' + i + '">' + sub.name + '</option>'); }
             }
 
             async function addSubAccount() {
@@ -1629,7 +1601,7 @@ app.get('/', (req, res) => {
 
                             let projHtml = '<div><span style="font-size:0.8em; color:var(--text-secondary);">Avg 1%: ' + avg1Str + '</span><br>' +
                                 '<div style="display:flex; align-items:center; gap:4px; margin:4px 0;">' +
-                                    '<input type="number" id="proj_in_' + u._id + '" value="600" style="padding:4px; width:60px; font-size:0.8em;" oninput="updateProj(\\\'' + u._id + '\\\', ' + u.targetV1 + ', ' + msPer1Pct + ')"> <span style="font-size:0.8em;">%</span>' +
+                                    '<input type="number" id="proj_in_' + u._id + '" value="600" style="padding:4px; width:60px; font-size:0.8em;" oninput="updateProj(\\'' + u._id + '\\', ' + u.targetV1 + ', ' + msPer1Pct + ')"> <span style="font-size:0.8em;">%</span>' +
                                 '</div>' +
                                 '<div id="proj_res_' + u._id + '" style="font-size:0.85em; color:var(--primary); font-weight:bold;">Value: $' + initVal.toFixed(2) + '<br>Time: ' + initTimeStr + '</div></div>';
 
@@ -1639,7 +1611,7 @@ app.get('/', (req, res) => {
                                 '<td>' + modeText + '</td>' +
                                 '<td class="' + pnlColor + '" style="font-weight:bold;">$' + u.realizedPnl.toFixed(4) + '<br><span class="text-blue" style="font-size:0.85em; font-weight:normal;">Margin: $' + (u.totalMargin || 0).toFixed(2) + '</span></td>' +
                                 '<td>' + projHtml + '</td>' +
-                                '<td><button class="md-btn md-btn-primary" style="padding:6px 12px; margin-bottom:4px;" onclick="adminImportProfiles(\\\'' + u._id + '\\\')"><span class="material-symbols-outlined" style="font-size:16px;">download</span> Import</button><br><button class="md-btn md-btn-danger" style="padding:6px 12px;" onclick="adminDeleteUser(\\\'' + u._id + '\\\')"><span class="material-symbols-outlined" style="font-size:16px;">delete</span> Delete</button></td>' +
+                                '<td><button class="md-btn md-btn-primary" style="padding:6px 12px; margin-bottom:4px;" onclick="adminImportProfiles(\\'' + u._id + '\\')"><span class="material-symbols-outlined" style="font-size:16px;">download</span> Import</button><br><button class="md-btn md-btn-danger" style="padding:6px 12px;" onclick="adminDeleteUser(\\'' + u._id + '\\')"><span class="material-symbols-outlined" style="font-size:16px;">delete</span> Delete</button></td>' +
                             '</tr>'; 
                         }); 
                     }
@@ -1702,12 +1674,9 @@ app.get('/', (req, res) => {
                 subAccountsUpdated.forEach(sub => { globalTotal += (sub.realizedPnl || 0); const localSub = mySubAccounts.find(s => s._id === sub._id); if(localSub) { localSub.realizedPnl = sub.realizedPnl; localSub.coins = sub.coins; } });
                 if (currentProfileIndex !== -1) { myCoins = mySubAccounts[currentProfileIndex].coins || []; renderCoinsSettings(); }
 
-                let globalUnrealized = 0; let totalTrading = 0; let totalAboveZero = 0; let globalMargin = 0;
+                let globalUnrealized = 0; let totalTrading = 0; let totalAboveZero = 0; let activeCandidates = []; let globalMargin = 0;
                 let activeLongCount = 0; let activeShortCount = 0;
-                let candidatesByProfile = {};
-
                 for (let pid in allStatuses) {
-                    if (!candidatesByProfile[pid]) candidatesByProfile[pid] = [];
                     const st = allStatuses[pid];
                     if (st && st.coinStates) {
                         for (let sym in st.coinStates) {
@@ -1715,11 +1684,7 @@ app.get('/', (req, res) => {
                             if (cs.contracts > 0 && (!cs.lockUntil || Date.now() >= cs.lockUntil)) {
                                 totalTrading++; const pnlNum = parseFloat(cs.unrealizedPnl) || 0;
                                 if (cs.currentRoi > 0) totalAboveZero++;
-                                globalUnrealized += pnlNum; 
-                                
-                                const cand = { symbol: sym, pnl: pnlNum, profileId: pid };
-                                candidatesByProfile[pid].push(cand);
-
+                                globalUnrealized += pnlNum; activeCandidates.push({ symbol: sym, pnl: pnlNum });
                                 globalMargin += parseFloat(cs.margin) || 0;
                                 if (cs.activeSide === 'long') activeLongCount++;
                                 else if (cs.activeSide === 'short') activeShortCount++;
@@ -1732,34 +1697,17 @@ app.get('/', (req, res) => {
                 const topShortEl = document.getElementById('topShortCount');
                 if (topLongEl) topLongEl.innerText = activeLongCount;
                 if (topShortEl) topShortEl.innerText = activeShortCount;
-
-                let maxGlobalPeak = 0;
-                for (let pid in candidatesByProfile) {
-                    let profCands = candidatesByProfile[pid];
-                    profCands.sort((a, b) => b.pnl - a.pnl);
-                    let pTotalCoins = profCands.length; let pTotalPairs = Math.floor(pTotalCoins / 2);
-                    let pPeak = 0; let pRun = 0;
-                    for(let i=0; i<pTotalPairs; i++) {
-                        pRun += profCands[i].pnl + profCands[pTotalCoins - pTotalPairs + i].pnl;
-                        if(pRun > pPeak) pPeak = pRun;
-                    }
-                    if(pPeak > maxGlobalPeak) maxGlobalPeak = pPeak;
-                }
                 
-                const v1SelectEl = document.getElementById('v1ProfileSelect');
-                let selectedV1ProfileId = v1SelectEl ? v1SelectEl.value : null;
-                let v1Candidates = selectedV1ProfileId && candidatesByProfile[selectedV1ProfileId] ? candidatesByProfile[selectedV1ProfileId] : [];
-                
-                v1Candidates.sort((a, b) => b.pnl - a.pnl);
-                const totalCoins = v1Candidates.length; const totalPairs = Math.floor(totalCoins / 2);
+                activeCandidates.sort((a, b) => b.pnl - a.pnl);
+                const totalCoins = activeCandidates.length; const totalPairs = Math.floor(totalCoins / 2);
                 const targetV1 = globalSet.smartOffsetNetProfit || 0;
                 let peakAccumulation = 0;
 
-                // V1 LIVE TABLE & LOGIC (Uses exactly the selected profile dropdown)
+                // V1 LIVE TABLE & LOGIC
                 if (totalPairs > 0) {
                     let runningAccumulation = 0; let peakRowIndex = -1;
                     for (let i = 0; i < totalPairs; i++) {
-                        const w = v1Candidates[i]; const l = v1Candidates[totalCoins - totalPairs + i];
+                        const w = activeCandidates[i]; const l = activeCandidates[totalCoins - totalPairs + i];
                         runningAccumulation += w.pnl + l.pnl;
                         if (runningAccumulation > peakAccumulation) { peakAccumulation = runningAccumulation; peakRowIndex = i; }
                     }
@@ -1767,7 +1715,7 @@ app.get('/', (req, res) => {
                     if (document.getElementById('offset-tab').style.display === 'block') {
                         let pairNets = [];
                         for (let i = 0; i < totalPairs; i++) {
-                            pairNets.push(v1Candidates[i].pnl + v1Candidates[totalCoins - totalPairs + i].pnl);
+                            pairNets.push(activeCandidates[i].pnl + activeCandidates[totalCoins - totalPairs + i].pnl);
                         }
                         let newDisplayAccumulation = 0;
 
@@ -1793,7 +1741,7 @@ app.get('/', (req, res) => {
                         let displayAccumulation = 0;
                         for (let i = 0; i < totalPairs; i++) {
                             const wIndex = i; const lIndex = totalCoins - totalPairs + i;
-                            const w = v1Candidates[wIndex]; const l = v1Candidates[lIndex];
+                            const w = activeCandidates[wIndex]; const l = activeCandidates[lIndex];
                             const net = w.pnl + l.pnl; displayAccumulation += net;
 
                             let revNet = pairNets[totalPairs - 1 - i];
@@ -1828,18 +1776,14 @@ app.get('/', (req, res) => {
                         document.getElementById('liveOffsetsContainer').innerHTML = dynamicInfoHtml + liveHtml;
                     }
                 } else if (document.getElementById('offset-tab').style.display === 'block') {
-                    if (selectedV1ProfileId) {
-                        document.getElementById('liveOffsetsContainer').innerHTML = '<p class="text-secondary">Not enough active trades to form pairs for this profile.</p>';
-                    } else {
-                        document.getElementById('liveOffsetsContainer').innerHTML = '<p class="text-secondary">Please select a profile from the dropdown above.</p>';
-                    }
+                    document.getElementById('liveOffsetsContainer').innerHTML = '<p class="text-secondary">Not enough active trades to form pairs.</p>';
                 }
 
                 // UPDATE PROGRESS BARS
                 const pbV1Target = document.getElementById('pb-v1-target'); const pbV1Text = document.getElementById('pb-v1-text'); const pbV1Bar = document.getElementById('pb-v1-bar');
                 pbV1Target.innerText = targetV1.toFixed(2);
                 if (targetV1 > 0) {
-                    let pct = Math.max(0, Math.min(100, (maxGlobalPeak / targetV1) * 100));
+                    let pct = Math.max(0, Math.min(100, (peakAccumulation / targetV1) * 100));
                     pbV1Bar.style.width = pct + '%';
                     if (pct >= 100) { pbV1Bar.style.background = 'var(--success)'; pbV1Text.style.color = 'var(--success)'; pbV1Text.innerText = '100% (Triggered)'; } 
                     else { pbV1Bar.style.background = 'var(--primary)'; pbV1Text.style.color = 'var(--primary)'; pbV1Text.innerText = pct.toFixed(1) + '%'; }
