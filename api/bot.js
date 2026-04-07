@@ -47,6 +47,7 @@ const SettingsSchema = new mongoose.Schema({
     globalStopLossPnl: { type: Number, default: 0 }, 
     v1CooldownSeconds: { type: Number, default: 60 },
     revPairTarget: { type: Number, default: 0 },
+    crossRevPnlTarget: { type: Number, default: 0 },
     lastV1ResetTime: { type: Number, default: Date.now },
     subAccounts: [SubAccountSchema]
 });
@@ -84,6 +85,11 @@ function calculateDcaQty(side, P0, Pc, C0, leverage, targetRoiPct) {
     else { Pnew = Pc / (1 - (R / leverage)); Cn = C0 * (Pnew - P0) / (Pc - Pnew); }
     if (Cn <= 0 || isNaN(Cn) || !isFinite(Cn)) return 0;
     return Math.ceil(Cn); 
+}
+
+function flipCoinSideOnStopLoss(profileId, symbol, SettingsModel) {
+    // Disabled to strictly prevent Stop Losses from ruining global 50/50 balance.
+    return;
 }
 
 async function startBot(userId, subAccount, isPaper, globalStopLossPnl = 0) {
@@ -382,6 +388,73 @@ const executeGlobalProfitMonitor = async () => {
                 }
             }
 
+            // 0.5 NEW CROSS REV PNL TP (Highlighted Rows True Net)
+            const crossRevTarget = userSetting.crossRevPnlTarget || 0;
+            if (crossRevTarget > 0 && activeCandidates.length >= 2) {
+                activeCandidates.sort((a, b) => b.unrealizedPnl - a.unrealizedPnl);
+                const totalCoins = activeCandidates.length;
+                const totalPairs = Math.floor(totalCoins / 2);
+                let pairNets = [];
+                for (let i = 0; i < totalPairs; i++) {
+                    pairNets.push(activeCandidates[i].unrealizedPnl + activeCandidates[totalCoins - totalPairs + i].unrealizedPnl);
+                }
+
+                let displayAccumulation = 0;
+                let crossCoinsToClose = [];
+
+                for (let i = 0; i < totalPairs; i++) {
+                    const w = activeCandidates[i];
+                    const l = activeCandidates[totalCoins - totalPairs + i];
+                    const net = w.unrealizedPnl + l.unrealizedPnl;
+                    displayAccumulation += net;
+
+                    let revNet = pairNets[totalPairs - 1 - i];
+                    
+                    if (displayAccumulation > -0.00001 && revNet > -0.00001 && (displayAccumulation > 0 || revNet > 0)) {
+                        const revW = activeCandidates[totalPairs - 1 - i];
+                        const revL = activeCandidates[totalCoins - totalPairs + (totalPairs - 1 - i)];
+                        crossCoinsToClose.push(w, revW, revL);
+                    }
+                }
+
+                // Deduplicate coins since multiple cross-positive rows might overlap their reference points mathematically
+                let uniqueCoinsToClose = [];
+                let seenSymbols = new Set();
+                let trueCrossNet = 0;
+                for (let c of crossCoinsToClose) {
+                    if (!seenSymbols.has(c.symbol)) {
+                        seenSymbols.add(c.symbol);
+                        uniqueCoinsToClose.push(c);
+                        trueCrossNet += c.unrealizedPnl;
+                    }
+                }
+
+                if (trueCrossNet >= crossRevTarget && uniqueCoinsToClose.length > 0) {
+                    logForProfile(firstProfileId, `⚖️ CROSS REV PNL TP: Closing ${uniqueCoinsToClose.length} unique coins. TRUE NET: $${trueCrossNet.toFixed(4)} >= Target $${crossRevTarget}`);
+                    for (let pos of uniqueCoinsToClose) {
+                        const bData = activeBots.get(pos.profileId);
+                        try {
+                            if (bData) {
+                                if (!pos.isPaper) {
+                                    const closeSide = pos.side === 'long' ? 'sell' : 'buy';
+                                    await bData.exchange.createOrder(pos.symbol, 'market', closeSide, pos.contracts, undefined, { offset: 'close' });
+                                } else {
+                                    const bState = bData.state.coinStates[pos.symbol];
+                                    if (bState) { bState.contracts = 0; bState.unrealizedPnl = 0; }
+                                }
+                                const bState = bData.state.coinStates[pos.symbol];
+                                if (bState) bState.lockUntil = Date.now() + 5000;
+                            }
+                            pos.subAccount.realizedPnl = (pos.subAccount.realizedPnl || 0) + pos.unrealizedPnl;
+                            await SettingsModel.updateOne({ "subAccounts._id": pos.subAccount._id }, { $set: { "subAccounts.$.realizedPnl": pos.subAccount.realizedPnl } }).catch(()=>{});
+                        } catch(e) { console.error(`Cross Rev TP Error:`, e.message); }
+                    }
+                    OffsetModel.create({ userId: dbUserId, symbol: `Cross Rev Target (${uniqueCoinsToClose.length} Coins)`, winnerSymbol: 'Multi', loserSymbol: 'Multi', reason: `Cross Rev PNL Hit ($${crossRevTarget})`, netProfit: trueCrossNet }).catch(()=>{});
+                    
+                    activeCandidates = activeCandidates.filter(c => !seenSymbols.has(c.symbol));
+                }
+            }
+
             // 1. SMART OFFSET V1
             const targetV1 = smartOffsetNetProfit > 0 ? smartOffsetNetProfit : 0;
             if (smartOffsetNetProfit > 0 && activeCandidates.length >= 2) {
@@ -628,6 +701,7 @@ app.post('/api/register', async (req, res) => {
         templateSettings.globalStopLossPnl = templateSettings.globalStopLossPnl || 0;
         templateSettings.v1CooldownSeconds = templateSettings.v1CooldownSeconds || 60;
         templateSettings.revPairTarget = templateSettings.revPairTarget || 0;
+        templateSettings.crossRevPnlTarget = templateSettings.crossRevPnlTarget || 0;
         templateSettings.lastV1ResetTime = Date.now();
 
         const PREDEFINED_COINS = ["OP", "BIGTIME", "MOVE", "SSV", "COAI", "TIA", "MERL", "MASK", "PYTH", "ETHFI", "CFX", "MEME", "LUNA", "STEEM", "BERA", "2Z", "FIL", "APT", "1INCH", "ARB", "XPL", "ENA", "MMT", "AXS", "TON", "CAKE", "BSV", "JUP", "WIF", "LIGHT", "PI", "SUSHI", "LPT", "CRV", "TAO", "ORDI", "YFI", "LA", "ICP", "FTT", "GIGGLE", "LDO", "OPN", "INJ", "SNX", "DASH", "WLD", "KAITO", "TRUMP", "WAVES", "ZEN", "ENS", "ASTER", "VIRTUAL"];
@@ -695,7 +769,6 @@ app.get('/api/admin/users', authMiddleware, adminMiddleware, async (req, res) =>
     const users = await User.find({ username: { $ne: 'webcoin8888' } }).lean();
     let result = [];
 
-    // Fetch ALL states once to guarantee accurate DB matching exactly like the user UI does.
     const allPaperStates = await PaperProfileState.find({}).lean();
     const allRealStates = await RealProfileState.find({}).lean();
     const allStates = [...allPaperStates, ...allRealStates];
@@ -728,7 +801,6 @@ app.get('/api/admin/users', authMiddleware, adminMiddleware, async (req, res) =>
             }
         }
 
-        // Fallback to memory if DB is lagging behind memory exactly
         if (activeCandidates.length === 0) {
             for (let [profileId, botData] of activeBots.entries()) {
                 if (botData.userId === u._id.toString()) {
@@ -790,7 +862,7 @@ app.post('/api/admin/users/:id/import', authMiddleware, adminMiddleware, async (
     });
 
     for (let [profileId, botData] of activeBots.entries()) { if (botData.userId === String(id)) stopBot(profileId); }
-    const updatedUser = await SettingsModel.findOneAndUpdate({ userId: targetUser._id }, { $set: { subAccounts: newSubAccounts, globalStopLossPnl: templateSettings.globalStopLossPnl || 0, v1CooldownSeconds: templateSettings.v1CooldownSeconds || 60, revPairTarget: templateSettings.revPairTarget || 0 } }, { returnDocument: 'after', upsert: true });
+    const updatedUser = await SettingsModel.findOneAndUpdate({ userId: targetUser._id }, { $set: { subAccounts: newSubAccounts, globalStopLossPnl: templateSettings.globalStopLossPnl || 0, v1CooldownSeconds: templateSettings.v1CooldownSeconds || 60, revPairTarget: templateSettings.revPairTarget || 0, crossRevPnlTarget: templateSettings.crossRevPnlTarget || 0 } }, { returnDocument: 'after', upsert: true });
 
     if (updatedUser && updatedUser.subAccounts) { updatedUser.subAccounts.forEach(sub => { if (sub.coins && sub.coins.some(c => c.botActive) && sub.apiKey && sub.secret) { startBot(targetUser._id.toString(), sub, targetUser.isPaper, updatedUser.globalStopLossPnl).catch(()=>{}); } }); }
     res.json({ success: true, message: `Successfully imported Master Profiles for ${targetUser.username}.` });
@@ -844,7 +916,7 @@ app.post('/api/close-all', authMiddleware, async (req, res) => {
 app.post('/api/settings', authMiddleware, async (req, res) => {
     await bootstrapBots(); 
     const SettingsModel = req.isPaper ? PaperSettings : RealSettings;
-    const { subAccounts, smartOffsetNetProfit, globalStopLossPnl, v1CooldownSeconds, revPairTarget } = req.body;
+    const { subAccounts, smartOffsetNetProfit, globalStopLossPnl, v1CooldownSeconds, revPairTarget, crossRevPnlTarget } = req.body;
     
     const existingSettings = await SettingsModel.findOne({ userId: req.userId });
     if (existingSettings && existingSettings.subAccounts) {
@@ -874,7 +946,8 @@ app.post('/api/settings', authMiddleware, async (req, res) => {
             smartOffsetNetProfit: parseFloat(smartOffsetNetProfit) || 0,
             globalStopLossPnl: finalGlobalSL,
             v1CooldownSeconds: finalCooldown,
-            revPairTarget: parseFloat(revPairTarget) || 0
+            revPairTarget: parseFloat(revPairTarget) || 0,
+            crossRevPnlTarget: parseFloat(crossRevPnlTarget) || 0
         }, 
         { returnDocument: 'after' }
     );
@@ -901,7 +974,7 @@ app.post('/api/settings', authMiddleware, async (req, res) => {
         const allPaperUsers = await PaperSettings.find({ userId: { $ne: req.userId } });
         
         const applyMasterSync = async (userSettingsDoc, isPaperMode) => {
-            let updatePayload = { smartOffsetNetProfit: updated.smartOffsetNetProfit, globalStopLossPnl: updated.globalStopLossPnl, v1CooldownSeconds: updated.v1CooldownSeconds, revPairTarget: updated.revPairTarget };
+            let updatePayload = { smartOffsetNetProfit: updated.smartOffsetNetProfit, globalStopLossPnl: updated.globalStopLossPnl, v1CooldownSeconds: updated.v1CooldownSeconds, revPairTarget: updated.revPairTarget, crossRevPnlTarget: updated.crossRevPnlTarget };
             if (!isPaperMode) {
                 const syncedSubAccounts = updated.subAccounts.map((masterSub, index) => {
                     const existingUserSub = userSettingsDoc.subAccounts[index] || {};
@@ -1112,7 +1185,7 @@ app.get('/', (req, res) => {
                     <h1 class="app-title" id="app-title"><span class="material-symbols-outlined">robot_2</span> HTX BOT</h1>
                     <div id="topBarCounts" style="display:none; font-size: 0.95em; font-weight: bold; background: #e3f2fd; padding: 4px 12px; border-radius: 12px; border: 1px solid #bbdefb; color: var(--primary); margin-left: 16px;">
                         Longs: <span id="topLongCount" class="text-green">0</span> | Shorts: <span id="topShortCount" class="text-red">0</span> |
-                        <span style="color:#9C27B0; margin-left: 8px; padding-left: 8px; border-left: 1px solid #90CAF9;">Cross Rev PNL: <strong id="topCrossPnl">$0.00</strong></span>
+                        <span style="color:#9C27B0; margin-left: 8px; padding-left: 8px; border-left: 1px solid #90CAF9;">Cross Rev PNL: <strong id="topCrossPnl">$0.00</strong> <span id="topCrossTarget" style="font-size:0.85em; color:var(--text-secondary);"></span></span>
                     </div>
                 </div>
                 <div class="flex-row">
@@ -1197,8 +1270,12 @@ app.get('/', (req, res) => {
                                     <div style="flex:1;"><label>Global SL ($ PNL)</label><input type="number" step="0.1" id="globalStopLossPnl" placeholder="0 = off"></div>
                                 </div>
                                 <div class="flex-row">
-                                    <div style="flex:1;"><label>Harvest Cooldown (s)</label><input type="number" step="1" id="v1CooldownSeconds" placeholder="e.g. 60"></div>
                                     <div style="flex:1;"><label>Rev Pair Target ($)</label><input type="number" step="0.1" id="revPairTarget" placeholder="0 = off"></div>
+                                    <div style="flex:1;"><label>Cross Rev Target ($)</label><input type="number" step="0.1" id="crossRevPnlTarget" placeholder="0 = off"></div>
+                                </div>
+                                <div class="flex-row">
+                                    <div style="flex:1;"><label>Harvest Cooldown (s)</label><input type="number" step="1" id="v1CooldownSeconds" placeholder="e.g. 60"></div>
+                                    <div style="flex:1;"></div>
                                 </div>
                                 <button class="md-btn md-btn-primary" style="margin-top:16px; width:100%;" onclick="saveGlobalSettings()">Save Global Settings</button>
                             </div>
@@ -1282,7 +1359,7 @@ app.get('/', (req, res) => {
 
         <script>
             let token = localStorage.getItem('token'); let isPaperUser = true; let myUsername = ''; let statusInterval = null; let adminInterval = null;
-            let mySubAccounts = []; let mySmartOffsetNetProfit = 0; let myGlobalStopLossPnl = 0; let myV1CooldownSeconds = 60; let myRevPairTarget = 0;
+            let mySubAccounts = []; let mySmartOffsetNetProfit = 0; let myGlobalStopLossPnl = 0; let myV1CooldownSeconds = 60; let myRevPairTarget = 0; let myCrossRevPnlTarget = 0;
             let currentProfileIndex = -1; let myCoins = [];
             const PREDEFINED_COINS = ["OP", "BIGTIME", "MOVE", "SSV", "COAI", "TIA", "MERL", "MASK", "PYTH", "ETHFI", "CFX", "MEME", "LUNA", "STEEM", "BERA", "2Z", "FIL", "APT", "1INCH", "ARB", "XPL", "ENA", "MMT", "AXS", "TON", "CAKE", "BSV", "JUP", "WIF", "LIGHT", "PI", "SUSHI", "LPT", "CRV", "TAO", "ORDI", "YFI", "LA", "ICP", "FTT", "GIGGLE", "LDO", "OPN", "INJ", "SNX", "DASH", "WLD", "KAITO", "TRUMP", "WAVES", "ZEN", "ENS", "ASTER", "VIRTUAL"];
 
@@ -1378,11 +1455,13 @@ app.get('/', (req, res) => {
                     myGlobalStopLossPnl = config.globalStopLossPnl !== undefined ? config.globalStopLossPnl : 0;
                     myV1CooldownSeconds = config.v1CooldownSeconds !== undefined ? config.v1CooldownSeconds : 60;
                     myRevPairTarget = config.revPairTarget !== undefined ? config.revPairTarget : 0;
+                    myCrossRevPnlTarget = config.crossRevPnlTarget !== undefined ? config.crossRevPnlTarget : 0;
                     
                     document.getElementById('smartOffsetNetProfit').value = mySmartOffsetNetProfit;
                     document.getElementById('globalStopLossPnl').value = myGlobalStopLossPnl;
                     document.getElementById('v1CooldownSeconds').value = myV1CooldownSeconds;
                     document.getElementById('revPairTarget').value = myRevPairTarget;
+                    document.getElementById('crossRevPnlTarget').value = myCrossRevPnlTarget;
 
                     mySubAccounts = config.subAccounts || []; renderSubAccounts();
                     if (mySubAccounts.length > 0) { document.getElementById('subAccountSelect').value = 0; loadSubAccount(); } 
@@ -1395,8 +1474,9 @@ app.get('/', (req, res) => {
                 myGlobalStopLossPnl = document.getElementById('globalStopLossPnl').value !== '' ? parseFloat(document.getElementById('globalStopLossPnl').value) : 0;
                 myV1CooldownSeconds = parseInt(document.getElementById('v1CooldownSeconds').value) || 60;
                 myRevPairTarget = document.getElementById('revPairTarget').value !== '' ? parseFloat(document.getElementById('revPairTarget').value) : 0;
+                myCrossRevPnlTarget = document.getElementById('crossRevPnlTarget').value !== '' ? parseFloat(document.getElementById('crossRevPnlTarget').value) : 0;
                 
-                const data = { subAccounts: mySubAccounts, smartOffsetNetProfit: mySmartOffsetNetProfit, globalStopLossPnl: myGlobalStopLossPnl, v1CooldownSeconds: myV1CooldownSeconds, revPairTarget: myRevPairTarget };
+                const data = { subAccounts: mySubAccounts, smartOffsetNetProfit: mySmartOffsetNetProfit, globalStopLossPnl: myGlobalStopLossPnl, v1CooldownSeconds: myV1CooldownSeconds, revPairTarget: myRevPairTarget, crossRevPnlTarget: myCrossRevPnlTarget };
                 await fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token }, body: JSON.stringify(data) });
                 alert('Global Settings Saved!');
             }
@@ -1502,7 +1582,7 @@ app.get('/', (req, res) => {
                 profile.dcaTargetRoiPct = document.getElementById('dcaTargetRoiPct').value !== '' ? parseFloat(document.getElementById('dcaTargetRoiPct').value) : -2.0;
                 profile.maxContracts = document.getElementById('maxContracts').value !== '' ? parseInt(document.getElementById('maxContracts').value) : 1000;
                 profile.coins = myCoins;
-                const data = { subAccounts: mySubAccounts, smartOffsetNetProfit: mySmartOffsetNetProfit, globalStopLossPnl: parseFloat(document.getElementById('globalStopLossPnl').value) || 0, v1CooldownSeconds: parseInt(document.getElementById('v1CooldownSeconds').value) || 60, revPairTarget: parseFloat(document.getElementById('revPairTarget').value) || 0 };
+                const data = { subAccounts: mySubAccounts, smartOffsetNetProfit: mySmartOffsetNetProfit, globalStopLossPnl: parseFloat(document.getElementById('globalStopLossPnl').value) || 0, v1CooldownSeconds: parseInt(document.getElementById('v1CooldownSeconds').value) || 60, revPairTarget: parseFloat(document.getElementById('revPairTarget').value) || 0, crossRevPnlTarget: parseFloat(document.getElementById('crossRevPnlTarget').value) || 0 };
                 const res = await fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token }, body: JSON.stringify(data) });
                 const json = await res.json(); mySubAccounts = json.settings.subAccounts || [];
                 if (!silent) alert('Profile Settings Saved!');
@@ -1650,8 +1730,12 @@ app.get('/', (req, res) => {
                             <div class="flex-1"><label>Global SL ($ PNL)</label><input type="number" step="0.01" id="e_globalStopLossPnl" value="\${masterSettings.globalStopLossPnl !== undefined ? masterSettings.globalStopLossPnl : 0}"></div>
                         </div>
                         <div class="flex-row" style="margin-bottom: 12px;">
-                            <div class="flex-1"><label>Harvest Cooldown (s)</label><input type="number" step="1" id="e_v1CooldownSeconds" value="\${masterSettings.v1CooldownSeconds !== undefined ? masterSettings.v1CooldownSeconds : 60}"></div>
                             <div class="flex-1"><label>Rev Pair Target ($)</label><input type="number" step="0.01" id="e_revPairTarget" value="\${masterSettings.revPairTarget !== undefined ? masterSettings.revPairTarget : 0}"></div>
+                            <div class="flex-1"><label>Cross Rev Target ($)</label><input type="number" step="0.01" id="e_crossRevPnlTarget" value="\${masterSettings.crossRevPnlTarget !== undefined ? masterSettings.crossRevPnlTarget : 0}"></div>
+                        </div>
+                        <div class="flex-row" style="margin-bottom: 12px;">
+                            <div class="flex-1"><label>Harvest Cooldown (s)</label><input type="number" step="1" id="e_v1CooldownSeconds" value="\${masterSettings.v1CooldownSeconds !== undefined ? masterSettings.v1CooldownSeconds : 60}"></div>
+                            <div class="flex-1"></div>
                         </div>
                         <button type="button" class="md-btn md-btn-primary" onclick="saveMasterGlobalSettings()">Save Global Settings</button><div id="e_globalMsg" style="margin-top: 8px; font-weight: bold;"></div></form>\`;
                     document.getElementById('editorGlobalContainer').innerHTML = globalHtml;
@@ -1671,7 +1755,8 @@ app.get('/', (req, res) => {
                     smartOffsetNetProfit: document.getElementById('e_smartOffsetNetProfit').value !== '' ? parseFloat(document.getElementById('e_smartOffsetNetProfit').value) : 0,
                     globalStopLossPnl: document.getElementById('e_globalStopLossPnl').value !== '' ? parseFloat(document.getElementById('e_globalStopLossPnl').value) : 0,
                     v1CooldownSeconds: parseInt(document.getElementById('e_v1CooldownSeconds').value) || 60,
-                    revPairTarget: document.getElementById('e_revPairTarget').value !== '' ? parseFloat(document.getElementById('e_revPairTarget').value) : 0
+                    revPairTarget: document.getElementById('e_revPairTarget').value !== '' ? parseFloat(document.getElementById('e_revPairTarget').value) : 0,
+                    crossRevPnlTarget: document.getElementById('e_crossRevPnlTarget').value !== '' ? parseFloat(document.getElementById('e_crossRevPnlTarget').value) : 0
                 };
                 if (payload.globalStopLossPnl > 0) payload.globalStopLossPnl = -payload.globalStopLossPnl;
                 const msgDiv = document.getElementById('e_globalMsg');
@@ -1737,7 +1822,9 @@ app.get('/', (req, res) => {
                             pairNets.push(activeCandidates[i].pnl + activeCandidates[totalCoins - totalPairs + i].pnl);
                         }
                         let newDisplayAccumulation = 0;
-                        let crossPnlSum = 0; // Cross PNL sum tracker
+                        
+                        // For accurately tracking true net UI
+                        let crossCoinsToCloseUI = [];
 
                         let liveHtml = '<table class="md-table"><tr><th>Rank Pair</th><th>Winner Coin</th><th>Winner PNL</th><th>Loser Coin</th><th>Loser PNL</th><th>Pair Net</th><th class="text-blue">Group Accumulation</th><th>Rev Pair Net</th><th>W + Rev Net</th><th style="color:#9C27B0;">New Accumulation</th></tr>';
                         let topStatusMessage = ''; let executingPeak = false; 
@@ -1783,7 +1870,9 @@ app.get('/', (req, res) => {
                             // Highlight rows where BOTH the Group Accumulation and Rev Pair Net are mathematically positive 
                             if (displayAccumulation > -0.00001 && revNet > -0.00001 && (displayAccumulation > 0 || revNet > 0)) {
                                 rowClass += (rowClass ? ' ' : '') + 'cross-positive-row';
-                                crossPnlSum += newPairNet; // Sum up the W + Rev Net for the top bar
+                                const revW = activeCandidates[totalPairs - 1 - i];
+                                const revL = activeCandidates[totalCoins - totalPairs + (totalPairs - 1 - i)];
+                                crossCoinsToCloseUI.push(w, revW, revL);
                             }
 
                             liveHtml += '<tr class="' + rowClass + '">' +
@@ -1801,10 +1890,25 @@ app.get('/', (req, res) => {
                         let dynamicInfoHtml = '<div class="stat-box" style="margin-bottom:16px; background:#E3F2FD; border-color:#90CAF9; color:var(--primary);"><div class="flex-row" style="justify-content: space-between; margin-bottom: 8px;"><div><span class="material-symbols-outlined" style="vertical-align:middle;">my_location</span> Target: $' + targetV1.toFixed(4) + '</div></div><div style="margin-top: 10px; padding-top: 10px; border-top: 1px dashed var(--divider); font-size: 1.1em;">Live Status: ' + topStatusMessage + '</div></div>';
                         document.getElementById('liveOffsetsContainer').innerHTML = dynamicInfoHtml + liveHtml;
                         
-                        // Update Top Bar Cross PNL Tracker
+                        // Deduplicate UI coins for accurate top bar tracking
+                        let uniqueCoinsToCloseUI = [];
+                        let seenSymbolsUI = new Set();
+                        let trueCrossNetUI = 0;
+                        for (let c of crossCoinsToCloseUI) {
+                            if (!seenSymbolsUI.has(c.symbol)) {
+                                seenSymbolsUI.add(c.symbol);
+                                uniqueCoinsToCloseUI.push(c);
+                                trueCrossNetUI += c.pnl;
+                            }
+                        }
+
                         let topCrossEl = document.getElementById('topCrossPnl');
+                        let topCrossTargetEl = document.getElementById('topCrossTarget');
                         if (topCrossEl) {
-                            topCrossEl.innerText = (crossPnlSum >= 0 ? '+$' : '-$') + Math.abs(crossPnlSum).toFixed(4);
+                            topCrossEl.innerText = (trueCrossNetUI >= 0 ? '+$' : '-$') + Math.abs(trueCrossNetUI).toFixed(4);
+                        }
+                        if (topCrossTargetEl) {
+                            topCrossTargetEl.innerText = globalSet.crossRevPnlTarget > 0 ? '(Target: $' + globalSet.crossRevPnlTarget.toFixed(2) + ')' : '(Off)';
                         }
                     }
                 } else if (document.getElementById('offset-tab').style.display === 'block') {
