@@ -33,7 +33,12 @@ const connectDB = async () => {
 const UserSchema = new mongoose.Schema({ username: { type: String, required: true, unique: true }, password: { type: String, required: true }, isPaper: { type: Boolean, default: true } });
 const User = mongoose.models.User || mongoose.model('User', UserSchema);
 
-const SettingsSchema = new mongoose.Schema({ userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' }, subAccounts: Array });
+// strict: false ensures we don't accidentally overwrite the main bot's complex settings
+const SettingsSchema = new mongoose.Schema({ 
+    userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' }, 
+    subAccounts: Array,
+    growthWindowMinutes: { type: Number, default: 1 } // Configurable Window
+}, { strict: false });
 const PaperSettings = mongoose.models.PaperSettings || mongoose.model('PaperSettings', SettingsSchema, 'paper_settings');
 const RealSettings = mongoose.models.Settings || mongoose.model('Settings', SettingsSchema, 'settings');
 
@@ -49,8 +54,8 @@ const PaperOffsetRecord = mongoose.models.PaperOffsetRecord || mongoose.model('P
 const GrowthExecutionSchema = new mongoose.Schema({
     userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
     isPaper: { type: Boolean },
-    deltaGrowth: { type: Number, required: true }, // The target value it looked for
-    executedPnl: { type: Number, required: true }, // The actual value it closed
+    deltaGrowth: { type: Number, required: true }, 
+    executedPnl: { type: Number, required: true }, 
     coins: { type: [String], default: [] },
     timestamp: { type: Date, default: Date.now }
 });
@@ -77,6 +82,10 @@ const processGrowthExecution = async () => {
 
             const settings = await SettingsModel.findOne({ userId: u._id }).lean();
             if (!settings || !settings.subAccounts) continue;
+
+            // Fetch configurable window (default to 1 minute)
+            const windowMinutes = settings.growthWindowMinutes || 1;
+            const windowMs = windowMinutes * 60 * 1000;
 
             const subIds = settings.subAccounts.map(s => s._id.toString());
             const userStates = await StateModel.find({ profileId: { $in: subIds } }).lean();
@@ -135,10 +144,10 @@ const processGrowthExecution = async () => {
             let elapsed = now - state.lastTime;
 
             state.livePeak = peakAccumulation;
-            state.nextCloseTime = state.lastTime + (5 * 60 * 1000);
+            state.nextCloseTime = state.lastTime + windowMs;
 
-            // 3. Trigger 5-Minute Window
-            if (elapsed >= 5 * 60 * 1000) {
+            // 3. Trigger Target Search Window
+            if (elapsed >= windowMs) {
                 let deltaGrowth = peakAccumulation - state.lastPeak;
                 let symbolsClosed = [];
                 
@@ -202,7 +211,7 @@ const processGrowthExecution = async () => {
                         }
 
                         // Write to Main Bot Offset History
-                        await OffsetModel.create({ userId: u._id, symbol: symbolsClosed.join(' & '), winnerSymbol: 'Growth', loserSymbol: 'Match', reason: `5-Min Growth Target Met (Target: $${deltaGrowth.toFixed(4)})`, netProfit: actualNetClosed });
+                        await OffsetModel.create({ userId: u._id, symbol: symbolsClosed.join(' & '), winnerSymbol: 'Growth', loserSymbol: 'Match', reason: `${windowMinutes}-Min Growth Target Met (Target: $${deltaGrowth.toFixed(4)})`, netProfit: actualNetClosed });
 
                         // Write to Growth Bot Local UI History
                         await GrowthExecution.create({ userId: u._id, isPaper: u.isPaper, deltaGrowth: deltaGrowth, executedPnl: actualNetClosed, coins: symbolsClosed });
@@ -233,11 +242,11 @@ const processGrowthExecution = async () => {
                     }
                 }
 
-                // Reset timer and set NEW baseline peak for the next 5 mins
+                // Reset timer and set NEW baseline peak for the next cycle
                 state.lastPeak = newBaselinePeak;
-                state.livePeak = newBaselinePeak; // Resets the UI target instantly to 0.00
+                state.livePeak = newBaselinePeak; 
                 state.lastTime = now;
-                state.nextCloseTime = now + (5 * 60 * 1000);
+                state.nextCloseTime = now + windowMs;
             }
         }
     } catch (e) {
@@ -286,7 +295,6 @@ app.get('/api/ping', async (req, res) => {
     let cycles = 0;
     
     // ACTIVE EVENT LOOP (Defeats Serverless Sleep Mode completely)
-    // Instantly updates the Peak Growth values every 3 seconds!
     while (Date.now() < endTime) {
         if (!global.isGrowthExecuting) {
             processGrowthExecution(); 
@@ -316,8 +324,27 @@ app.post('/api/login', async (req, res) => {
 app.get('/api/growth/me', authMiddleware, (req, res) => res.json({ username: req.username, isPaper: req.isPaper }));
 
 app.get('/api/growth/live', authMiddleware, async (req, res) => {
-    const state = global.growthStates[req.userId] || { livePeak: 0, nextCloseTime: Date.now() + 300000, lastPeak: 0 };
-    res.json(state);
+    const SettingsModel = req.isPaper ? PaperSettings : RealSettings;
+    const settings = await SettingsModel.findOne({ userId: req.userId }).lean();
+    const windowMinutes = settings?.growthWindowMinutes || 1;
+
+    const state = global.growthStates[req.userId] || { livePeak: 0, nextCloseTime: Date.now() + (windowMinutes * 60000), lastPeak: 0 };
+    res.json({ ...state, windowMinutes });
+});
+
+app.post('/api/growth/settings', authMiddleware, async (req, res) => {
+    const SettingsModel = req.isPaper ? PaperSettings : RealSettings;
+    let windowMinutes = parseInt(req.body.windowMinutes);
+    if (isNaN(windowMinutes) || windowMinutes < 1) windowMinutes = 1;
+
+    await SettingsModel.updateOne({ userId: req.userId }, { $set: { growthWindowMinutes: windowMinutes } });
+
+    if (global.growthStates[req.userId]) {
+        // Adjust the live countdown instantly
+        global.growthStates[req.userId].nextCloseTime = global.growthStates[req.userId].lastTime + (windowMinutes * 60000);
+    }
+    
+    res.json({ success: true, windowMinutes });
 });
 
 app.get('/api/growth/history', authMiddleware, async (req, res) => {
@@ -355,7 +382,7 @@ app.get('/', (req, res) => {
             .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 20px; margin-bottom: 30px; }
             
             .panel { background: var(--surface); border: 1px solid var(--surface-border); border-radius: 12px; padding: 25px; box-shadow: 0 8px 30px rgba(0,0,0,0.5); }
-            .panel h2 { margin: 0 0 20px 0; font-size: 1rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 1px; }
+            .panel h2 { margin: 0 0 15px 0; font-size: 1rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 1px; }
             
             .big-stat { font-size: 2.2rem; font-weight: 800; margin: 0; text-shadow: 0 0 20px rgba(0,0,0,0.5); }
             .text-up { color: var(--neon-green); text-shadow: 0 0 15px rgba(16, 185, 129, 0.3); }
@@ -401,8 +428,13 @@ app.get('/', (req, res) => {
             <div class="container">
                 <div class="grid">
                     <div class="panel">
-                        <h2>Time Until Next Search Window</h2>
-                        <div class="timer-box" id="countdown">05:00</div>
+                        <h2>Time Until Search Window</h2>
+                        <div class="timer-box" id="countdown">00:00</div>
+                        <div style="margin-top: 15px; display: flex; align-items: center; gap: 10px;">
+                            <input type="number" id="window-input" min="1" step="1" style="width: 80px; margin-bottom: 0; padding: 10px; text-align: center;">
+                            <span style="color: var(--text-muted); font-size: 0.85rem;">Mins</span>
+                            <button class="btn" style="width: auto; padding: 10px 20px; font-size: 0.85rem;" onclick="saveWindowSettings()">SAVE</button>
+                        </div>
                     </div>
                     <div class="panel">
                         <h2>Current Peak Growth (Target)</h2>
@@ -416,7 +448,7 @@ app.get('/', (req, res) => {
                 </div>
 
                 <div class="panel">
-                    <h2>Real Market Executions (5-Min Cycles)</h2>
+                    <h2>Real Market Executions (Cyclic History)</h2>
                     <div style="overflow-x: auto;">
                         <table id="trades-table">
                             <thead>
@@ -439,7 +471,7 @@ app.get('/', (req, res) => {
 
         <script>
             let token = localStorage.getItem('g_token');
-            let nextCloseMs = Date.now() + 300000;
+            let nextCloseMs = Date.now() + 60000;
             let syncInterval, uiInterval;
 
             async function checkAuth() {
@@ -491,12 +523,24 @@ app.get('/', (req, res) => {
                 uiInterval = setInterval(updateUI, 1000);
             }
 
+            async function saveWindowSettings() {
+                const val = document.getElementById('window-input').value;
+                await fetch('/api/growth/settings', {
+                    method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
+                    body: JSON.stringify({ windowMinutes: val })
+                });
+                syncData(); // Refresh immediately
+            }
+
             async function syncData() {
                 // Fetch Live Target Delta
                 const liveRes = await fetch('/api/growth/live', { headers: { 'Authorization': 'Bearer ' + token } });
                 const liveData = await liveRes.json();
                 
                 nextCloseMs = liveData.nextCloseTime;
+                if (document.activeElement !== document.getElementById('window-input')) {
+                    document.getElementById('window-input').value = liveData.windowMinutes || 1;
+                }
                 
                 let delta = (liveData.livePeak || 0) - (liveData.lastPeak || 0);
                 const deltaEl = document.getElementById('live-delta');
@@ -518,7 +562,7 @@ app.get('/', (req, res) => {
             function renderTable(history) {
                 const tbody = document.getElementById('trades-body');
                 if (!history || history.length === 0) {
-                    tbody.innerHTML = '<tr><td colspan="5" style="text-align: center; color: var(--text-muted);">No executions recorded. Engine scans every 5 minutes.</td></tr>';
+                    tbody.innerHTML = '<tr><td colspan="5" style="text-align: center; color: var(--text-muted);">No executions recorded. Engine is actively scanning.</td></tr>';
                     return;
                 }
 
