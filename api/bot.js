@@ -1,5 +1,3 @@
-//web8888
-
 const express = require('express');
 const ccxt = require('ccxt');
 const mongoose = require('mongoose');
@@ -90,8 +88,7 @@ function calculateDcaQty(side, P0, Pc, C0, leverage, targetRoiPct) {
 }
 
 function flipCoinSideOnStopLoss(profileId, symbol, SettingsModel) {
-    // Disabled to strictly prevent Stop Losses from ruining global 50/50 balance.
-    return;
+    return; // Disabled to strictly prevent SL from ruining global 50/50 balance.
 }
 
 async function startBot(userId, subAccount, isPaper, globalStopLossPnl = 0) {
@@ -1210,9 +1207,11 @@ app.get('/', (req, res) => {
             <div class="app-bar">
                 <div style="display:flex; align-items:center;">
                     <h1 class="app-title" id="app-title"><span class="material-symbols-outlined">robot_2</span> HTX BOT</h1>
-                    <div id="topBarCounts" style="display:none; font-size: 0.95em; font-weight: bold; background: #e3f2fd; padding: 4px 12px; border-radius: 12px; border: 1px solid #bbdefb; color: var(--primary); margin-left: 16px;">
-                        Longs: <span id="topLongCount" class="text-green">0</span> | Shorts: <span id="topShortCount" class="text-red">0</span> |
-                        <span style="color:#9C27B0; margin-left: 8px; padding-left: 8px; border-left: 1px solid #90CAF9;">Cross Rev PNL: <strong id="topCrossPnl">$0.00</strong> <span id="topCrossTarget" style="font-size:0.85em; color:var(--text-secondary);"></span></span>
+                    <div id="topBarCounts" style="display:none; font-size: 0.9em; font-weight: bold; background: #e3f2fd; padding: 6px 12px; border-radius: 8px; border: 1px solid #bbdefb; color: var(--primary); margin-left: 16px; align-items:center; flex-wrap:wrap; gap:8px;">
+                        <span>Longs: <span id="topLongCount" class="text-green">0</span></span> | 
+                        <span>Shorts: <span id="topShortCount" class="text-red">0</span></span> |
+                        <span style="color:#9C27B0; margin-left: 4px; padding-left: 8px; border-left: 1px solid #90CAF9;">Cross Rev: <strong id="topCrossPnl">$0.00</strong> <span id="topCrossTarget" style="font-size:0.85em; color:var(--text-secondary);"></span></span> |
+                        <span style="color:var(--text-primary); margin-left: 4px; padding-left: 8px; border-left: 1px solid #90CAF9;">Peak Growth: <strong id="topPeakVelocity" style="font-size:0.95em;">Calculating...</strong></span>
                     </div>
                 </div>
                 <div class="flex-row">
@@ -1387,7 +1386,7 @@ app.get('/', (req, res) => {
         <script>
             let token = localStorage.getItem('token'); let isPaperUser = true; let myUsername = ''; let statusInterval = null; let adminInterval = null;
             let mySubAccounts = []; let mySmartOffsetNetProfit = 0; let myGlobalStopLossPnl = 0; let myV1CooldownSeconds = 60; let myRevPairTarget = 0; let myCrossRevPnlTarget = 0;
-            let currentProfileIndex = -1; let myCoins = [];
+            let currentProfileIndex = -1; let myCoins = []; let peakHistory = [];
             const PREDEFINED_COINS = ["OP", "BIGTIME", "MOVE", "SSV", "COAI", "TIA", "MERL", "MASK", "PYTH", "ETHFI", "CFX", "MEME", "LUNA", "STEEM", "BERA", "2Z", "FIL", "APT", "1INCH", "ARB", "XPL", "ENA", "MMT", "AXS", "TON", "CAKE", "BSV", "JUP", "WIF", "LIGHT", "PI", "SUSHI", "LPT", "CRV", "TAO", "ORDI", "YFI", "LA", "ICP", "FTT", "GIGGLE", "LDO", "OPN", "INJ", "SNX", "DASH", "WLD", "KAITO", "TRUMP", "WAVES", "ZEN", "ENS", "ASTER", "VIRTUAL"];
 
             function updateMultiplierPreview() {
@@ -1439,7 +1438,7 @@ app.get('/', (req, res) => {
                     if (isPaperUser) { titleEl.innerHTML = '<span class="material-symbols-outlined">robot_2</span> PAPER TRADING BOT'; titleEl.style.color = "var(--primary)"; panicBtn.style.display = "none"; } 
                     else { titleEl.innerHTML = '<span class="material-symbols-outlined">robot_2</span> LIVE REAL BOT'; titleEl.style.color = "var(--success)"; panicBtn.style.display = "inline-flex"; }
                     switchTab('main');
-                    document.getElementById('topBarCounts').style.display = 'inline-block';
+                    document.getElementById('topBarCounts').style.display = 'inline-flex';
                 }
             }
 
@@ -1620,7 +1619,7 @@ app.get('/', (req, res) => {
             function toggleNewKeys(cb) { const type = cb.checked ? 'text' : 'password'; document.getElementById('newSubKey').type = type; document.getElementById('newSubSecret').type = type; }
 
             function logout() { 
-                localStorage.removeItem('token'); token = null; mySubAccounts = []; myCoins = []; currentProfileIndex = -1;
+                localStorage.removeItem('token'); token = null; mySubAccounts = []; myCoins = []; currentProfileIndex = -1; peakHistory = [];
                 document.getElementById('settingsContainer').style.display = 'none'; document.getElementById('coinsListContainer').innerHTML = '';
                 document.getElementById('logs').innerHTML = ''; document.getElementById('dashboardStatusContainer').innerHTML = '<p>No profile loaded.</p>';
                 if (statusInterval) { clearInterval(statusInterval); statusInterval = null; } 
@@ -1816,7 +1815,6 @@ app.get('/', (req, res) => {
                                 totalTrading++; const pnlNum = parseFloat(cs.unrealizedPnl) || 0;
                                 if (cs.currentRoi > 0) totalAboveZero++;
                                 globalUnrealized += pnlNum; 
-                                // Fix: Added profileId explicitly here so deduplication matches the backend perfectly
                                 activeCandidates.push({ profileId: pid, symbol: sym, pnl: pnlNum });
                                 globalMargin += parseFloat(cs.margin) || 0;
                                 if (cs.activeSide === 'long') activeLongCount++;
@@ -1945,6 +1943,57 @@ app.get('/', (req, res) => {
                     document.getElementById('liveOffsetsContainer').innerHTML = '<p class="text-secondary">Not enough active trades to form pairs.</p>';
                     let topCrossEl = document.getElementById('topCrossPnl');
                     if (topCrossEl) topCrossEl.innerText = '$0.00';
+                }
+
+                // ==========================================
+                // REAL-TIME VELOCITY / PEAK GROWTH TRACKING
+                // ==========================================
+                const nowMs = Date.now();
+                peakHistory.push({ time: nowMs, peak: peakAccumulation });
+                peakHistory = peakHistory.filter(p => nowMs - p.time <= 330000); // Keep exactly last 5.5 mins
+
+                let topPeakVelEl = document.getElementById('topPeakVelocity');
+                if (topPeakVelEl) {
+                    if (peakHistory.length > 1) {
+                        let currP = peakHistory[peakHistory.length - 1];
+                        
+                        const getHistPoint = (targetAgoMs) => {
+                            let targetTime = nowMs - targetAgoMs;
+                            let best = peakHistory[0];
+                            for (let p of peakHistory) {
+                                if (Math.abs(p.time - targetTime) < Math.abs(best.time - targetTime)) {
+                                    best = p;
+                                }
+                            }
+                            return best;
+                        };
+
+                        const calcRate = (pastPoint, timeframeMs) => {
+                            let elapsed = currP.time - pastPoint.time;
+                            if (elapsed < 3000) return 0; // Avoid divide by zero
+                            let delta = currP.peak - pastPoint.peak;
+                            return (delta / elapsed) * timeframeMs;
+                        };
+
+                        let p15s = getHistPoint(15000);
+                        let p1m = getHistPoint(60000);
+                        let p5m = getHistPoint(300000);
+
+                        let vSec = calcRate(p15s, 1000);
+                        let vMin = calcRate(p1m, 60000);
+                        let v5Min = calcRate(p5m, 300000);
+
+                        let formatNet = (val) => (val >= 0 ? '+' : '') + '$' + val.toFixed(4);
+                        let cSec = vSec >= 0 ? 'text-green' : 'text-red';
+                        let cMin = vMin >= 0 ? 'text-green' : 'text-red';
+                        let c5Min = v5Min >= 0 ? 'text-green' : 'text-red';
+
+                        if ((currP.time - peakHistory[0].time) > 4000) {
+                            topPeakVelEl.innerHTML = `<span class="${cSec}">${formatNet(vSec)}/s</span> | <span class="${cMin}">${formatNet(vMin)}/m</span> | <span class="${c5Min}">${formatNet(v5Min)}/5m</span>`;
+                        }
+                    } else {
+                        topPeakVelEl.innerHTML = '<span class="text-secondary">Calculating...</span>';
+                    }
                 }
 
                 // UPDATE PROGRESS BARS
