@@ -140,6 +140,7 @@ const processGrowthExecution = async () => {
             // 3. Trigger 5-Minute Window
             if (elapsed >= 5 * 60 * 1000) {
                 let deltaGrowth = peakAccumulation - state.lastPeak;
+                let symbolsClosed = [];
                 
                 // Only process if delta is a meaningful movement
                 if (Math.abs(deltaGrowth) >= 0.0001) {
@@ -171,7 +172,6 @@ const processGrowthExecution = async () => {
                     // C. Execute if Match Found
                     if (bestMatch && bestMatch.length > 0) {
                         let actualNetClosed = 0;
-                        let symbolsClosed = [];
 
                         for (let pos of bestMatch) {
                             try {
@@ -214,8 +214,28 @@ const processGrowthExecution = async () => {
                     }
                 }
 
-                // Reset timer and baseline peak for the next 5 mins
-                state.lastPeak = peakAccumulation;
+                // ==========================================
+                // RECALCULATE BASELINE (Start Growth from 0)
+                // ==========================================
+                let newBaselinePeak = peakAccumulation;
+                
+                if (symbolsClosed.length > 0) {
+                    let remainingCandidates = activeCandidates.filter(c => !symbolsClosed.includes(c.symbol));
+                    remainingCandidates.sort((a, b) => b.pnl - a.pnl);
+                    const remPairs = Math.floor(remainingCandidates.length / 2);
+                    newBaselinePeak = 0;
+                    let runningAcc = 0;
+                    for (let i = 0; i < remPairs; i++) {
+                        const w = remainingCandidates[i];
+                        const l = remainingCandidates[remainingCandidates.length - 1 - i];
+                        runningAcc += w.pnl + l.pnl;
+                        if (runningAcc > newBaselinePeak) newBaselinePeak = runningAcc;
+                    }
+                }
+
+                // Reset timer and set NEW baseline peak for the next 5 mins
+                state.lastPeak = newBaselinePeak;
+                state.livePeak = newBaselinePeak; // Resets the UI target instantly to 0.00
                 state.lastTime = now;
                 state.nextCloseTime = now + (5 * 60 * 1000);
             }
