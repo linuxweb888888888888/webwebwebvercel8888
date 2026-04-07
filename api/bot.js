@@ -87,6 +87,8 @@ function calculateDcaQty(side, P0, Pc, C0, leverage, targetRoiPct) {
 }
 
 function flipCoinSideOnStopLoss(profileId, symbol, SettingsModel) {
+    // DISABLED: Stop Loss flipping was fighting the Auto-Balancer and causing massive long/short imbalances.
+    return;
     let bData = activeBots.get(profileId);
     if (!bData) return;
     let coinObj = bData.settings.coins.find(c => c.symbol === symbol);
@@ -277,7 +279,7 @@ async function startBot(userId, subAccount, isPaper, globalStopLossPnl = 0) {
                         if (flippedForBalance) {
                             SettingsModel.updateOne({ "subAccounts._id": currentSettings._id }, { $set: { "subAccounts.$.coins": currentSettings.coins } }).catch(()=>{});
                         } else if (isStopLossPct || isStopLossPnl) {
-                            flipCoinSideOnStopLoss(profileId, coin.symbol, SettingsModel);
+                            // flipCoinSideOnStopLoss(profileId, coin.symbol, SettingsModel); // Disabled to prevent runaway imbalances
                         }
                         continue; 
                     }
