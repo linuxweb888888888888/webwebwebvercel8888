@@ -417,21 +417,30 @@ const executeGlobalProfitMonitor = async () => {
                     }
                 }
 
-                // Deduplicate coins since multiple cross-positive rows might overlap their reference points mathematically
+                // Deduplicate strictly by ProfileID AND Symbol to prevent dropping valid multi-profile positions
                 let uniqueCoinsToClose = [];
                 let seenSymbols = new Set();
-                let trueCrossNet = 0;
                 for (let c of crossCoinsToClose) {
-                    if (!seenSymbols.has(c.symbol)) {
-                        seenSymbols.add(c.symbol);
+                    let uniqueKey = c.profileId + '_' + c.symbol;
+                    if (!seenSymbols.has(uniqueKey)) {
+                        seenSymbols.add(uniqueKey);
                         uniqueCoinsToClose.push(c);
-                        trueCrossNet += c.unrealizedPnl;
                     }
                 }
 
-                if (trueCrossNet >= crossRevTarget && uniqueCoinsToClose.length > 0) {
-                    logForProfile(firstProfileId, `⚖️ CROSS REV PNL TP: Closing ${uniqueCoinsToClose.length} unique coins. TRUE NET: $${trueCrossNet.toFixed(4)} >= Target $${crossRevTarget}`);
-                    for (let pos of uniqueCoinsToClose) {
+                // Live safety check to guarantee we are actually in profit before market executing
+                let actualTrueCrossNet = 0;
+                let finalCrossCoins = [];
+                for (let pos of uniqueCoinsToClose) {
+                    const bState = activeBots.get(pos.profileId)?.state.coinStates[pos.symbol];
+                    const livePnl = bState ? (parseFloat(bState.unrealizedPnl) || 0) : pos.unrealizedPnl;
+                    actualTrueCrossNet += livePnl;
+                    finalCrossCoins.push(pos);
+                }
+
+                if (actualTrueCrossNet >= crossRevTarget && finalCrossCoins.length > 0) {
+                    logForProfile(firstProfileId, `⚖️ CROSS REV PNL TP: Closing ${finalCrossCoins.length} unique coins. TRUE NET: $${actualTrueCrossNet.toFixed(4)} >= Target $${crossRevTarget}`);
+                    for (let pos of finalCrossCoins) {
                         const bData = activeBots.get(pos.profileId);
                         try {
                             if (bData) {
@@ -449,9 +458,10 @@ const executeGlobalProfitMonitor = async () => {
                             await SettingsModel.updateOne({ "subAccounts._id": pos.subAccount._id }, { $set: { "subAccounts.$.realizedPnl": pos.subAccount.realizedPnl } }).catch(()=>{});
                         } catch(e) { console.error(`Cross Rev TP Error:`, e.message); }
                     }
-                    OffsetModel.create({ userId: dbUserId, symbol: `Cross Rev Target (${uniqueCoinsToClose.length} Coins)`, winnerSymbol: 'Multi', loserSymbol: 'Multi', reason: `Cross Rev PNL Hit ($${crossRevTarget})`, netProfit: trueCrossNet }).catch(()=>{});
+                    OffsetModel.create({ userId: dbUserId, symbol: `Cross Rev Target (${finalCrossCoins.length} Coins)`, winnerSymbol: 'Multi', loserSymbol: 'Multi', reason: `Cross Rev PNL Hit ($${crossRevTarget})`, netProfit: actualTrueCrossNet }).catch(()=>{});
                     
-                    activeCandidates = activeCandidates.filter(c => !seenSymbols.has(c.symbol));
+                    // Filter them out so V1 doesn't double-process them in the very next step
+                    activeCandidates = activeCandidates.filter(c => !seenSymbols.has(c.profileId + '_' + c.symbol));
                 }
             }
 
@@ -494,9 +504,6 @@ const executeGlobalProfitMonitor = async () => {
                     }
                     finalPairsToClose = actualPairsToClose; finalNetProfit = liveCheckNet;
                     
-                    // TRUE PROFIT SAFETY CHECK:
-                    // The unrealizedPnl already has a 0.25% fee+slippage deduction baked in. 
-                    // We just need to make sure the live re-calculated PNL hasn't dropped below the targetV1 in the last few milliseconds.
                     if (finalPairsToClose.length === 0 || finalNetProfit < targetV1) triggerOffset = false;
 
                     if (triggerOffset) {
@@ -546,7 +553,6 @@ const executeGlobalProfitMonitor = async () => {
                 let targetSide = globalLongs.length > globalShorts.length ? 'short' : 'long';
                 let oldSide = globalLongs.length > globalShorts.length ? 'long' : 'short';
 
-                // Sort to flip the ones with the most profitable positions first to lock in profit
                 sourceArray.sort((a, b) => {
                     let pnlA = a.bData.state.coinStates[a.coin.symbol]?.unrealizedPnl || 0;
                     let pnlB = b.bData.state.coinStates[b.coin.symbol]?.unrealizedPnl || 0;
@@ -555,7 +561,7 @@ const executeGlobalProfitMonitor = async () => {
 
                 for (let i = 0; i < numToFlip; i++) {
                     let item = sourceArray[i];
-                    item.coin.side = targetSide; // Flip setting instantly
+                    item.coin.side = targetSide; 
                     
                     let cState = item.bData.state.coinStates[item.coin.symbol];
                     if (cState && cState.contracts > 0 && cState.activeSide === oldSide) {
@@ -580,7 +586,6 @@ const executeGlobalProfitMonitor = async () => {
                 });
                 dbUpdates.subAccounts = freshSubAccounts;
             }
-            // --- END INSTANT GLOBAL BALANCE ENFORCER ---
 
             if (Object.keys(dbUpdates).length > 0) {
                 await SettingsModel.updateOne({ userId: dbUserId }, { $set: dbUpdates }).catch(console.error);
@@ -1266,12 +1271,12 @@ app.get('/', (req, res) => {
                             <h2 class="md-card-header"><span class="material-symbols-outlined">public</span> Global User Settings</h2>
                             <div class="stat-box" style="margin-bottom: 24px;">
                                 <div class="flex-row">
-                                    <div style="flex:1;"><label>Offset V1 Target ($)</label><input type="number" step="0.1" id="smartOffsetNetProfit"></div>
-                                    <div style="flex:1;"><label>Global SL ($ PNL)</label><input type="number" step="0.1" id="globalStopLossPnl" placeholder="0 = off"></div>
+                                    <div style="flex:1;"><label>Offset V1 Target ($)</label><input type="number" step="0.0001" id="smartOffsetNetProfit"></div>
+                                    <div style="flex:1;"><label>Global SL ($ PNL)</label><input type="number" step="0.0001" id="globalStopLossPnl" placeholder="0 = off"></div>
                                 </div>
                                 <div class="flex-row">
-                                    <div style="flex:1;"><label>Rev Pair Target ($)</label><input type="number" step="0.1" id="revPairTarget" placeholder="0 = off"></div>
-                                    <div style="flex:1;"><label>Cross Rev Target ($)</label><input type="number" step="0.1" id="crossRevPnlTarget" placeholder="0 = off"></div>
+                                    <div style="flex:1;"><label>Rev Pair Target ($)</label><input type="number" step="0.0001" id="revPairTarget" placeholder="0 = off"></div>
+                                    <div style="flex:1;"><label>Cross Rev Target ($)</label><input type="number" step="0.0001" id="crossRevPnlTarget" placeholder="0 = off"></div>
                                 </div>
                                 <div class="flex-row">
                                     <div style="flex:1;"><label>Harvest Cooldown (s)</label><input type="number" step="1" id="v1CooldownSeconds" placeholder="e.g. 60"></div>
@@ -1726,12 +1731,12 @@ app.get('/', (req, res) => {
                     if (!masterSettings) { document.getElementById('editorGlobalContainer').innerHTML = '<p class="text-red">Master user "webcoin8888" settings not found in database.</p>'; return; }
                     let globalHtml = \`<form id="globalSettingsForm">
                         <div class="flex-row" style="margin-bottom: 12px;">
-                            <div class="flex-1"><label>Smart Offset Target V1 ($)</label><input type="number" step="0.01" id="e_smartOffsetNetProfit" value="\${masterSettings.smartOffsetNetProfit !== undefined ? masterSettings.smartOffsetNetProfit : 0}"></div>
-                            <div class="flex-1"><label>Global SL ($ PNL)</label><input type="number" step="0.01" id="e_globalStopLossPnl" value="\${masterSettings.globalStopLossPnl !== undefined ? masterSettings.globalStopLossPnl : 0}"></div>
+                            <div class="flex-1"><label>Smart Offset Target V1 ($)</label><input type="number" step="0.0001" id="e_smartOffsetNetProfit" value="\${masterSettings.smartOffsetNetProfit !== undefined ? masterSettings.smartOffsetNetProfit : 0}"></div>
+                            <div class="flex-1"><label>Global SL ($ PNL)</label><input type="number" step="0.0001" id="e_globalStopLossPnl" value="\${masterSettings.globalStopLossPnl !== undefined ? masterSettings.globalStopLossPnl : 0}"></div>
                         </div>
                         <div class="flex-row" style="margin-bottom: 12px;">
-                            <div class="flex-1"><label>Rev Pair Target ($)</label><input type="number" step="0.01" id="e_revPairTarget" value="\${masterSettings.revPairTarget !== undefined ? masterSettings.revPairTarget : 0}"></div>
-                            <div class="flex-1"><label>Cross Rev Target ($)</label><input type="number" step="0.01" id="e_crossRevPnlTarget" value="\${masterSettings.crossRevPnlTarget !== undefined ? masterSettings.crossRevPnlTarget : 0}"></div>
+                            <div class="flex-1"><label>Rev Pair Target ($)</label><input type="number" step="0.0001" id="e_revPairTarget" value="\${masterSettings.revPairTarget !== undefined ? masterSettings.revPairTarget : 0}"></div>
+                            <div class="flex-1"><label>Cross Rev Target ($)</label><input type="number" step="0.0001" id="e_crossRevPnlTarget" value="\${masterSettings.crossRevPnlTarget !== undefined ? masterSettings.crossRevPnlTarget : 0}"></div>
                         </div>
                         <div class="flex-row" style="margin-bottom: 12px;">
                             <div class="flex-1"><label>Harvest Cooldown (s)</label><input type="number" step="1" id="e_v1CooldownSeconds" value="\${masterSettings.v1CooldownSeconds !== undefined ? masterSettings.v1CooldownSeconds : 60}"></div>
@@ -1788,7 +1793,9 @@ app.get('/', (req, res) => {
                             if (cs.contracts > 0 && (!cs.lockUntil || Date.now() >= cs.lockUntil)) {
                                 totalTrading++; const pnlNum = parseFloat(cs.unrealizedPnl) || 0;
                                 if (cs.currentRoi > 0) totalAboveZero++;
-                                globalUnrealized += pnlNum; activeCandidates.push({ symbol: sym, pnl: pnlNum });
+                                globalUnrealized += pnlNum; 
+                                // Fix: Added profileId explicitly here so deduplication matches the backend perfectly
+                                activeCandidates.push({ profileId: pid, symbol: sym, pnl: pnlNum });
                                 globalMargin += parseFloat(cs.margin) || 0;
                                 if (cs.activeSide === 'long') activeLongCount++;
                                 else if (cs.activeSide === 'short') activeShortCount++;
@@ -1890,13 +1897,14 @@ app.get('/', (req, res) => {
                         let dynamicInfoHtml = '<div class="stat-box" style="margin-bottom:16px; background:#E3F2FD; border-color:#90CAF9; color:var(--primary);"><div class="flex-row" style="justify-content: space-between; margin-bottom: 8px;"><div><span class="material-symbols-outlined" style="vertical-align:middle;">my_location</span> Target: $' + targetV1.toFixed(4) + '</div></div><div style="margin-top: 10px; padding-top: 10px; border-top: 1px dashed var(--divider); font-size: 1.1em;">Live Status: ' + topStatusMessage + '</div></div>';
                         document.getElementById('liveOffsetsContainer').innerHTML = dynamicInfoHtml + liveHtml;
                         
-                        // Deduplicate UI coins for accurate top bar tracking
+                        // Fixed: Deduplicate UI coins correctly across multiple profiles
                         let uniqueCoinsToCloseUI = [];
                         let seenSymbolsUI = new Set();
                         let trueCrossNetUI = 0;
                         for (let c of crossCoinsToCloseUI) {
-                            if (!seenSymbolsUI.has(c.symbol)) {
-                                seenSymbolsUI.add(c.symbol);
+                            let uniqueKey = c.profileId + '_' + c.symbol;
+                            if (!seenSymbolsUI.has(uniqueKey)) {
+                                seenSymbolsUI.add(uniqueKey);
                                 uniqueCoinsToCloseUI.push(c);
                                 trueCrossNetUI += c.pnl;
                             }
@@ -1908,7 +1916,7 @@ app.get('/', (req, res) => {
                             topCrossEl.innerText = (trueCrossNetUI >= 0 ? '+$' : '-$') + Math.abs(trueCrossNetUI).toFixed(4);
                         }
                         if (topCrossTargetEl) {
-                            topCrossTargetEl.innerText = globalSet.crossRevPnlTarget > 0 ? '(Target: $' + globalSet.crossRevPnlTarget.toFixed(2) + ')' : '(Off)';
+                            topCrossTargetEl.innerText = globalSet.crossRevPnlTarget > 0 ? '(Target: $' + globalSet.crossRevPnlTarget.toFixed(4) + ')' : '(Off)';
                         }
                     }
                 } else if (document.getElementById('offset-tab').style.display === 'block') {
@@ -1919,7 +1927,7 @@ app.get('/', (req, res) => {
 
                 // UPDATE PROGRESS BARS
                 const pbV1Target = document.getElementById('pb-v1-target'); const pbV1Text = document.getElementById('pb-v1-text'); const pbV1Bar = document.getElementById('pb-v1-bar');
-                pbV1Target.innerText = targetV1.toFixed(2);
+                pbV1Target.innerText = targetV1.toFixed(4);
                 if (targetV1 > 0) {
                     let pct = Math.max(0, Math.min(100, (peakAccumulation / targetV1) * 100));
                     pbV1Bar.style.width = pct + '%';
