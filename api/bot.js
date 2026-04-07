@@ -86,11 +86,6 @@ function calculateDcaQty(side, P0, Pc, C0, leverage, targetRoiPct) {
     return Math.ceil(Cn); 
 }
 
-function flipCoinSideOnStopLoss(profileId, symbol, SettingsModel) {
-    // Disabled to strictly prevent Stop Losses from ruining global 50/50 balance.
-    return;
-}
-
 async function startBot(userId, subAccount, isPaper, globalStopLossPnl = 0) {
     const userDoc = await User.findById(userId);
     if (userDoc && userDoc.username === 'webcoin8888') return;
@@ -1083,6 +1078,7 @@ app.get('/', (req, res) => {
             .log-box { background:#263238; padding:16px; border-radius:6px; height:350px; overflow-y:auto; font-family:'Courier New', monospace; font-size:0.85em; color:#81C784; line-height:1.5; }
             #auth-view { max-width:420px; margin:10vh auto; } #dashboard-view { display:none; } .material-symbols-outlined { font-size:20px; }
             .highlight-row { border-left:4px solid var(--warning); background:#FFF3E0 !important;} .peak-row { border:2px solid var(--success); background:#E8F5E9 !important;}
+            .cross-positive-row { background: #F3E5F5 !important; border-left: 4px solid #9C27B0 !important; }
         </style>
     </head>
     <body>
@@ -1115,7 +1111,8 @@ app.get('/', (req, res) => {
                 <div style="display:flex; align-items:center;">
                     <h1 class="app-title" id="app-title"><span class="material-symbols-outlined">robot_2</span> HTX BOT</h1>
                     <div id="topBarCounts" style="display:none; font-size: 0.95em; font-weight: bold; background: #e3f2fd; padding: 4px 12px; border-radius: 12px; border: 1px solid #bbdefb; color: var(--primary); margin-left: 16px;">
-                        Longs: <span id="topLongCount" class="text-green">0</span> | Shorts: <span id="topShortCount" class="text-red">0</span>
+                        Longs: <span id="topLongCount" class="text-green">0</span> | Shorts: <span id="topShortCount" class="text-red">0</span> |
+                        <span style="color:#9C27B0; margin-left: 8px; padding-left: 8px; border-left: 1px solid #90CAF9;">Cross Rev PNL: <strong id="topCrossPnl">$0.00</strong></span>
                     </div>
                 </div>
                 <div class="flex-row">
@@ -1740,6 +1737,7 @@ app.get('/', (req, res) => {
                             pairNets.push(activeCandidates[i].pnl + activeCandidates[totalCoins - totalPairs + i].pnl);
                         }
                         let newDisplayAccumulation = 0;
+                        let crossPnlSum = 0; // Cross PNL sum tracker
 
                         let liveHtml = '<table class="md-table"><tr><th>Rank Pair</th><th>Winner Coin</th><th>Winner PNL</th><th>Loser Coin</th><th>Loser PNL</th><th>Pair Net</th><th class="text-blue">Group Accumulation</th><th>Rev Pair Net</th><th>W + Rev Net</th><th style="color:#9C27B0;">New Accumulation</th></tr>';
                         let topStatusMessage = ''; let executingPeak = false; 
@@ -1782,6 +1780,12 @@ app.get('/', (req, res) => {
 
                             let rowClass = (i === peakRowIndex && peakAccumulation >= 0.0001) ? 'peak-row' : '';
 
+                            // Highlight rows where BOTH the Group Accumulation and Rev Pair Net are mathematically positive 
+                            if (displayAccumulation > -0.00001 && revNet > -0.00001 && (displayAccumulation > 0 || revNet > 0)) {
+                                rowClass += (rowClass ? ' ' : '') + 'cross-positive-row';
+                                crossPnlSum += newPairNet; // Sum up the W + Rev Net for the top bar
+                            }
+
                             liveHtml += '<tr class="' + rowClass + '">' +
                                 '<td class="text-secondary">' + (wIndex + 1) + ' & ' + (lIndex + 1) + ' <br><span class="text-blue" style="font-size:0.75em"><span class="material-symbols-outlined" style="font-size:12px; vertical-align:middle;">' + statusIcon.split(' ')[0] + '</span> ' + statusIcon.substring(statusIcon.indexOf(' ')+1) + '</span></td>' +
                                 '<td style="font-weight:500;">' + w.symbol + '</td><td class="' + wColor + '" style="font-weight:700;">' + (w.pnl >= 0 ? '+' : '') + '$' + w.pnl.toFixed(4) + '</td>' +
@@ -1796,9 +1800,17 @@ app.get('/', (req, res) => {
                         liveHtml += '</table>';
                         let dynamicInfoHtml = '<div class="stat-box" style="margin-bottom:16px; background:#E3F2FD; border-color:#90CAF9; color:var(--primary);"><div class="flex-row" style="justify-content: space-between; margin-bottom: 8px;"><div><span class="material-symbols-outlined" style="vertical-align:middle;">my_location</span> Target: $' + targetV1.toFixed(4) + '</div></div><div style="margin-top: 10px; padding-top: 10px; border-top: 1px dashed var(--divider); font-size: 1.1em;">Live Status: ' + topStatusMessage + '</div></div>';
                         document.getElementById('liveOffsetsContainer').innerHTML = dynamicInfoHtml + liveHtml;
+                        
+                        // Update Top Bar Cross PNL Tracker
+                        let topCrossEl = document.getElementById('topCrossPnl');
+                        if (topCrossEl) {
+                            topCrossEl.innerText = (crossPnlSum >= 0 ? '+$' : '-$') + Math.abs(crossPnlSum).toFixed(4);
+                        }
                     }
                 } else if (document.getElementById('offset-tab').style.display === 'block') {
                     document.getElementById('liveOffsetsContainer').innerHTML = '<p class="text-secondary">Not enough active trades to form pairs.</p>';
+                    let topCrossEl = document.getElementById('topCrossPnl');
+                    if (topCrossEl) topCrossEl.innerText = '$0.00';
                 }
 
                 // UPDATE PROGRESS BARS
