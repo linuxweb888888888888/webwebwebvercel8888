@@ -1815,6 +1815,7 @@ app.get('/', (req, res) => {
                                 totalTrading++; const pnlNum = parseFloat(cs.unrealizedPnl) || 0;
                                 if (cs.currentRoi > 0) totalAboveZero++;
                                 globalUnrealized += pnlNum; 
+                                // Fix: Added profileId explicitly here so deduplication matches the backend perfectly
                                 activeCandidates.push({ profileId: pid, symbol: sym, pnl: pnlNum });
                                 globalMargin += parseFloat(cs.margin) || 0;
                                 if (cs.activeSide === 'long') activeLongCount++;
@@ -1989,7 +1990,9 @@ app.get('/', (req, res) => {
                         let c5Min = v5Min >= 0 ? 'text-green' : 'text-red';
 
                         if ((currP.time - peakHistory[0].time) > 4000) {
-                            topPeakVelEl.innerHTML = `<span class="${cSec}">${formatNet(vSec)}/s</span> | <span class="${cMin}">${formatNet(vMin)}/m</span> | <span class="${c5Min}">${formatNet(v5Min)}/5m</span>`;
+                            topPeakVelEl.innerHTML = '<span class="' + cSec + '">' + formatNet(vSec) + '/s</span> | ' +
+                                                     '<span class="' + cMin + '">' + formatNet(vMin) + '/m</span> | ' +
+                                                     '<span class="' + c5Min + '">' + formatNet(v5Min) + '/5m</span>';
                         }
                     } else {
                         topPeakVelEl.innerHTML = '<span class="text-secondary">Calculating...</span>';
