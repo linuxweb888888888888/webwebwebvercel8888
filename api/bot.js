@@ -87,22 +87,8 @@ function calculateDcaQty(side, P0, Pc, C0, leverage, targetRoiPct) {
 }
 
 function flipCoinSideOnStopLoss(profileId, symbol, SettingsModel) {
-    // DISABLED: Stop Loss flipping was fighting the Auto-Balancer and causing massive long/short imbalances.
+    // Disabled to strictly prevent Stop Losses from ruining global 50/50 balance.
     return;
-    let bData = activeBots.get(profileId);
-    if (!bData) return;
-    let coinObj = bData.settings.coins.find(c => c.symbol === symbol);
-    if (!coinObj) return;
-    
-    const oldSide = coinObj.side || bData.settings.side || 'long';
-    const newSide = oldSide === 'long' ? 'short' : 'long';
-    coinObj.side = newSide;
-    
-    logForProfile(profileId, `🔄 Stop Loss Hit: Flipped ${symbol} direction from ${oldSide.toUpperCase()} to ${newSide.toUpperCase()}`);
-    SettingsModel.updateOne(
-        { "subAccounts._id": bData.settings._id },
-        { $set: { "subAccounts.$.coins": bData.settings.coins } }
-    ).catch(()=>{});
 }
 
 async function startBot(userId, subAccount, isPaper, globalStopLossPnl = 0) {
@@ -259,28 +245,6 @@ async function startBot(userId, subAccount, isPaper, globalStopLossPnl = 0) {
 
                         if (isPaper) { cState.contracts = 0; cState.unrealizedPnl = 0; cState.currentRoi = 0; cState.avgEntry = 0; }
                         SettingsModel.updateOne({ "subAccounts._id": currentSettings._id }, { $set: { "subAccounts.$.realizedPnl": currentSettings.realizedPnl } }).catch(()=>{});
-                        
-                        let longsCount = 0; let shortsCount = 0;
-                        currentSettings.coins.forEach(c => {
-                            if (c.botActive) {
-                                let s = c.side || currentSettings.side || 'long';
-                                if (s === 'long') longsCount++; else shortsCount++;
-                            }
-                        });
-                        let flippedForBalance = false;
-                        if (activeSide === 'long' && longsCount > shortsCount) {
-                            let coinObj = currentSettings.coins.find(c => c.symbol === coin.symbol);
-                            if (coinObj) { coinObj.side = 'short'; flippedForBalance = true; logForProfile(profileId, `⚖️ Auto-Balance: Flipped ${coin.symbol} to SHORT.`); }
-                        } else if (activeSide === 'short' && shortsCount > longsCount) {
-                            let coinObj = currentSettings.coins.find(c => c.symbol === coin.symbol);
-                            if (coinObj) { coinObj.side = 'long'; flippedForBalance = true; logForProfile(profileId, `⚖️ Auto-Balance: Flipped ${coin.symbol} to LONG.`); }
-                        }
-                        
-                        if (flippedForBalance) {
-                            SettingsModel.updateOne({ "subAccounts._id": currentSettings._id }, { $set: { "subAccounts.$.coins": currentSettings.coins } }).catch(()=>{});
-                        } else if (isStopLossPct || isStopLossPnl) {
-                            // flipCoinSideOnStopLoss(profileId, coin.symbol, SettingsModel); // Disabled to prevent runaway imbalances
-                        }
                         continue; 
                     }
 
@@ -493,6 +457,62 @@ const executeGlobalProfitMonitor = async () => {
                     }
                 }
             }
+
+            // --- INSTANT GLOBAL 50/50 BALANCE ENFORCER ---
+            let globalLongs = []; let globalShorts = [];
+            for (let [pId, bData] of activeBots.entries()) {
+                if (bData.userId !== dbUserId) continue;
+                bData.settings.coins.forEach(c => {
+                    if (c.botActive) {
+                        let actualSide = c.side || bData.settings.side || 'long';
+                        if (actualSide === 'long') globalLongs.push({ pId, coin: c, bData });
+                        else globalShorts.push({ pId, coin: c, bData });
+                    }
+                });
+            }
+
+            let diff = Math.abs(globalLongs.length - globalShorts.length);
+            if (diff > 1) {
+                let numToFlip = Math.floor(diff / 2);
+                let sourceArray = globalLongs.length > globalShorts.length ? globalLongs : globalShorts;
+                let targetSide = globalLongs.length > globalShorts.length ? 'short' : 'long';
+                let oldSide = globalLongs.length > globalShorts.length ? 'long' : 'short';
+
+                // Sort to flip the ones with the most profitable positions first to lock in profit
+                sourceArray.sort((a, b) => {
+                    let pnlA = a.bData.state.coinStates[a.coin.symbol]?.unrealizedPnl || 0;
+                    let pnlB = b.bData.state.coinStates[b.coin.symbol]?.unrealizedPnl || 0;
+                    return pnlB - pnlA; 
+                });
+
+                for (let i = 0; i < numToFlip; i++) {
+                    let item = sourceArray[i];
+                    item.coin.side = targetSide; // Flip setting instantly
+                    
+                    let cState = item.bData.state.coinStates[item.coin.symbol];
+                    if (cState && cState.contracts > 0 && cState.activeSide === oldSide) {
+                        logForProfile(item.pId, `⚖️ INSTANT BALANCE ENFORCED: Flipping ${item.coin.symbol} to ${targetSide.toUpperCase()}. Force closing ${oldSide.toUpperCase()} position.`);
+                        try {
+                            if (!item.bData.isPaper) {
+                                const closeSide = oldSide === 'long' ? 'sell' : 'buy';
+                                await item.bData.exchange.createOrder(item.coin.symbol, 'market', closeSide, cState.contracts, undefined, { offset: 'close' });
+                            }
+                            OffsetModel.create({ userId: dbUserId, symbol: item.coin.symbol, winnerSymbol: item.coin.symbol, reason: `Auto-Balance Force Close (${oldSide} -> ${targetSide})`, netProfit: cState.unrealizedPnl }).catch(()=>{});
+                            item.bData.settings.realizedPnl = (item.bData.settings.realizedPnl || 0) + cState.unrealizedPnl;
+                            
+                            if (item.bData.isPaper) { cState.contracts = 0; cState.unrealizedPnl = 0; cState.currentRoi = 0; cState.avgEntry = 0; }
+                            cState.lockUntil = Date.now() + 5000;
+                        } catch (e) { console.error(`Balance Close Error: ${e.message}`); }
+                    }
+                }
+                
+                let freshSubAccounts = userSetting.subAccounts.map(dbSub => {
+                    let memBot = activeBots.get(dbSub._id.toString());
+                    return memBot ? memBot.settings : dbSub;
+                });
+                dbUpdates.subAccounts = freshSubAccounts;
+            }
+            // --- END INSTANT GLOBAL BALANCE ENFORCER ---
 
             if (Object.keys(dbUpdates).length > 0) {
                 await SettingsModel.updateOne({ userId: dbUserId }, { $set: dbUpdates }).catch(console.error);
